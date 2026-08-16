@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
 // registryWithout собирает набор инструментов без перечисленных имён.

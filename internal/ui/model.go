@@ -11,17 +11,17 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/agent"
-	"github.com/itpro/ollchat/internal/chatlog"
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/ctxmeter"
-	"github.com/itpro/ollchat/internal/kb"
-	"github.com/itpro/ollchat/internal/kbembed"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/session"
-	"github.com/itpro/ollchat/internal/tools"
-	"github.com/itpro/ollchat/internal/vram"
+	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/session"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/vram"
 )
 
 // Model — состояние TUI.

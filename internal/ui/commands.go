@@ -9,13 +9,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/chatlog"
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/ctxmeter"
-	"github.com/itpro/ollchat/internal/document"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/document"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
 // helpText — справка по командам, показывается по /help.

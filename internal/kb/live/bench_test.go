@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // TestEmbedThroughput меряет, во что упирается векторизация: в размер пачки

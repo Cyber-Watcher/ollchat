@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/itpro/ollchat/internal/document"
+	"github.com/Cyber-Watcher/ollchat/internal/document"
 )
 
 // Разбиение книги на куски.

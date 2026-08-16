@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
 func hangTestOptions(t *testing.T) (Options, string) {

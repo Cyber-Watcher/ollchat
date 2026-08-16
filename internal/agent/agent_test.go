@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/session"
-	"github.com/itpro/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/session"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
 // fakeServer изображает Ollama: на первые len(toolCmds) запросов отвечает

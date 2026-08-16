@@ -7,9 +7,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/chatlog"
-	"github.com/itpro/ollchat/internal/document"
-	"github.com/itpro/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/document"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
 // Рисунки из документов PDF.

@@ -10,10 +10,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/agent"
-	"github.com/itpro/ollchat/internal/chatlog"
-	"github.com/itpro/ollchat/internal/ctxmeter"
-	"github.com/itpro/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // Update обрабатывает события Bubble Tea.

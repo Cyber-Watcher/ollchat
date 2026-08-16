@@ -13,8 +13,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/itpro/ollchat/internal/epub"
-	"github.com/itpro/ollchat/internal/pdf"
+	"github.com/Cyber-Watcher/ollchat/internal/epub"
+	"github.com/Cyber-Watcher/ollchat/internal/pdf"
 )
 
 // Kind — формат документа.

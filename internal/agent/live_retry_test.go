@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // Диалог, на котором сбой разбора у nemotron-3-super воспроизводится чаще всего:

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
 // TestLiveWebSearch — настоящий поиск через свой SearXNG.

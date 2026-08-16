@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 )
 
 // Окно контекста можно менять посреди сеанса: Ollama берёт num_ctx из каждого

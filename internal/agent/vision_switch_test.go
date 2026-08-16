@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/agent"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/session"
+	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/session"
 )
 
 // TestLiveModelSwitchAfterImage воспроизводит живой сбой: в диалоге есть

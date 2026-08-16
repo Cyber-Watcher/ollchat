@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itpro/ollchat/internal/clipboard"
-	"github.com/itpro/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/clipboard"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // pngBytes рисует настоящий PNG заданного размера: разбор заголовка должен

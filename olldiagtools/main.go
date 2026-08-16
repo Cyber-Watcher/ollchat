@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/itpro/ollchat/internal/vram"
+	"github.com/Cyber-Watcher/ollchat/internal/vram"
 )
 
 func main() {

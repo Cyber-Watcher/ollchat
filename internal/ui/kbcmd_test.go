@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // kbTestModel собирает модель с базой знаний и папкой книг внутри временного

@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/agent"
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/kb"
-	"github.com/itpro/ollchat/internal/kbembed"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/session"
-	"github.com/itpro/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/session"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
 // TestLiveKBAnswerIsExplanation — ответ по книгам должен быть объяснением

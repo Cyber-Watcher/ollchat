@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
 type httpFetchTool struct{ opts Options }
@@ -74,7 +74,7 @@ func fetchURL(ctx context.Context, target string, maxBytes int, opts Options) (s
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "ollchat/1.0 (+https://github.com/itpro/ollchat)")
+	req.Header.Set("User-Agent", "ollchat/1.0 (+https://github.com/Cyber-Watcher/ollchat)")
 	req.Header.Set("Accept", "text/html,application/json,text/plain,*/*")
 
 	client := &http.Client{Timeout: 60 * time.Second}

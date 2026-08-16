@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
 // searxStub изображает SearXNG: отдаёт то, что ему велено.

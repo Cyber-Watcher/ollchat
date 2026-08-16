@@ -7,7 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/itpro/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
 )
 
 // Курсор поля ввода рисует сам терминал: Bubble Tea сообщает ему координату,

@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/agent"
 )
 
 // stuckTurn приводит модель в состояние «идёт генерация, и она зависла»:

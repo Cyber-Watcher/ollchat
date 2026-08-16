@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/itpro/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // Conversation — история диалога с моделью.

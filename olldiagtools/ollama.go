@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/itpro/ollchat/internal/vram"
+	"github.com/Cyber-Watcher/ollchat/internal/vram"
 )
 
 // Обращения к Ollama и к видеокарте. Своего клиента здесь ровно столько,

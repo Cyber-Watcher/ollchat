@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/itpro/ollchat/internal/document"
+	"github.com/Cyber-Watcher/ollchat/internal/document"
 )
 
 // Индексация: от папки с книгами до готового сегмента.

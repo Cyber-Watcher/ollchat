@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itpro/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
 )
 
 // Запрос к серверу живёт до 30 секунд, а переключить сервер можно в любой

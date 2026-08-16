@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 )
 
 // pickerKind — что именно выбирается.

@@ -8,9 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/vram"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/vram"
 )
 
 // Команда /calc отвечает на вопрос «какое окно контекста дать каждому из N

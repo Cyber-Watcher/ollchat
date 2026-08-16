@@ -8,7 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // Долгая фоновая задача.

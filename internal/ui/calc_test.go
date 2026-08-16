@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/vram"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/vram"
 )
 
 // Числа профиля взяты с настоящего стенда: A100 80 ГиБ, qwen3.5:122b.

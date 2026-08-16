@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/kb"
-	"github.com/itpro/ollchat/internal/kbembed"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 )
 
 // Живые проверки работают с настоящей базой пользователя, поэтому в обычный

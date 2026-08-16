@@ -1,14 +1,17 @@
 name: Release
 
-# Выпуск делается из тега. Тег можно поставить руками:
+# Выпускается каждый коммит, попавший в main: версия выводится из коммитов после
+# последнего тега, тег ставится здесь же, архивы прикладываются к Release.
+#
+# Тег, поставленный руками, тоже выпускается — это запасной ход, когда версию
+# надо выбрать осознанно:
 #
 #   git tag -a v1.2.0 -m "..." && git push origin v1.2.0
 #
-# либо запустить этот процесс кнопкой и указать версию — тогда тег будет создан
-# здесь же. Пустое поле версии означает «подними младшую цифру у последнего
-# тега»: так выпуск не требует помнить, какая версия была прошлой.
+# Чтобы влить в main без выпуска, добавьте [skip release] в сообщение коммита.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -84,15 +87,42 @@ jobs:
             exit 0
           fi
 
+          # Размер шага определяют Conventional Commits: ломающая правка поднимает
+          # старшую цифру, новая возможность — среднюю, всё остальное — младшую.
+          subjects=$(git log --format='%s%n%b' "${previous}..HEAD")
+          bump=patch
+          if grep -qE '^[a-z]+(\([^)]*\))?!:|BREAKING[ -]CHANGE' <<<"$subjects"; then
+            bump=major
+          elif grep -qE '^feat(\([^)]*\))?:' <<<"$subjects"; then
+            bump=minor
+          fi
+
           # Тег, поставленный руками, бывает вида v1.2, а не v1.2.0.
           IFS=. read -r major minor patch <<<"${previous#v}"
           minor=${minor:-0}; patch=${patch:-0}
-          echo "version=v${major}.${minor}.$((patch + 1))" >>"$GITHUB_OUTPUT"
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          echo "version=v${major}.${minor}.${patch}" >>"$GITHUB_OUTPUT"
           echo "previous=${previous}" >>"$GITHUB_OUTPUT"
           echo "tag_exists=false" >>"$GITHUB_OUTPUT"
+          echo "выпуск ${previous} → v${major}.${minor}.${patch} (${bump})"
+
+      - name: пропустить, если коммит просит
+        id: gate
+        run: |
+          if git log -1 --format='%B' | grep -qF '[skip release]'; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "в сообщении коммита стоит [skip release]"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
 
       - name: создать тег
-        if: steps.version.outputs.tag_exists == 'false'
+        if: steps.gate.outputs.skip == 'false' && steps.version.outputs.tag_exists == 'false'
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
@@ -109,11 +139,13 @@ jobs:
           git push origin "${version}"
 
       - name: собрать архивы выпуска
+        if: steps.gate.outputs.skip == 'false'
         run: ./scripts/build-dist.sh
         env:
           VERSION: ${{ steps.version.outputs.version }}
 
       - name: написать описание выпуска
+        if: steps.gate.outputs.skip == 'false'
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
@@ -161,6 +193,7 @@ jobs:
           cat notes.md
 
       - name: опубликовать
+        if: steps.gate.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

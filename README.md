@@ -1,5 +1,10 @@
 # ollchat
 
+[![CI](https://github.com/Cyber-Watcher/ollchat/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Cyber-Watcher/ollchat/actions/workflows/ci.yml)
+[![Release](https://github.com/Cyber-Watcher/ollchat/actions/workflows/release.yml/badge.svg)](https://github.com/Cyber-Watcher/ollchat/actions/workflows/release.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Cyber-Watcher/ollchat.svg)](https://pkg.go.dev/github.com/Cyber-Watcher/ollchat)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.txt)
+
 TUI-клиент и агент для серверов Ollama на Go. Один бинарь плюс файл настроек.
 Интерфейс построен по образцу Claude Code CLI: лента диалога, подтверждение опасных действий,
 индикатор заполнения контекстного окна, слэш-команды.

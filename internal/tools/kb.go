@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/itpro/ollchat/internal/kb"
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
 // Поиск по личной библиотеке книг.

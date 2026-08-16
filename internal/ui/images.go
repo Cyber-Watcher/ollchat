@@ -9,7 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/clipboard"
+	"github.com/Cyber-Watcher/ollchat/internal/clipboard"
 )
 
 // Изображения прикладываются к вопросу по образцу Claude Code: вставка из

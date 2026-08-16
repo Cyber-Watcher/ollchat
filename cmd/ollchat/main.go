@@ -9,14 +9,14 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/chatlog"
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/kb"
-	"github.com/itpro/ollchat/internal/kbembed"
-	"github.com/itpro/ollchat/internal/permissions"
-	"github.com/itpro/ollchat/internal/session"
-	"github.com/itpro/ollchat/internal/tools"
-	"github.com/itpro/ollchat/internal/ui"
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/session"
+	"github.com/Cyber-Watcher/ollchat/internal/tools"
+	"github.com/Cyber-Watcher/ollchat/internal/ui"
 )
 
 // version — версия приложения, задаётся при сборке через -ldflags.

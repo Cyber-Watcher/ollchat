@@ -1,4 +1,4 @@
-module github.com/itpro/ollchat
+module github.com/Cyber-Watcher/ollchat
 
 go 1.26.5
 

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/itpro/ollchat/internal/config"
-	"github.com/itpro/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // inFlight — потолок одновременных запросов к серверу эмбеддингов.

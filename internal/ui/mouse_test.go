@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/itpro/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/config"
 )
 
 // Выделить текст мышью можно только тогда, когда приложение не просит у

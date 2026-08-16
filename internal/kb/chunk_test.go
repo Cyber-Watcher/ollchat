@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itpro/ollchat/internal/document"
+	"github.com/Cyber-Watcher/ollchat/internal/document"
 )
 
 func page(n int, text string) document.Part {

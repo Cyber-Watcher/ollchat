@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/itpro/ollchat/internal/ollama"
-	"github.com/itpro/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
 // Поиск в сети.

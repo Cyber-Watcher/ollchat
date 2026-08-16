@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"github.com/itpro/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"os"
 	"path/filepath"
 	"strings"
