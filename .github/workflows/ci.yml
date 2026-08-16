@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Новый толчок в ту же ветку обесценивает предыдущий прогон.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  check:
+    name: проверки и сборка
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "эти файлы не прошли gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # Тесты идут с детектором гонок: у приложения фоновые задачи —
+      # индексация книг, счёт эмбеддингов, поток ответа, — и гонка в них
+      # проявляется редко и не там, где её потом ищут.
+      - name: тесты
+        run: go test -race ./...
+
+      # Сборка под все цели выпуска: пусть расхождение вылезает здесь,
+      # а не в момент выпуска.
+      - name: кросс-сборка под все системы
+        run: ./scripts/build-dist.sh
+        env:
+          VERSION: ci-${{ github.sha }}
+
+# Живые проверки сюда намеренно не входят: им нужен сервер Ollama с моделями,
+# своя SearXNG и собранная база знаний по книгам. Они запускаются вручную:
+#
+#   OLLCHAT_TEST_SERVER=http://СЕРВЕР:11434 OLLCHAT_TEST_MODEL=МОДЕЛЬ \
+#     go test ./internal/agent/ -v -timeout 30m
+#   OLLCHAT_KB_LIVE=1 go test ./internal/kb/live/ -v
+#   OLLCHAT_SEARX_URL=http://СЕРВЕР:8888 go test ./internal/tools/live/ -v
