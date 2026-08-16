@@ -147,18 +147,15 @@ func (l *Logger) WriteFromAt(ts time.Time, kind, model, body string) error {
 	return l.writeEntry(ts, kind, model, body)
 }
 
-func (l *Logger) writeEntry(ts time.Time, kind, model, body string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if !l.enabled {
-		return nil
-	}
-	if err := l.openLocked(ts); err != nil {
-		l.lastErr = err
-		return err
-	}
-
+// FormatEntry собирает запись журнала ровно в том виде, в каком она ложится
+// в файл: заголовок с отметкой времени и, если оно задано, названием модели,
+// пустая строка, тело и две пустые строки-разделителя после него.
+//
+// Вынесено из writeEntry, чтобы тот же формат можно было собрать снаружи:
+// копирование ответа в буфер обмена (Shift+F5) отдаёт пользователю текст,
+// неотличимый от журнала. Второй реализации этого формата быть не должно —
+// они разъедутся при первой же правке.
+func FormatEntry(ts time.Time, kind, model, body string) string {
 	var b strings.Builder
 	b.WriteString(ts.Format(stampLayout))
 	if model = strings.TrimSpace(model); model != "" {
@@ -171,8 +168,22 @@ func (l *Logger) writeEntry(ts time.Time, kind, model, body string) error {
 	b.WriteString("\n\n")
 	b.WriteString(strings.TrimRight(body, "\n"))
 	b.WriteString("\n\n\n")
+	return b.String()
+}
 
-	if _, err := l.file.WriteString(b.String()); err != nil {
+func (l *Logger) writeEntry(ts time.Time, kind, model, body string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.enabled {
+		return nil
+	}
+	if err := l.openLocked(ts); err != nil {
+		l.lastErr = err
+		return err
+	}
+
+	if _, err := l.file.WriteString(FormatEntry(ts, kind, model, body)); err != nil {
 		l.lastErr = err
 		return err
 	}

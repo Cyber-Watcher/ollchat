@@ -339,13 +339,18 @@ func (m *Model) resumeSession(id string) tea.Cmd {
 		"восстановлена сессия от %s (%s, %s), сообщений: %d",
 		rec.SavedAt.Format("2006.01.02 15:04"), rec.Server, rec.Model, len(rec.Messages))})
 
+	// Время у восстановленных блоков — момент сохранения сессии: поминутных
+	// отметок у сообщений в записи нет, а копирование по Shift+F5 собирает
+	// запись в формате журнала и без времени обошлось бы текущим, что для
+	// вчерашнего диалога хуже неточного, но настоящего.
 	for _, msg := range rec.Messages {
 		switch msg.Role {
 		case "user":
-			m.addBlock(block{kind: blockUser, text: msg.Content})
+			m.addBlock(block{kind: blockUser, text: msg.Content, at: rec.SavedAt})
 		case "assistant":
 			if strings.TrimSpace(msg.Content) != "" {
-				m.addBlock(block{kind: blockAssistant, text: msg.Content})
+				m.addBlock(block{kind: blockAssistant, text: msg.Content,
+					at: rec.SavedAt, model: rec.Model})
 			}
 			for _, tc := range msg.ToolCalls {
 				m.addBlock(block{kind: blockTool, status: "ok",

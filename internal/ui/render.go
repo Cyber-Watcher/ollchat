@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"strings"
+	"time"
 
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
@@ -28,6 +29,12 @@ type block struct {
 	title   string // заголовок для инструментов
 	status  string // ok | fail | skip — для инструментов
 	preview string // вывод инструмента, показывается свёрнутым
+
+	// at и model нужны копированию в буфер обмена (Shift+F5): оно собирает
+	// запись в формате журнала, а у прокрученного вверх старого ответа взять
+	// отметку времени и название модели больше неоткуда.
+	at    time.Time
+	model string
 }
 
 // renderer превращает блоки в текст для области истории.

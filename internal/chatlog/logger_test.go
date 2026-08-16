@@ -149,3 +149,40 @@ func TestDisabledLoggerWritesNothing(t *testing.T) {
 		t.Error("выключенный журнал не должен создавать файл")
 	}
 }
+
+// TestFormatEntryMatchesFile закрепляет, что вынесенное наружу форматирование
+// даёт ровно то же, что ложится в файл: по этой функции собирается текст для
+// буфера обмена, и разойтись с журналом она не имеет права.
+func TestFormatEntryMatchesFile(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, "chat.md", true)
+	defer l.Close()
+
+	ts := time.Date(2026, 8, 16, 12, 35, 0, 0, time.Local)
+	if err := l.WriteFromAt(ts, KindAnswer, "qwen3.5:122b", "Горутина — это лёгкий поток."); err != nil {
+		t.Fatalf("запись ответа: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "chat.md"))
+	if err != nil {
+		t.Fatalf("чтение журнала: %v", err)
+	}
+	want := FormatEntry(ts, KindAnswer, "qwen3.5:122b", "Горутина — это лёгкий поток.")
+	if string(data) != want {
+		t.Errorf("FormatEntry разошёлся с файлом:\nфайл: %q\nфункция: %q", string(data), want)
+	}
+	if !strings.HasPrefix(want, "2026.08.16 12:35 (qwen3.5:122b) ----- Ответ\n\n") {
+		t.Errorf("заголовок записи не тот: %q", want)
+	}
+}
+
+func TestFormatEntryOmitsEmptyModel(t *testing.T) {
+	ts := time.Date(2026, 8, 16, 12, 30, 0, 0, time.Local)
+	got := FormatEntry(ts, KindQuestion, "  ", "вопрос")
+	if !strings.HasPrefix(got, "2026.08.16 12:30 ----- Вопрос\n\n") {
+		t.Errorf("пустое имя модели не должно давать скобок: %q", got)
+	}
+	if !strings.HasSuffix(got, "вопрос\n\n\n") {
+		t.Errorf("тело записи должно кончаться двумя пустыми строками: %q", got)
+	}
+}

@@ -1,9 +1,10 @@
-// Package clipboard читает изображение из системного буфера обмена.
+// Package clipboard читает изображение из системного буфера обмена и кладёт
+// в него текст.
 //
 // Своего доступа к буферу у терминального приложения нет: терминал передаёт
 // только текст, а Ctrl+V в нём — обычный управляющий символ, никакой картинки
-// с ним не приходит. Поэтому изображение забирается у графической сессии
-// внешней утилитой: wl-paste в Wayland, xclip в X11.
+// с ним не приходит. Поэтому буфер обслуживается утилитами графической сессии:
+// wl-paste и wl-copy в Wayland, xclip в X11. Запись живёт в write.go.
 package clipboard
 
 import (
@@ -129,9 +130,22 @@ func (h helper) read(ctx context.Context, mime string) ([]byte, error) {
 	return out, nil
 }
 
+// sessionKind сообщает, какая графическая сессия запущена: wayland, x11 или
+// пусто, если ни одной. Общий помощник для чтения и записи — иначе они
+// разъедутся в понимании того, где мы работаем.
+func sessionKind() string {
+	switch {
+	case os.Getenv("WAYLAND_DISPLAY") != "":
+		return "wayland"
+	case os.Getenv("DISPLAY") != "":
+		return "x11"
+	}
+	return ""
+}
+
 // detect выбирает утилиту по типу графической сессии.
 func detect() (helper, error) {
-	if os.Getenv("WAYLAND_DISPLAY") != "" {
+	if sessionKind() == "wayland" {
 		if _, err := exec.LookPath("wl-paste"); err == nil {
 			return helper{
 				name:      "wl-paste",
@@ -144,7 +158,7 @@ func detect() (helper, error) {
 		return helper{}, errors.New("сессия Wayland, но утилита wl-paste не найдена — установите wl-clipboard")
 	}
 
-	if os.Getenv("DISPLAY") != "" {
+	if sessionKind() == "x11" {
 		if _, err := exec.LookPath("xclip"); err == nil {
 			return helper{
 				name:      "xclip",

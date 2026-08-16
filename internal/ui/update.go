@@ -133,6 +133,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleImagePasted(msg)
 		return m, nil
 
+	case answerCopiedMsg:
+		return m, m.handleAnswerCopied(msg)
+
 	case noticeMsg:
 		m.addBlock(block{kind: blockNotice, text: msg.text})
 		return m, nil
@@ -371,6 +374,18 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.toggleImagePanel()
 		return m, nil
 
+	// Копирование видимого ответа в буфер обмена.
+	case "f5":
+		return m, m.copyAnswer(false)
+
+	// То же вместе с вопросом. Shift+F5 приходит под тремя разными именами:
+	// современные терминалы шлют CSI 15;2~ («shift+f5»), а часть терминалов —
+	// старую последовательность CSI 31~, которую разборщик отдаёт отдельной
+	// клавишей f17, вовсе без модификатора. Ловим все три, иначе на половине
+	// терминалов клавиша молча не работает.
+	case "shift+f5", "shift+f17", "f17":
+		return m, m.copyAnswer(true)
+
 	// Вставка изображения из буфера обмена. Через терминал картинка прийти не
 	// может — её забирает внешняя утилита, поэтому это отдельная команда,
 	// а не обычная вставка текста.
@@ -489,7 +504,9 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	case agent.EventContent:
 		m.turnAnswer.WriteString(ev.Text)
 		if m.liveIdx < 0 {
-			m.liveIdx = m.addBlock(block{kind: blockAssistant, text: ev.Text})
+			// Модель проставляем сразу, а не в конце хода: копировать ответ
+			// можно и посреди генерации.
+			m.liveIdx = m.addBlock(block{kind: blockAssistant, text: ev.Text, model: m.answeredBy})
 			// Во время потока markdown не рендерим — текст показывается как есть.
 			m.rendered[m.liveIdx] = wrap(ev.Text, m.rend.width)
 			m.refreshViewport(true)

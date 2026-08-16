@@ -122,6 +122,11 @@ type Model struct {
 	statusMsg    string
 	quitConfirm  bool
 
+	// osc52Noted — подсказка про запасной путь копирования уже показана.
+	// Второй раз за сеанс её показывать незачем: буфер обмена всё равно
+	// обслуживается тем же способом до конца работы.
+	osc52Noted bool
+
 	// База знаний по книгам. Коллекция открывается по требованию и держится
 	// открытой: у большой коллекции чтение указателей занимает секунды.
 	kbBase   *kb.Base
@@ -467,8 +472,11 @@ func (m *Model) send(text string) tea.Cmd {
 		return nil
 	}
 
-	m.addBlock(block{kind: blockUser, text: text})
-	if err := m.logger.Write(chatlog.KindQuestion, text); err != nil {
+	// Одно время на блок ленты и на запись журнала: копирование по Shift+F5
+	// собирает запись из блока, и отметки обязаны совпасть с журналом.
+	asked := time.Now()
+	m.addBlock(block{kind: blockUser, text: text, at: asked})
+	if err := m.logger.WriteAt(asked, chatlog.KindQuestion, text); err != nil {
 		m.statusMsg = "журнал: " + err.Error()
 	}
 
@@ -600,16 +608,41 @@ func (m *Model) finishTurn() {
 		m.updateBlock(m.liveIdx, b)
 	}
 
+	// Одно время на журнал и на блоки ленты, чтобы копия из буфера обмена
+	// и запись в журнале были помечены одинаково.
+	answered := time.Now()
+	m.stampTurn(answered)
+
 	// Ответ и рассуждения помечаем моделью: в одном журнале могут соседствовать
 	// ответы разных моделей и серверов.
 	if m.cfg.Log.LogThinking && strings.TrimSpace(m.turnThink.String()) != "" {
-		_ = m.logger.WriteFrom(chatlog.KindThinking, m.answeredBy, m.turnThink.String())
+		_ = m.logger.WriteFromAt(answered, chatlog.KindThinking, m.answeredBy, m.turnThink.String())
 	}
 	if strings.TrimSpace(m.turnAnswer.String()) != "" {
-		if err := m.logger.WriteFrom(chatlog.KindAnswer, m.answeredBy, m.turnAnswer.String()); err != nil {
+		if err := m.logger.WriteFromAt(answered, chatlog.KindAnswer, m.answeredBy, m.turnAnswer.String()); err != nil {
 			m.statusMsg = "журнал: " + err.Error()
 		}
 	}
 	m.liveIdx = -1
 	m.thinkIdx = -1
+}
+
+// stampTurn помечает блоки ответа завершившегося хода временем и моделью.
+//
+// Границу хода ищем от конца ленты до ближайшего вопроса, а не по запомненному
+// индексу: dropLiveBlocks физически выбрасывает блоки из среза, и любой
+// сохранённый снаружи индекс после неудачной попытки указывает не туда.
+func (m *Model) stampTurn(ts time.Time) {
+	from := lastUserBlock(m.blocks) + 1
+	for i := from; i < len(m.blocks); i++ {
+		if m.blocks[i].kind != blockAssistant {
+			continue
+		}
+		if m.blocks[i].at.IsZero() {
+			m.blocks[i].at = ts
+		}
+		if m.blocks[i].model == "" {
+			m.blocks[i].model = m.answeredBy
+		}
+	}
 }

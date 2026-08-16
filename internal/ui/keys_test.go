@@ -13,3 +13,10 @@ func pressKey(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code} }
 func pressCtrl(code rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: code, Mod: tea.ModCtrl}
 }
+
+// pressMod — нажатие клавиши с произвольным набором модификаторов. Нужно для
+// функциональных клавиш: Shift+F5 приходит и как shift+f5, и как отдельная
+// клавиша f17 — в зависимости от того, какую последовательность шлёт терминал.
+func pressMod(code rune, mod tea.KeyMod) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: mod}
+}
