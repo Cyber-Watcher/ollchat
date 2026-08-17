@@ -26,6 +26,17 @@ import (
 // ErrNoImage означает, что буфер обмена существует, но картинки в нём нет.
 var ErrNoImage = errors.New("в буфере обмена нет изображения")
 
+// ErrNoSession означает, что графической сессии нет вовсе. Обычно это работа
+// по SSH: буфер обмена остался на машине пользователя, а здесь его нет.
+//
+// Отдельный вид ошибки нужен потому, что совет пользователю здесь совсем
+// другой, чем при отсутствии утилиты, а разбирать текст ошибки — плохая опора.
+var ErrNoSession = errors.New("графическая сессия не обнаружена: ни WAYLAND_DISPLAY, ни DISPLAY не заданы")
+
+// ErrNoHelper означает, что графическая сессия есть, а утилиты для доступа
+// к буферу обмена нет — её достаточно установить.
+var ErrNoHelper = errors.New("утилита работы с буфером обмена не найдена")
+
 // Image — изображение, полученное из буфера обмена.
 type Image struct {
 	Data          []byte
@@ -155,7 +166,7 @@ func detect() (helper, error) {
 				},
 			}, nil
 		}
-		return helper{}, errors.New("сессия Wayland, но утилита wl-paste не найдена — установите wl-clipboard")
+		return helper{}, fmt.Errorf("%w: сессия Wayland, но wl-paste нет — установите wl-clipboard", ErrNoHelper)
 	}
 
 	if sessionKind() == "x11" {
@@ -168,10 +179,10 @@ func detect() (helper, error) {
 				},
 			}, nil
 		}
-		return helper{}, errors.New("сессия X11, но утилита xclip не найдена — установите xclip")
+		return helper{}, fmt.Errorf("%w: сессия X11, но xclip нет — установите xclip", ErrNoHelper)
 	}
 
-	return helper{}, errors.New("графическая сессия не обнаружена: ни WAYLAND_DISPLAY, ни DISPLAY не заданы")
+	return helper{}, ErrNoSession
 }
 
 // run выполняет утилиту и возвращает её вывод.

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -53,21 +54,54 @@ type imagePastedMsg struct {
 	err error
 }
 
+// clipboardRead — шов для тестов: подменяя его, тест проверяет поведение
+// при отказе буфера обмена, не завися от того, что творится на машине.
+var clipboardRead = clipboard.ReadImage
+
 // pasteImageCmd читает буфер обмена в отдельной горутине: обращение к внешней
 // утилите нельзя делать прямо в цикле событий.
 func pasteImageCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := contextWithTimeout(5)
 		defer cancel()
-		img, err := clipboard.ReadImage(ctx, maxImageBytes)
+		img, err := clipboardRead(ctx, maxImageBytes)
 		return imagePastedMsg{img: img, err: err}
 	}
 }
+
+// sshPasteHint объясняет, что делать, когда графической сессии нет.
+//
+// Отказ здесь ожидаем и не является ошибкой пользователя: он запустил ollchat
+// по SSH, а буфер обмена остался на его машине. Забрать его через терминал
+// нельзя — OSC 52 передаёт только текст, изображения им не вытащить, — зато
+// работает проброс X11: тогда локальный xclip читает буфер локального
+// X-сервера. Проверено: картинка доходит побайтово той же.
+const sshPasteHint = "графической сессии здесь нет — похоже, ollchat запущен по SSH, " +
+	"а буфер обмена остался на вашей машине.\n" +
+	"Чтобы вставка заработала: подключайтесь с пробросом X11 (ssh -X, для долгих сеансов -Y) " +
+	"и установите на этой машине xclip (sudo apt install xclip). " +
+	"Проверить: echo $DISPLAY должен быть непустым.\n" +
+	"Осторожно с tmux и screen: внутри уже созданной сессии DISPLAY остаётся от прежнего " +
+	"подключения, и после переподключения его надо обновить — иначе вставка будет молчать."
 
 // handleImagePasted прикладывает прочитанное изображение к текущему вопросу.
 func (m *Model) handleImagePasted(msg imagePastedMsg) {
 	if msg.err != nil {
 		m.statusMsg = ""
+
+		// Нет графической сессии — это не ошибка пользователя, а обстоятельство
+		// среды, у которого есть внятный выход. Подсказку показываем один раз
+		// за сеанс: способ доступа к буферу за время работы не изменится.
+		if errors.Is(msg.err, clipboard.ErrNoSession) {
+			if !m.sshPasteNoted {
+				m.sshPasteNoted = true
+				m.addBlock(block{kind: blockHint, text: sshPasteHint})
+			} else {
+				m.statusMsg = "буфер обмена недоступен: графической сессии нет"
+			}
+			return
+		}
+
 		m.addBlock(block{kind: blockError, text: "вставка изображения: " + msg.err.Error()})
 		return
 	}

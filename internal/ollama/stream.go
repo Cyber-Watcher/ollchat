@@ -33,12 +33,13 @@ type Event struct {
 
 // Stats — статистика завершённой генерации из финального чанка.
 type Stats struct {
-	PromptEvalCount int   // токенов в промпте — фактический размер занятого контекста
-	EvalCount       int   // токенов сгенерировано
-	TotalDuration   int64 // наносекунды
-	LoadDuration    int64
-	EvalDuration    int64
-	DoneReason      string
+	PromptEvalCount    int   // токенов в промпте — фактический размер занятого контекста
+	PromptEvalDuration int64 // наносекунды на чтение промпта
+	EvalCount          int   // токенов сгенерировано
+	TotalDuration      int64 // наносекунды
+	LoadDuration       int64
+	EvalDuration       int64
+	DoneReason         string
 }
 
 // TokensPerSecond возвращает скорость генерации; 0, если данных недостаточно.
@@ -51,6 +52,17 @@ func (s Stats) TokensPerSecond() float64 {
 
 // TotalTokens — сколько токенов занято в контекстном окне после этого ответа.
 func (s Stats) TotalTokens() int { return s.PromptEvalCount + s.EvalCount }
+
+// PromptTokensPerSecond — скорость чтения промпта; 0, если данных недостаточно.
+//
+// Это другая величина, чем скорость генерации: промпт читается разом (сервер
+// зовёт это prefill), и на неё влияет num_batch, а не скорость выдачи токенов.
+func (s Stats) PromptTokensPerSecond() float64 {
+	if s.PromptEvalDuration <= 0 || s.PromptEvalCount <= 0 {
+		return 0
+	}
+	return float64(s.PromptEvalCount) / (float64(s.PromptEvalDuration) / 1e9)
+}
 
 // ErrCanceled возвращается, когда генерация прервана пользователем.
 var ErrCanceled = errors.New("генерация прервана")
@@ -153,12 +165,13 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 
 			if chunk.Done {
 				out <- Event{Kind: EventDone, Stats: Stats{
-					PromptEvalCount: chunk.PromptEvalCount,
-					EvalCount:       chunk.EvalCount,
-					TotalDuration:   chunk.TotalDuration,
-					LoadDuration:    chunk.LoadDuration,
-					EvalDuration:    chunk.EvalDuration,
-					DoneReason:      chunk.DoneReason,
+					PromptEvalCount:    chunk.PromptEvalCount,
+					PromptEvalDuration: chunk.PromptEvalDuration,
+					EvalCount:          chunk.EvalCount,
+					TotalDuration:      chunk.TotalDuration,
+					LoadDuration:       chunk.LoadDuration,
+					EvalDuration:       chunk.EvalDuration,
+					DoneReason:         chunk.DoneReason,
 				}}
 				return
 			}

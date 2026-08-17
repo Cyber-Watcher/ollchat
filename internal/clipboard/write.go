@@ -52,7 +52,10 @@ func detectWriter() (writer, error) {
 		return writer{}, fmt.Errorf("%w: сессия X11, но утилита xclip не найдена — установите xclip", ErrNoWriter)
 	}
 
-	return writer{}, fmt.Errorf("%w: графическая сессия не обнаружена: ни WAYLAND_DISPLAY, ни DISPLAY не заданы", ErrNoWriter)
+	// Двойная обёртка не случайна: вызывающему важно и «писать нечем»
+	// (уходим на запасной путь), и «сессии нет вовсе» (можно подсказать
+	// про работу по SSH).
+	return writer{}, fmt.Errorf("%w: %w", ErrNoWriter, ErrNoSession)
 }
 
 // feed запускает утилиту и подаёт ей текст на стандартный ввод.

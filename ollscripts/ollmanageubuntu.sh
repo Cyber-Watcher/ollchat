@@ -25,6 +25,26 @@ readonly UNIT_FILE=/etc/systemd/system/${SERVICE}.service
 readonly OVERRIDE_DIR=/etc/systemd/system/${SERVICE}.service.d
 readonly SERVICE_USER=ollama
 readonly DEFAULT_MODELS=/usr/share/ollama/.ollama/models
+
+# Значения по умолчанию для переопределений службы.
+#
+# OLLAMA_HOST: без него Ollama слушает только 127.0.0.1, и по сети к ней
+# не подключиться — а сервер обычно затем и ставят, чтобы ходить на него
+# с других машин.
+#
+# OLLAMA_CONTEXT_LENGTH: окно контекста для запросов, которые его не задали.
+# Ноль (умолчание Ollama) означает «выбрать по видеопамяти», и на большой карте
+# сервер берёт максимум модели — 256k у нынешних. Крупная модель с таким окном
+# перестаёт помещаться в видеопамять, часть слоёв уезжает в оперативную,
+# и скорость падает в сотни раз. Замерено: у qwen3.5:122b при автовыборе
+# 49 слоёв из 50 на карте, генерация вместо 82 ток/с — доли токена.
+# Подробности — docs/ModelsParams.md.
+#
+# Внимание: имя переменной именно OLLAMA_CONTEXT_LENGTH. Похожей на вид
+# OLLAMA_NUM_CTX не существует, и незнакомые переменные Ollama принимает молча —
+# такая опечатка три месяца стояла в настройках стенда и ничего не делала.
+readonly DEFAULT_OLLAMA_HOST=0.0.0.0:11434
+readonly DEFAULT_CONTEXT_LENGTH=32768
 readonly RELEASES_API=https://api.github.com/repos/ollama/ollama/releases/latest
 readonly DOWNLOAD_BASE=https://github.com/ollama/ollama/releases/download
 
@@ -471,6 +491,25 @@ EOF
     ok "создан unit-файл: $UNIT_FILE"
 }
 
+write_override() {
+    # Переменные кладём не в сам unit, а в переопределения: установщик Ollama
+    # перезаписывает unit при обновлении, а этот каталог не трогает.
+    if [ -f "$OVERRIDE_DIR/override.conf" ]; then
+        ok "переопределения уже есть, оставляю как есть: $OVERRIDE_DIR/override.conf"
+        return 0
+    fi
+    mkdir -p "$OVERRIDE_DIR"
+    cat > "$OVERRIDE_DIR/override.conf" <<EOF
+[Service]
+Environment="OLLAMA_HOST=$DEFAULT_OLLAMA_HOST"
+Environment="OLLAMA_CONTEXT_LENGTH=$DEFAULT_CONTEXT_LENGTH"
+EOF
+    chmod 644 "$OVERRIDE_DIR/override.conf"
+    ok "созданы переопределения: $OVERRIDE_DIR/override.conf"
+    say "  слушает: $DEFAULT_OLLAMA_HOST · окно по умолчанию: $DEFAULT_CONTEXT_LENGTH токенов"
+    say "  проверить, что сервер их принял: journalctl -u $SERVICE | grep 'server config'"
+}
+
 install_ollama() {
     local version=$1 arch tmp url file
     arch=$(arch_suffix)
@@ -605,6 +644,12 @@ do_install_or_update() {
                 fi
             fi
         fi
+
+        # Восстановленные настройки не трогаем — write_override уходит ни с чем,
+        # если файл уже на месте. А если копии не было, кладём разумные значения:
+        # без них сервер слушал бы только себя и брал окно автовыбором.
+        write_override
+        systemctl daemon-reload
 
         fix_models_ownership
         start_service || true
