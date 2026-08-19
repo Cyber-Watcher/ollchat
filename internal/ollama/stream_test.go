@@ -2,6 +2,7 @@ package ollama
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,7 +28,7 @@ func serveFixture(t *testing.T, body string) *Client {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return New(srv.URL, 10*time.Second, nil)
+	return New(srv.URL, 10*time.Second, 0, nil)
 }
 
 func TestChatStreamParsing(t *testing.T) {
@@ -129,7 +130,7 @@ func TestChatServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, 10*time.Second, nil)
+	c := New(srv.URL, 10*time.Second, 0, nil)
 	var gotErr error
 	for ev := range c.Chat(context.Background(), ChatRequest{Model: "nope"}) {
 		if ev.Kind == EventError {
@@ -138,6 +139,96 @@ func TestChatServerError(t *testing.T) {
 	}
 	if gotErr == nil {
 		t.Fatal("ошибка сервера должна доходить до вызывающего кода")
+	}
+}
+
+// TestChatHasSeparateHeaderTimeout проверяет разделение таймаутов из
+// docs/TimeOutPlan.md: Ollama не шлёт ни байта ответа /api/chat, пока не
+// обработает весь промпт, поэтому Chat() должен переживать паузу, которая
+// обрывает короткий таймаут быстрых вызовов (Version/Tags/PS/Show). Именно
+// смешение этих двух таймаутов на одном транспорте обрывало реальные диалоги
+// на стенде при долгой обработке большого контекста.
+func TestChatHasSeparateHeaderTimeout(t *testing.T) {
+	const headerDelay = 150 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ни байта, пока не «обработали промпт» — как и настоящая Ollama.
+		time.Sleep(headerDelay)
+		switch r.URL.Path {
+		case "/api/version":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"0.32.13"}`))
+		case "/api/chat":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(streamFixture))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// timeout короче задержки сервера — быстрые вызовы должны обрываться.
+	// chatTimeout заметно длиннее — Chat() должен дождаться ответа.
+	c := New(srv.URL, headerDelay/3, headerDelay*6, nil)
+
+	if _, err := c.Version(context.Background()); err == nil {
+		t.Fatal("Version() с коротким timeout должен обрываться на задержке сервера")
+	}
+
+	var gotErr error
+	var done bool
+	for ev := range c.Chat(context.Background(), ChatRequest{Model: "qwen3.6:latest"}) {
+		if ev.Kind == EventError {
+			gotErr = ev.Err
+		}
+		if ev.Kind == EventDone {
+			done = true
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("Chat() с щедрым chatTimeout не должен обрываться на той же задержке: %v", gotErr)
+	}
+	if !done {
+		t.Fatal("Chat() должен получить EventDone")
+	}
+}
+
+// TestChatCancelStopsPromptly проверяет, что щедрый chatTimeout не ослабляет
+// отмену пользователем (Esc/Ctrl+C): отмена контекста должна прерывать Chat()
+// сразу, не дожидаясь ни срабатывания таймаута, ни ответа сервера.
+func TestChatCancelStopsPromptly(t *testing.T) {
+	// Go не обязан рвать TCP-соединение сразу при отмене контекста клиентом —
+	// проверено: srv.Close() дожидается конца обработчика, а не отмены
+	// (см. docs/TimeOutPlan.md). Поэтому держим паузу сервера маленькой —
+	// проверяем только то, что реально важно: скорость возврата у клиента.
+	const serverDelay = 300 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(serverDelay)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(streamFixture))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, time.Second, 10*time.Second, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+
+	started := time.Now()
+	var gotErr error
+	for ev := range c.Chat(ctx, ChatRequest{Model: "qwen3.6:latest"}) {
+		if ev.Kind == EventError {
+			gotErr = ev.Err
+		}
+	}
+	elapsed := time.Since(started)
+
+	if !errors.Is(gotErr, ErrCanceled) {
+		t.Fatalf("ожидался ErrCanceled, получено: %v", gotErr)
+	}
+	if elapsed > serverDelay {
+		t.Errorf("отмена сработала за %v — щедрый chatTimeout не должен её задерживать", elapsed)
 	}
 }
 

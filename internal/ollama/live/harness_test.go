@@ -50,7 +50,7 @@ func client(t *testing.T) *ollama.Client {
 	if url == "" {
 		t.Skip("не задан OLLCHAT_TEST_SERVER — живой замер пропущен")
 	}
-	return ollama.New(url, defaultTimeout, nil)
+	return ollama.New(url, defaultTimeout, 0, nil)
 }
 
 // models возвращает список моделей для прогона.

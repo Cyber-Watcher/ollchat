@@ -62,7 +62,7 @@ func TestLiveKBAnswerIsExplanation(t *testing.T) {
 	conv.Append(ollama.Message{Role: ollama.RoleUser, Content: "Скажи мне как работают горутины?"})
 
 	r := &agent.Runner{
-		Client: ollama.New(url, 10*time.Minute, nil), Model: model,
+		Client: ollama.New(url, 10*time.Minute, 0, nil), Model: model,
 		Tools: reg, Guard: guard, ToolsSupported: true, MaxIterations: 6,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)

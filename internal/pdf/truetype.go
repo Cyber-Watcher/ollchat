@@ -214,3 +214,18 @@ func addGlyph(out map[uint32]rune, gid uint32, r rune) {
 	}
 	out[gid] = r
 }
+
+// TrueTypeRunes возвращает символы, которые шрифт умеет рисовать.
+//
+// Нужно сборщику документов (internal/pdfout): прежде чем печатать символ,
+// он проверяет, есть ли в шрифте глиф, и при отсутствии переключается на
+// резервный. Разбор cmap живёт здесь и переиспользуется как есть — второму
+// разборщику того же формата в проекте взяться неоткуда.
+func TrueTypeRunes(data []byte) map[rune]bool {
+	cmap := parseTrueTypeCmap(data)
+	out := make(map[rune]bool, len(cmap))
+	for _, r := range cmap {
+		out[r] = true
+	}
+	return out
+}

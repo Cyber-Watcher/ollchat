@@ -163,6 +163,7 @@ type Server struct {
 	URL          string            `toml:"url"`
 	Model        string            `toml:"model"`
 	Timeout      string            `toml:"timeout"`
+	ChatTimeout  string            `toml:"chat_timeout"`
 	KeepAlive    string            `toml:"keep_alive"`
 	SystemPrompt string            `toml:"system_prompt"`
 	Think        *bool             `toml:"think"`
@@ -173,14 +174,22 @@ type Server struct {
 	// узнать неоткуда, Ollama его не сообщает.
 	VRAMGiB float64 `toml:"vram_gib"`
 
-	timeout time.Duration
+	timeout     time.Duration
+	chatTimeout time.Duration
 }
 
 // VRAMMiB возвращает размер видеопамяти сервера в МиБ, 0 — не задан.
 func (s Server) VRAMMiB() float64 { return s.VRAMGiB * 1024 }
 
-// TimeoutDuration возвращает разобранный таймаут HTTP-запросов к серверу.
+// TimeoutDuration возвращает разобранный таймаут ожидания заголовков у
+// быстрых вызовов (Version/Tags/PS/Show).
 func (s Server) TimeoutDuration() time.Duration { return s.timeout }
+
+// ChatTimeoutDuration возвращает разобранный таймаут ожидания заголовков у
+// потокового /api/chat. Он намного щедрее TimeoutDuration: Ollama не шлёт ни
+// байта ответа, пока не обработает весь промпт, а на большом контексте,
+// пересчитываемом с нуля, это может честно занять много минут.
+func (s Server) ChatTimeoutDuration() time.Duration { return s.chatTimeout }
 
 // NumCtx возвращает num_ctx из options, если он задан явно.
 func (s Server) NumCtx() (int, bool) {
@@ -490,6 +499,15 @@ func (c *Config) finalize() error {
 			return fmt.Errorf("сервер %q: timeout: %w", s.Name, err)
 		}
 		s.timeout = d
+
+		if s.ChatTimeout == "" {
+			s.ChatTimeout = "30m"
+		}
+		cd, err := time.ParseDuration(s.ChatTimeout)
+		if err != nil {
+			return fmt.Errorf("сервер %q: chat_timeout: %w", s.Name, err)
+		}
+		s.chatTimeout = cd
 
 		if s.KeepAlive != "" {
 			if _, err := time.ParseDuration(s.KeepAlive); err != nil {

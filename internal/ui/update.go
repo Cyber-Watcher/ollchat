@@ -136,6 +136,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case answerCopiedMsg:
 		return m, m.handleAnswerCopied(msg)
 
+	case savedPDFMsg:
+		return m, m.handleSavedPDF(msg)
+
 	case noticeMsg:
 		m.addBlock(block{kind: blockNotice, text: msg.text})
 		return m, nil
@@ -156,6 +159,13 @@ func (m *Model) handlePaste(msg tea.PasteMsg) tea.Cmd {
 	if m.picker != nil || m.confirm != nil {
 		return nil
 	}
+	// Вставка в окно сохранения — это имя файла, а не текст вопроса: путь
+	// удобно приносить из буфера обмена целиком.
+	if m.savePDF != nil {
+		var cmd tea.Cmd
+		m.savePDF.input, cmd = m.savePDF.input.Update(msg)
+		return cmd
+	}
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	m.syncFileMenu()
@@ -169,7 +179,7 @@ func (m *Model) handlePaste(msg tea.PasteMsg) tea.Cmd {
 // вертикальным положением указателя, даже если он ушёл в сторону от полосы, —
 // так ведут себя привычные полосы прокрутки.
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
-	if m.picker != nil || m.confirm != nil {
+	if m.picker != nil || m.confirm != nil || m.savePDF != nil {
 		return nil
 	}
 
@@ -233,6 +243,9 @@ func (m *Model) scrollToRow(row int) {
 func (m *Model) handleResize(msg tea.WindowSizeMsg) tea.Cmd {
 	m.width, m.height = msg.Width, msg.Height
 	m.ta.SetWidth(msg.Width - 2)
+	if m.savePDF != nil {
+		m.savePDF.input.SetWidth(savePDFInputWidth(msg.Width))
+	}
 	// Крайняя колонка отдана полосе прокрутки, поэтому текст переносим уже.
 	m.rend.setWidth(msg.Width - 3)
 
@@ -261,6 +274,8 @@ func (m *Model) viewportHeight() int {
 	h -= 1 // статус-бар
 	if m.picker != nil {
 		h -= m.picker.height()
+	} else if m.savePDF != nil {
+		h -= savePDFHeight
 	} else {
 		h -= m.ta.Height()
 		if m.confirm != nil {
@@ -300,6 +315,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	m.quitConfirm = false
 
+	// Окно сохранения в PDF перехватывает управление первым: пока в нём
+	// набирают имя файла, Esc обязан закрывать окно, а не прерывать генерацию.
+	if m.savePDF != nil {
+		return m.handleSavePDFKey(msg)
+	}
 	// Панель подтверждения перехватывает управление.
 	if m.confirm != nil {
 		return m.handleConfirmKey(key)
@@ -372,6 +392,18 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "f3":
 		m.toggleImagePanel()
+		return m, nil
+
+	// Сохранение видимого ответа в PDF: открывается окно запроса имени файла.
+	case "f4":
+		m.openSavePDF(false)
+		return m, nil
+
+	// То же вместе с вопросом и шапкой документа. Как и у Shift+F5, шифт-имён
+	// три: «shift+f4» от современных терминалов и старая последовательность
+	// CSI 29~, которую разборщик отдаёт клавишей f16 — с модификатором и без.
+	case "shift+f4", "shift+f16", "f16":
+		m.openSavePDF(true)
 		return m, nil
 
 	// Копирование видимого ответа в буфер обмена.

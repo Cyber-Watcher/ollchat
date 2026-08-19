@@ -19,7 +19,7 @@ func TestEmbedThroughput(t *testing.T) {
 	if url == "" {
 		t.Skip("нужен OLLCHAT_EMBED_URL")
 	}
-	c := ollama.New(url, 10*time.Minute, nil)
+	c := ollama.New(url, 10*time.Minute, 0, nil)
 	text := strings.Repeat("буферизированный канал в языке Go и его ёмкость. ", 30)
 
 	for _, batch := range []int{32, 64, 128, 256} {

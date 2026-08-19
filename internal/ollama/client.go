@@ -11,26 +11,49 @@ import (
 	"time"
 )
 
+// defaultChatTimeout — сколько ждать первого байта ответа /api/chat, если
+// chatTimeout не задан. Ollama не шлёт ни байта, пока не закончит обработку
+// промпта (prefill) — на большом контексте, пересчитываемом с нуля, это может
+// занять много минут при живом и работающем сервере. 30 минут — с запасом
+// против худшего измеренного на стенде: 262144 токена при просевшей до
+// 460-700 ток/с скорости обработки (после расширения окна до 262144 сама
+// Ollama урезает размер пачки) — это около 10 минут.
+const defaultChatTimeout = 30 * time.Minute
+
 // Client — клиент одного сервера Ollama.
 type Client struct {
-	baseURL string
-	headers map[string]string
-	http    *http.Client
+	baseURL  string
+	headers  map[string]string
+	http     *http.Client // Version/Tags/PS/Show: короткое ожидание заголовков
+	chatHTTP *http.Client // Chat: заголовки могут прийти только после prefill
 }
 
 // New создаёт клиент. baseURL — например "http://192.168.77.77:11434" (без /api).
-func New(baseURL string, timeout time.Duration, headers map[string]string) *Client {
+// timeout — ожидание заголовков у быстрых вызовов (Version/Tags/PS/Show).
+// chatTimeout — то же самое, но для потокового /api/chat: Ollama не шлёт ни
+// байта, пока не обработает весь промпт, поэтому этот таймаут должен быть
+// намного щедрее, а не разделять транспорт — значило бы обрывать честно
+// работающий сервер. От мёртвого соединения при чате защищает не этот таймаут,
+// а отмена пользователем (Esc/Ctrl+C).
+func New(baseURL string, timeout, chatTimeout time.Duration, headers map[string]string) *Client {
 	if timeout <= 0 {
 		timeout = 300 * time.Second
+	}
+	if chatTimeout <= 0 {
+		chatTimeout = defaultChatTimeout
 	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		headers: headers,
-		// Общий таймаут не выставляем: стриминг длинного ответа может идти дольше,
-		// а обрыв связи ловится таймаутами на установление соединения и заголовки.
 		http: &http.Client{
 			Transport: &http.Transport{
 				ResponseHeaderTimeout: timeout,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		},
+		chatHTTP: &http.Client{
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: chatTimeout,
 				IdleConnTimeout:       90 * time.Second,
 			},
 		},

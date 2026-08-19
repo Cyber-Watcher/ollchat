@@ -50,7 +50,7 @@ func flakyServer(t *testing.T, failTimes int, thinkBeforeFail bool, contentBefor
 	}))
 	t.Cleanup(srv.Close)
 
-	return ollama.New(srv.URL, 10*time.Second, nil), &calls
+	return ollama.New(srv.URL, 10*time.Second, 0, nil), &calls
 }
 
 func plainRunner(client *ollama.Client, retries int) *Runner {
@@ -160,7 +160,7 @@ func TestNoRetryOnClientError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := ollama.New(srv.URL, 10*time.Second, nil)
+	client := ollama.New(srv.URL, 10*time.Second, 0, nil)
 	_, retries, err := collect(t, plainRunner(client, 3))
 
 	if retries != 0 {
@@ -189,7 +189,7 @@ func TestRetryOnServerError5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := ollama.New(srv.URL, 10*time.Second, nil)
+	client := ollama.New(srv.URL, 10*time.Second, 0, nil)
 	answer, retries, err := collect(t, plainRunner(client, 2))
 
 	if err != nil {
@@ -225,7 +225,7 @@ func TestCancelIsNotRetried(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := ollama.New(srv.URL, 10*time.Second, nil)
+	client := ollama.New(srv.URL, 10*time.Second, 0, nil)
 	r := plainRunner(client, 3)
 
 	conv := session.New("")

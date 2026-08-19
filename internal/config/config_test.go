@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeConfig кладёт кусок TOML во временный файл и загружает его.
@@ -124,5 +125,56 @@ func TestTemplateIsValid(t *testing.T) {
 	}
 	if cfg.Input.Cursor.Shape != CursorBlock {
 		t.Errorf("в образце форма курсора = %q, ожидался %q", cfg.Input.Cursor.Shape, CursorBlock)
+	}
+}
+
+// chat_timeout отдельно от timeout: см. docs/TimeOutPlan.md. Без него в
+// конфиге таймаут заголовков /api/chat должен получать щедрое значение по
+// умолчанию, не совпадающее с коротким timeout быстрых вызовов.
+func TestServerChatTimeoutDefault(t *testing.T) {
+	cfg, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatalf("загрузка конфига: %v", err)
+	}
+	srv := cfg.Servers[0]
+	if got := srv.TimeoutDuration(); got != 300*time.Second {
+		t.Errorf("timeout по умолчанию = %v, ожидалось 300s", got)
+	}
+	if got := srv.ChatTimeoutDuration(); got != 30*time.Minute {
+		t.Errorf("chat_timeout по умолчанию = %v, ожидалось 30m", got)
+	}
+}
+
+func TestServerChatTimeoutOverride(t *testing.T) {
+	cfg, err := writeConfig(t, `
+[[servers]]
+name         = "custom"
+url          = "http://127.0.0.1:11434"
+chat_timeout = "2s"
+`)
+	if err != nil {
+		t.Fatalf("загрузка конфига: %v", err)
+	}
+	srv, ok := cfg.ServerByName("custom")
+	if !ok {
+		t.Fatal("сервер custom не найден")
+	}
+	if got := srv.ChatTimeoutDuration(); got != 2*time.Second {
+		t.Errorf("chat_timeout = %v, ожидалось 2s", got)
+	}
+}
+
+func TestServerChatTimeoutRejectsGarbage(t *testing.T) {
+	_, err := writeConfig(t, `
+[[servers]]
+name         = "custom"
+url          = "http://127.0.0.1:11434"
+chat_timeout = "не число"
+`)
+	if err == nil {
+		t.Fatal("некорректный chat_timeout должен останавливать запуск")
+	}
+	if !strings.Contains(err.Error(), "chat_timeout") {
+		t.Errorf("ошибка должна называть настройку chat_timeout, получено: %v", err)
 	}
 }

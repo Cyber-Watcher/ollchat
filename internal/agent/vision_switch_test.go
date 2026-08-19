@@ -34,7 +34,7 @@ func TestLiveModelSwitchAfterImage(t *testing.T) {
 	conv.Append(ollama.Message{Role: ollama.RoleUser, Content: "Как скачать файлы с удалённой машины по scp?"})
 
 	r := &agent.Runner{
-		Client:          ollama.New(url, 5*time.Minute, nil),
+		Client:          ollama.New(url, 5*time.Minute, 0, nil),
 		Model:           model,
 		VisionSupported: false, // модель без vision — это и есть условие сбоя
 		MaxIterations:   3,

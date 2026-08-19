@@ -49,7 +49,7 @@ func fakeServer(t *testing.T, toolCmds []string) (*ollama.Client, *int32) {
 	}))
 	t.Cleanup(srv.Close)
 
-	return ollama.New(srv.URL, 10*time.Second, nil), &calls
+	return ollama.New(srv.URL, 10*time.Second, 0, nil), &calls
 }
 
 func fakeRunner(t *testing.T, client *ollama.Client) *Runner {

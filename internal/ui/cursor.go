@@ -4,6 +4,7 @@ import (
 	"image/color"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -51,4 +52,19 @@ func cursorColor(s string) color.Color {
 		return nil
 	}
 	return lipgloss.Color(s)
+}
+
+// applyInputCursor — то же самое для однострочного поля ввода в модальных окнах.
+//
+// Типы стилей у textarea и textinput разные, поэтому общей функции не выходит,
+// но правило одно: без SetVirtualCursor(false) поле вернёт nil вместо курсора,
+// и в окне сохранения курсора на экране не будет вовсе.
+func applyInputCursor(in *textinput.Model, c config.Cursor) {
+	in.SetVirtualCursor(false)
+
+	st := in.Styles()
+	st.Cursor.Shape = cursorShape(c.Shape)
+	st.Cursor.Blink = c.Blink
+	st.Cursor.Color = cursorColor(c.Color)
+	in.SetStyles(st)
 }

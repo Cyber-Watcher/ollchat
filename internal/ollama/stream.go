@@ -99,7 +99,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 			return
 		}
 
-		resp, err := c.http.Do(httpReq)
+		resp, err := c.chatHTTP.Do(httpReq)
 		if err != nil {
 			if ctx.Err() != nil {
 				out <- Event{Kind: EventError, Err: ErrCanceled}

@@ -30,7 +30,7 @@ func testServer(t *testing.T) (*ollama.Client, string) {
 	if model == "" {
 		model = "qwen3.6:latest"
 	}
-	return ollama.New(url, 300*time.Second, nil), model
+	return ollama.New(url, 300*time.Second, 0, nil), model
 }
 
 func testRunner(t *testing.T, client *ollama.Client, model, root string, mode string) *Runner {

@@ -93,6 +93,10 @@ type Model struct {
 	// над полем ввода и не забирает набор текста себе.
 	files *fileMenu
 
+	// savePDF — окно запроса имени файла при сохранении ответа в PDF (F4).
+	// Пока открыто, забирает себе клавиатуру и заменяет собой поле ввода.
+	savePDF *savePDFPrompt
+
 	// images — панель вложенных изображений (F3). Стоит там же, где список
 	// файлов, и потому взаимно исключает его.
 	images *imagePanel
@@ -186,7 +190,7 @@ func New(cfg *config.Config, guard *permissions.Guard, registry *tools.Registry,
 		liveIdx:      -1,
 		thinkIdx:     -1,
 	}
-	m.client = ollama.New(srv.URL, srv.TimeoutDuration(), srv.Headers)
+	m.client = ollama.New(srv.URL, srv.TimeoutDuration(), srv.ChatTimeoutDuration(), srv.Headers)
 	m.vramProfile = loadVRAMProfile(cfg)
 	// База знаний открывается всегда: сама по себе она ничего не стоит,
 	// а коллекции читаются по требованию.

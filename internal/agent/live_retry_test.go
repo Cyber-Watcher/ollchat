@@ -61,7 +61,7 @@ func TestLiveServerParseFailureIsRetryable(t *testing.T) {
 		model = "nemotron-3-super:latest"
 	}
 
-	client := ollama.New(url, 600*time.Second, nil)
+	client := ollama.New(url, 600*time.Second, 0, nil)
 	// Режим рассуждений включён намеренно: все воспроизведения сбоя получены
 	// именно с ним, а без него за 8 попыток он не выпал ни разу.
 	think := true

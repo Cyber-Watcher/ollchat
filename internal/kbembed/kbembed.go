@@ -58,7 +58,7 @@ func New(cfg *config.Config, fallbackURL string, timeout time.Duration, headers 
 		keep = "5m"
 	}
 	return &Embedder{
-		client:    ollama.New(url, timeout, headers),
+		client:    ollama.New(url, timeout, timeout, headers),
 		model:     cfg.KB.EmbedModel,
 		keepAlive: keep,
 		sem:       make(chan struct{}, inFlight),

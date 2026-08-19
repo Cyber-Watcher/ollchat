@@ -37,7 +37,7 @@ func (m *Model) View() tea.View {
 	b.WriteString("\n")
 	// Панели стоят над разделителем, вместе с лентой: они относятся к тому,
 	// что показано выше, и не должны разрывать поле ввода.
-	if m.picker == nil {
+	if m.picker == nil && m.savePDF == nil {
 		switch {
 		case m.images != nil:
 			b.WriteString(m.images.view(m.width, m.pending))
@@ -53,6 +53,8 @@ func (m *Model) View() tea.View {
 	switch {
 	case m.picker != nil:
 		b.WriteString(m.picker.view(m.width))
+	case m.savePDF != nil:
+		b.WriteString(m.savePDFView())
 	case m.confirm != nil:
 		b.WriteString(m.confirmView())
 		b.WriteString("\n")
@@ -83,6 +85,11 @@ func (m *Model) inputCursor() *tea.Cursor {
 	if m.picker != nil {
 		return nil
 	}
+	// Пока открыто окно сохранения, курсор принадлежит полю имени файла:
+	// поля ввода вопроса на экране нет.
+	if m.savePDF != nil {
+		return m.savePDFCursor(m.inputTop())
+	}
 	c := m.ta.Cursor()
 	if c == nil {
 		return nil
@@ -95,6 +102,11 @@ func (m *Model) inputCursor() *tea.Cursor {
 // под шапкой, лентой, разделителем и (если открыта) панелью подтверждения.
 func (m *Model) inputTop() int {
 	top := transcriptTop + m.vp.Height() + 1
+	// Окно сохранения показывается вместо поля ввода и вместо всех панелей:
+	// ничего его вниз не сдвигает.
+	if m.savePDF != nil {
+		return top
+	}
 	// Панели стоят над разделителем, поэтому сдвигают поле ввода вниз.
 	if m.files != nil {
 		top += m.files.height()
