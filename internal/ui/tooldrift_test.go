@@ -75,7 +75,7 @@ func TestToolDriftHintSilentWhenAgentOff(t *testing.T) {
 // TestToolDriftHintRendersApart проверяет, что подсказка — свой вид блока
 // со своим цветом, а не приглушённая заметка.
 func TestToolDriftHintRendersApart(t *testing.T) {
-	r := newRenderer(80, false, "dark")
+	r := newRenderer(80, false, config.Theme{Style: "dark"})
 	got := r.Render(block{kind: blockHint, text: "Выключены инструменты: view_image."}, false)
 	if !strings.Contains(got, "view_image") {
 		t.Fatalf("текст подсказки потерян: %q", got)

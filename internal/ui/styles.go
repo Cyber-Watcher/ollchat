@@ -64,6 +64,10 @@ var (
 	styNotice = lipgloss.NewStyle().Foreground(colDim).Italic(true)
 	styHint   = lipgloss.NewStyle().Foreground(colHint)
 
+	// styTurnID — идентификатор обмена под ответом. Нарочно самый тусклый цвет:
+	// он нужен изредка, а мозолить глаза под каждым ответом не должен.
+	styTurnID = lipgloss.NewStyle().Foreground(colFaint)
+
 	styStatus     = lipgloss.NewStyle().Foreground(colDim)
 	styStatusWarn = lipgloss.NewStyle().Foreground(colWarn)
 	styStatusHot  = lipgloss.NewStyle().Foreground(colError)

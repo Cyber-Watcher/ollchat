@@ -210,16 +210,16 @@ func TestCopyWithQuestionMatchesJournalFormat(t *testing.T) {
 	asked := time.Date(2026, 8, 16, 12, 0, 0, 0, time.Local)
 	answered := time.Date(2026, 8, 16, 12, 5, 0, 0, time.Local)
 
-	m.addBlock(block{kind: blockUser, text: "как работают горутины?", at: asked})
+	m.addBlock(block{kind: blockUser, text: "как работают горутины?", at: asked, turn: "k7f3-01"})
 	m.addBlock(block{kind: blockAssistant, text: "Горутина — это лёгкий поток.",
-		at: answered, model: "test-model"})
+		at: answered, model: "test-model", turn: "k7f3-01"})
 
 	p, ok := m.copyVisibleAnswer(true)
 	if !ok {
 		t.Fatal("ответ на экране есть, копирование обязано его найти")
 	}
-	want := chatlog.FormatEntry(asked, chatlog.KindQuestion, "", "как работают горутины?") +
-		chatlog.FormatEntry(answered, chatlog.KindAnswer, "test-model", "Горутина — это лёгкий поток.")
+	want := chatlog.FormatEntry("k7f3-01", asked, chatlog.KindQuestion, "", "как работают горутины?") +
+		chatlog.FormatEntry("k7f3-01", answered, chatlog.KindAnswer, "test-model", "Горутина — это лёгкий поток.")
 	want = strings.TrimRight(want, "\n") + "\n"
 	if p.text != want {
 		t.Errorf("формат разошёлся с журналом:\nполучено: %q\nожидалось: %q", p.text, want)

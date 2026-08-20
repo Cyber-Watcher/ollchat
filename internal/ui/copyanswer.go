@@ -198,12 +198,12 @@ func (m *Model) copyVisibleAnswer(withQuestion bool) (copyPayload, bool) {
 		var sb strings.Builder
 		if turn.user >= 0 {
 			q := m.blocks[turn.user]
-			sb.WriteString(chatlog.FormatEntry(stampOf(q), chatlog.KindQuestion, "", q.text))
+			sb.WriteString(chatlog.FormatEntry(q.turn, stampOf(q), chatlog.KindQuestion, "", q.text))
 		} else {
 			p.noUser = true
 		}
 		a := m.blocks[idx]
-		sb.WriteString(chatlog.FormatEntry(stampOf(a), chatlog.KindAnswer, a.model, answer))
+		sb.WriteString(chatlog.FormatEntry(a.turn, stampOf(a), chatlog.KindAnswer, a.model, answer))
 		// Журнал разделяет записи пустыми строками, а в буфере обмена хвост
 		// из них не нужен: вставится он ровно в конец вставляемого текста.
 		p.text = strings.TrimRight(sb.String(), "\n") + "\n"

@@ -301,6 +301,10 @@ func (m *Model) statusView() string {
 		segments = append(segments, styStatus.Render(fmt.Sprintf("%.0f ток/с", tps)))
 	}
 
+	if m.cfg.General.ShowTurnID {
+		segments = append(segments, styStatus.Render(m.logger.LastTurnID()))
+	}
+
 	if m.logger.Enabled() {
 		segments = append(segments, styStatus.Render("лог: "+filepath.Base(m.logger.CurrentPath())))
 	} else {

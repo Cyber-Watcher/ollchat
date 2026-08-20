@@ -7,6 +7,8 @@ import (
 
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/Cyber-Watcher/ollchat/internal/config"
 )
 
 // blockKind — вид блока в ленте диалога.
@@ -35,13 +37,20 @@ type block struct {
 	// отметку времени и название модели больше неоткуда.
 	at    time.Time
 	model string
+
+	// turn — идентификатор обмена, к которому относится блок. Хранится здесь
+	// по той же причине, что at и model: у отлистанного вверх ответа его
+	// больше негде взять. showTurnID ставится последнему куску ответа —
+	// только под ним идентификатор показывается в ленте.
+	turn       string
+	showTurnID bool
 }
 
 // renderer превращает блоки в текст для области истории.
 type renderer struct {
 	width    int
 	markdown bool
-	style    string // имя стиля glamour: dark или light
+	theme    config.Theme // оформление markdown, стиль уже разрешён (не auto)
 	glam     *glamour.TermRenderer
 }
 
@@ -58,11 +67,11 @@ func detectStyle() string {
 	return "light"
 }
 
-func newRenderer(width int, markdown bool, style string) *renderer {
-	if style == "" {
-		style = "dark"
+func newRenderer(width int, markdown bool, theme config.Theme) *renderer {
+	if theme.Style == "" || theme.Style == config.ThemeAuto {
+		theme.Style = detectStyle()
 	}
-	r := &renderer{markdown: markdown, style: style}
+	r := &renderer{markdown: markdown, theme: theme}
 	r.setWidth(width)
 	return r
 }
@@ -81,8 +90,15 @@ func (r *renderer) setWidth(w int) {
 	}
 	// Стиль задаётся явно, без обращения к терминалу: этот код выполняется
 	// внутри цикла событий, и любой запрос к терминалу его заблокирует.
+	// Поэтому r.theme.Style здесь уже разрешён — auto превращено в dark
+	// или light ещё в newRenderer.
+	style, err := buildStyle(r.theme)
+	if err != nil {
+		r.glam = nil
+		return
+	}
 	g, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(r.style),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(w),
 		glamour.WithEmoji(),
 	)
@@ -126,7 +142,11 @@ func (r *renderer) Render(b block, showThinking bool) string {
 		if strings.TrimSpace(b.text) == "" {
 			return ""
 		}
-		return r.renderMarkdown(b.text)
+		out := r.renderMarkdown(b.text)
+		if b.showTurnID && b.turn != "" {
+			out += "\n" + styTurnID.Render(alignRight(b.turn, r.width))
+		}
+		return out
 
 	case blockThinking:
 		if !showThinking || strings.TrimSpace(b.text) == "" {
@@ -250,6 +270,15 @@ func wrap(s string, width int) string {
 		out = append(out, line.String())
 	}
 	return strings.Join(out, "\n")
+}
+
+// alignRight прижимает короткую строку к правому краю ленты.
+func alignRight(s string, width int) string {
+	pad := width - lipgloss.Width(s)
+	if pad <= 0 {
+		return s
+	}
+	return strings.Repeat(" ", pad) + s
 }
 
 // indentRest добавляет отступ всем строкам, кроме первой.

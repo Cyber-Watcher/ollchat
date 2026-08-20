@@ -538,7 +538,8 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 		if m.liveIdx < 0 {
 			// Модель проставляем сразу, а не в конце хода: копировать ответ
 			// можно и посреди генерации.
-			m.liveIdx = m.addBlock(block{kind: blockAssistant, text: ev.Text, model: m.answeredBy})
+			m.liveIdx = m.addBlock(block{kind: blockAssistant, text: ev.Text,
+				model: m.answeredBy, turn: m.turnID})
 			// Во время потока markdown не рендерим — текст показывается как есть.
 			m.rendered[m.liveIdx] = wrap(ev.Text, m.rend.width)
 			m.refreshViewport(true)
@@ -565,7 +566,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	case agent.EventToolPlan:
 		// Завершаем текущий блок ответа: дальше пойдёт вызов инструмента.
 		m.closeLiveBlocks()
-		m.addBlock(block{kind: blockTool, title: ev.Tool.Title, status: ""})
+		m.addBlock(block{kind: blockTool, title: ev.Tool.Title, status: "", turn: m.turnID})
 		return nil
 
 	case agent.EventToolConfirm:
@@ -587,7 +588,8 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 		}
 		// Обновляем последний блок инструмента с тем же заголовком.
 		idx := m.lastToolBlock(ev.Tool.Title)
-		b := block{kind: blockTool, title: ev.Tool.Title, status: status, preview: ev.Tool.Output}
+		b := block{kind: blockTool, title: ev.Tool.Title, status: status,
+			preview: ev.Tool.Output, turn: m.turnID}
 		if idx >= 0 {
 			m.updateBlock(idx, b)
 		} else {

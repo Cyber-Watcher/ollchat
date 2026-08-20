@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ const helpText = `Команды:
   /addimg <путь> [стр.]    приложить рисунки из PDF или EPUB (/addimg книга.pdf 40-60)
   /savetopdf <файл.pdf>    сохранить видимый ответ в PDF (F4 — с запросом имени)
   /log [on|off]            путь к журналу, включение и выключение
+  /id                      идентификатор обмена — по нему обмен ищется в журнале
   /save                    сохранить текущую сессию
   /resume [id]             восстановить сессию (без id — выбор из списка)
   /clear                   очистить историю диалога
@@ -275,6 +277,8 @@ func (m *Model) runCommand(input string) tea.Cmd {
 
 	case "log":
 		return m.logCmd(arg)
+	case "id":
+		return m.idCmd()
 
 	case "save":
 		path, err := m.store.Save(m.conv, m.server.Name, m.modelName)
@@ -754,8 +758,12 @@ func (m *Model) logCmd(arg string) tea.Cmd {
 		if !m.logger.Enabled() {
 			state = "выключен"
 		}
+		pattern := m.cfg.Log.FilePattern
+		if pattern == "" {
+			pattern = m.cfg.Log.Pattern + " (устаревшая раскладка Go, см. file_pattern)"
+		}
 		text := fmt.Sprintf("Журнал %s\n  файл: %s\n  каталог: %s\n  шаблон имени: %s",
-			state, m.logger.CurrentPath(), m.cfg.Log.Dir, m.cfg.Log.Pattern)
+			state, m.logger.CurrentPath(), m.cfg.Log.Dir, pattern)
 		if err := m.logger.LastError(); err != nil {
 			text += "\n  последняя ошибка: " + err.Error()
 		}
@@ -763,6 +771,31 @@ func (m *Model) logCmd(arg string) tea.Cmd {
 	default:
 		m.addBlock(block{kind: blockError, text: "использование: /log [on|off]"})
 	}
+	return nil
+}
+
+// idCmd показывает идентификатор обмена: по нему запись в журнале находится
+// целиком — вопрос, вызовы инструментов, рассуждения и ответ помечены одним
+// значением.
+func (m *Model) idCmd() tea.Cmd {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Сеанс %s, обменов: %d", m.logger.SessionID(), m.logger.Turns())
+	if m.logger.Turns() > 0 {
+		fmt.Fprintf(&b, "\n  последний обмен: %s", m.logger.LastTurnID())
+	} else {
+		b.WriteString("\n  вопросов ещё не было")
+	}
+	if m.logger.Enabled() {
+		path := m.logger.CurrentPath()
+		fmt.Fprintf(&b, "\n  журнал: %s", path)
+		// В подсказке — имя файла, а не полный путь: путь уже строкой выше,
+		// а вместе с ним команда не влезает в ширину ленты.
+		fmt.Fprintf(&b, "\n  найти обмен целиком: grep \"^\\[%s\\]\" %s",
+			m.logger.LastTurnID(), filepath.Base(path))
+	} else {
+		b.WriteString("\n  журнал выключен — записи не ведутся")
+	}
+	m.addBlock(block{kind: blockNotice, text: b.String()})
 	return nil
 }
 

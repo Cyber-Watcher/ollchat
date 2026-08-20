@@ -1,6 +1,7 @@
 package chatlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,8 +28,10 @@ func TestWriteFormat(t *testing.T) {
 	}
 	got := string(data)
 
-	want := "2026.08.11 11:42 ----- Вопрос\n\nкак работает num_ctx?\n\n\n" +
-		"2026.08.11 11:42 ----- Ответ\n\nnum_ctx задаёт размер окна.\n\n\n"
+	// Идентификатор обмена стоит перед датой. Запись вне обмена — номер 00.
+	id := "[" + l.SessionID() + "-00] "
+	want := id + "2026.08.11 11:42 ----- Вопрос\n\nкак работает num_ctx?\n\n\n" +
+		id + "2026.08.11 11:42 ----- Ответ\n\nnum_ctx задаёт размер окна.\n\n\n"
 	if got != want {
 		t.Errorf("формат журнала не совпадает.\nполучено:\n%q\nожидалось:\n%q", got, want)
 	}
@@ -53,9 +56,11 @@ func TestWriteFromAddsModelName(t *testing.T) {
 	}
 	got := string(data)
 
-	// Порядок строго задан: дата, время, пробел, модель в скобках, затем вид записи.
-	want := "2026.08.11 14:05 ----- Вопрос\n\nкак дела?\n\n\n" +
-		"2026.08.11 14:05 (qwen3.5:122b) ----- Ответ\n\nхорошо\n\n\n"
+	// Порядок строго задан: идентификатор обмена в скобках, дата, время,
+	// пробел, модель в скобках, затем вид записи.
+	id := "[" + l.SessionID() + "-00] "
+	want := id + "2026.08.11 14:05 ----- Вопрос\n\nкак дела?\n\n\n" +
+		id + "2026.08.11 14:05 (qwen3.5:122b) ----- Ответ\n\nхорошо\n\n\n"
 	if got != want {
 		t.Errorf("журнал не совпадает.\nполучено:\n%q\nожидалось:\n%q", got, want)
 	}
@@ -167,22 +172,183 @@ func TestFormatEntryMatchesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("чтение журнала: %v", err)
 	}
-	want := FormatEntry(ts, KindAnswer, "qwen3.5:122b", "Горутина — это лёгкий поток.")
+	want := FormatEntry(l.TurnID(), ts, KindAnswer, "qwen3.5:122b", "Горутина — это лёгкий поток.")
 	if string(data) != want {
 		t.Errorf("FormatEntry разошёлся с файлом:\nфайл: %q\nфункция: %q", string(data), want)
 	}
-	if !strings.HasPrefix(want, "2026.08.16 12:35 (qwen3.5:122b) ----- Ответ\n\n") {
-		t.Errorf("заголовок записи не тот: %q", want)
+	head := "[" + l.SessionID() + "-00] 2026.08.16 12:35 (qwen3.5:122b) ----- Ответ\n\n"
+	if !strings.HasPrefix(want, head) {
+		t.Errorf("заголовок записи не тот:\nполучено: %q\nожидалось начало: %q", want, head)
 	}
 }
 
 func TestFormatEntryOmitsEmptyModel(t *testing.T) {
 	ts := time.Date(2026, 8, 16, 12, 30, 0, 0, time.Local)
-	got := FormatEntry(ts, KindQuestion, "  ", "вопрос")
+	got := FormatEntry("", ts, KindQuestion, "  ", "вопрос")
 	if !strings.HasPrefix(got, "2026.08.16 12:30 ----- Вопрос\n\n") {
 		t.Errorf("пустое имя модели не должно давать скобок: %q", got)
 	}
 	if !strings.HasSuffix(got, "вопрос\n\n\n") {
 		t.Errorf("тело записи должно кончаться двумя пустыми строками: %q", got)
+	}
+}
+
+// sessionLogger — журнал с шаблоном «файл на запуск» и заданным временем старта.
+func sessionLogger(t *testing.T, dir string, start time.Time) *Logger {
+	t.Helper()
+	p, err := ParsePattern("chat-%Y-%m-%d_%H-%M-%S.md")
+	if err != nil {
+		t.Fatalf("разбор шаблона: %v", err)
+	}
+	return NewFromPattern(dir, p, start, true)
+}
+
+func TestSessionPatternNamesFileByStart(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 8, 20, 14, 30, 5, 0, time.Local)
+	l := sessionLogger(t, dir, start)
+	defer l.Close()
+
+	want := filepath.Join(dir, "chat-2026-08-20_14-30-05.md")
+	if got := l.CurrentPath(); got != want {
+		t.Fatalf("до записи CurrentPath = %q, ожидалось %q", got, want)
+	}
+	if err := l.WriteAt(start, KindQuestion, "вопрос"); err != nil {
+		t.Fatalf("запись: %v", err)
+	}
+	if got := l.CurrentPath(); got != want {
+		t.Fatalf("после записи CurrentPath = %q, ожидалось %q", got, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("ожидался файл %s: %v", want, err)
+	}
+}
+
+// TestSessionPatternDoesNotRotate: экземпляр, проработавший через полночь,
+// продолжает писать в файл своего запуска — имя фиксировано на старте.
+func TestSessionPatternDoesNotRotate(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 8, 20, 23, 59, 0, 0, time.Local)
+	l := sessionLogger(t, dir, start)
+	defer l.Close()
+
+	if err := l.WriteAt(start, KindQuestion, "до полуночи"); err != nil {
+		t.Fatalf("запись до полуночи: %v", err)
+	}
+	if err := l.WriteAt(start.Add(2*time.Hour), KindAnswer, "после полуночи"); err != nil {
+		t.Fatalf("запись после полуночи: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("ожидался один файл, получено %v", names)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"до полуночи", "после полуночи"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("в файле нет записи %q", want)
+		}
+	}
+}
+
+// TestSessionPatternAvoidsCollision: два экземпляра, запущенные в одну и ту же
+// секунду (разные окна tmux, разные сеансы ssh), не должны делить один файл.
+func TestSessionPatternAvoidsCollision(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 8, 20, 14, 30, 5, 0, time.Local)
+
+	first := sessionLogger(t, dir, start)
+	defer first.Close()
+	second := sessionLogger(t, dir, start)
+	defer second.Close()
+	third := sessionLogger(t, dir, start)
+	defer third.Close()
+
+	for i, l := range []*Logger{first, second, third} {
+		if err := l.WriteAt(start, KindQuestion, fmt.Sprintf("экземпляр %d", i+1)); err != nil {
+			t.Fatalf("запись экземпляра %d: %v", i+1, err)
+		}
+	}
+
+	want := []string{
+		"chat-2026-08-20_14-30-05.md",
+		"chat-2026-08-20_14-30-05-2.md",
+		"chat-2026-08-20_14-30-05-3.md",
+	}
+	for i, name := range want {
+		path := filepath.Join(dir, name)
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ожидался файл %s: %v", name, err)
+		}
+		if !strings.Contains(string(body), fmt.Sprintf("экземпляр %d", i+1)) {
+			t.Errorf("файл %s достался не тому экземпляру: %s", name, body)
+		}
+	}
+}
+
+// TestSessionPatternReturnsToOwnFile: /log off закрывает файл, /log on должен
+// вернуть в него же, а не занять новое имя с суффиксом.
+func TestSessionPatternReturnsToOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 8, 20, 14, 30, 5, 0, time.Local)
+	l := sessionLogger(t, dir, start)
+	defer l.Close()
+
+	if err := l.WriteAt(start, KindQuestion, "до выключения"); err != nil {
+		t.Fatalf("первая запись: %v", err)
+	}
+	l.SetEnabled(false)
+	l.SetEnabled(true)
+	if err := l.WriteAt(start, KindQuestion, "после включения"); err != nil {
+		t.Fatalf("вторая запись: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ожидался один файл, получено %d", len(entries))
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "chat-2026-08-20_14-30-05.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "до выключения") || !strings.Contains(string(body), "после включения") {
+		t.Fatalf("обе записи должны лежать в одном файле: %s", body)
+	}
+}
+
+// TestSessionPatternDisabledCreatesNothing: выключенный журнал не занимает имя.
+func TestSessionPatternDisabledCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 8, 20, 14, 30, 5, 0, time.Local)
+	p, err := ParsePattern("chat-%Y-%m-%d_%H-%M-%S.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewFromPattern(dir, p, start, false)
+	defer l.Close()
+
+	if err := l.WriteAt(start, KindQuestion, "вопрос"); err != nil {
+		t.Fatalf("запись при выключенном журнале не должна возвращать ошибку: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("выключенный журнал создал файлы: %d", len(entries))
 	}
 }

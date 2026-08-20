@@ -3,14 +3,21 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	glamourstyles "charm.land/glamour/v2/styles"
 	"github.com/BurntSushi/toml"
+	"github.com/alecthomas/chroma/v2"
+	chromastyles "github.com/alecthomas/chroma/v2/styles"
+
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
 )
 
 // Режимы подтверждения действий агента.
@@ -24,6 +31,7 @@ const (
 type Config struct {
 	General     General     `toml:"general"`
 	Input       Input       `toml:"input"`
+	Theme       Theme       `toml:"theme"`
 	Log         Log         `toml:"log"`
 	Agent       Agent       `toml:"agent"`
 	Permissions Permissions `toml:"permissions"`
@@ -44,7 +52,10 @@ type General struct {
 	VRAMProfile    string `toml:"vram_profile"`
 	RenderMarkdown bool   `toml:"render_markdown"`
 	ShowThinking   bool   `toml:"show_thinking"`
-	Mode           string `toml:"mode"`
+	// ShowTurnID — показывать ли идентификатор обмена в строке состояния.
+	// В ленте под ответом и по команде /id он виден всегда.
+	ShowTurnID bool   `toml:"show_turn_id"`
+	Mode       string `toml:"mode"`
 }
 
 // Input — поле ввода: курсор и работа с мышью.
@@ -74,13 +85,157 @@ const (
 	CursorBar       = "bar"
 )
 
+// ThemeAuto — определять светлую или тёмную базу по цвету фона терминала.
+const ThemeAuto = "auto"
+
+// Умолчания оформления. Красный код на серой заливке из встроенного стиля
+// glamour читается как сообщение об ошибке (ANSI 203 — тот же цвет, что у
+// ошибок в ленте), а любая заливка вырезает прямоугольник в фоне терминала,
+// если у него обои или прозрачность. Поэтому свои умолчания: песочный код
+// без заливки и тема gruvbox в блоках кода.
+const (
+	DefaultCodeTheme  = "gruvbox"
+	DefaultInlineCode = "179"
+)
+
+// DefaultTokens — правки цветов подсветки поверх темы по умолчанию.
+//
+// gruvbox красит токен NameTag своим ярко-красным #fb4934 — в этой теме цвет
+// предназначался тегам HTML. Но тем же токеном лексер размечает ключи YAML
+// и JSON, и файл GitLab CI в ответе модели выглядит так, будто в нём всё
+// сломано. Синий #83a598 — из той же палитры gruvbox.
+var DefaultTokens = map[string]string{"NameTag": "#83a598"}
+
+// Theme — оформление markdown в ленте ответов.
+type Theme struct {
+	// Style — база оформления: auto (по фону терминала), dark, light,
+	// dracula, tokyo-night, notty, ascii, pink.
+	Style string `toml:"style"`
+	// CodeTheme — тема подсветки синтаксиса в блоках кода, любая из тем
+	// chroma. Пусто — цвета базового стиля.
+	CodeTheme string `toml:"code_theme"`
+	// CodeBG — заливка блока кода. Пусто — фон терминала.
+	CodeBG string `toml:"code_bg"`
+	// InlineCode и InlineCodeBG — цвет и заливка кода в тексте (`так`).
+	InlineCode   string `toml:"inline_code"`
+	InlineCodeBG string `toml:"inline_code_bg"`
+	// Tokens — цвета отдельных видов токенов поверх темы подсветки,
+	// например {"NameTag": "#83a598"}. Имена — виды токенов chroma.
+	Tokens map[string]string `toml:"tokens"`
+}
+
+// validate проверяет имена стилей и цвета.
+//
+// Неизвестное имя темы chroma особенно коварно: chroma на него не ругается,
+// а молча берёт запасную тему swapoff. Настройка выглядела бы рабочей, а вид
+// менялся бы неизвестно на что — поэтому имя проверяется здесь, до запуска.
+func (t *Theme) validate() error {
+	if t.Style == "" {
+		t.Style = ThemeAuto
+	}
+	if t.Style != ThemeAuto {
+		if _, ok := glamourstyles.DefaultStyles[t.Style]; !ok {
+			return fmt.Errorf("theme.style: неизвестный стиль %q (допустимы %s и %s)",
+				t.Style, ThemeAuto, strings.Join(themeStyleNames(), ", "))
+		}
+	}
+	if t.CodeTheme != "" {
+		if _, ok := chromastyles.Registry[t.CodeTheme]; !ok {
+			return fmt.Errorf("theme.code_theme: неизвестная тема подсветки %q (см. %s)",
+				t.CodeTheme, strings.Join(chromastyles.Names(), ", "))
+		}
+	}
+	// Раздел не задан вовсе — берём умолчание. Заданный пустым означает
+	// «цвета темы как есть», поэтому пустая карта умолчанием не заменяется:
+	// иначе от правки нельзя было бы отказаться. Различить эти два случая
+	// позволяет то, что Load снимает умолчание перед разбором конфига.
+	if t.Tokens == nil && t.CodeTheme != "" {
+		t.Tokens = maps.Clone(DefaultTokens)
+	}
+	if len(t.Tokens) > 0 && t.CodeTheme == "" {
+		return fmt.Errorf("theme.tokens: правки цветов действуют только вместе с theme.code_theme; " +
+			"без темы подсветку рисует glamour своим набором цветов")
+	}
+	for name, colour := range t.Tokens {
+		if _, err := chroma.TokenTypeString(name); err != nil {
+			return fmt.Errorf("theme.tokens: неизвестный вид токена %q "+
+				"(ходовые: NameTag — ключи YAML и теги XML, Keyword, LiteralString, Comment, "+
+				"NameFunction, Operator, Punctuation, LiteralNumber)", name)
+		}
+		if err := checkHexColor(colour); err != nil {
+			return fmt.Errorf("theme.tokens.%s: %w", name, err)
+		}
+	}
+	for _, c := range []struct {
+		name, value string
+	}{
+		{"theme.code_bg", t.CodeBG},
+		{"theme.inline_code", t.InlineCode},
+		{"theme.inline_code_bg", t.InlineCodeBG},
+	} {
+		if err := checkColor(c.value); err != nil {
+			return fmt.Errorf("%s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// checkHexColor принимает только запись вида "#83a598" или "#8ae".
+//
+// Обычной checkColor тут мало: она пропускает номера ANSI, а chroma читает
+// значение как шестнадцатеричное число — номер 179 молча превратился бы
+// в #000179, тёмно-синий вместо песочного. Молчаливая подмена цвета хуже
+// отказа при запуске.
+func checkHexColor(s string) error {
+	if !strings.HasPrefix(s, "#") {
+		return fmt.Errorf("значение %q должно быть записью вида \"#83a598\": "+
+			"номера цветов ANSI здесь не работают, chroma читает их как шестнадцатеричное число", s)
+	}
+	return checkColor(s)
+}
+
+// themeStyleNames возвращает имена встроенных стилей glamour по порядку.
+func themeStyleNames() []string {
+	out := make([]string, 0, len(glamourstyles.DefaultStyles))
+	for name := range glamourstyles.DefaultStyles {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DefaultFilePattern — имя файла журнала по умолчанию: свой файл на каждый
+// запуск ollchat. Иначе несколько экземпляров, запущенных на одной машине
+// в разных сеансах ssh или окнах tmux, писали бы в общий файл вперемешку.
+const DefaultFilePattern = "chat-%Y-%m-%d_%H-%M-%S.md"
+
 // Log — настройки журнала чата.
 type Log struct {
-	Enabled     bool   `toml:"enabled"`
-	Dir         string `toml:"dir"`
-	Pattern     string `toml:"pattern"` // шаблон времени Go, например "chat-2006-01-02.md"
+	Enabled bool   `toml:"enabled"`
+	Dir     string `toml:"dir"`
+	// FilePattern — шаблон имени файла в духе strftime, см. chatlog.ParsePattern.
+	FilePattern string `toml:"file_pattern"`
+	// Pattern — устаревшая настройка: раскладка времени Go ("chat-2006-01-02.md").
+	// Оставлена, чтобы не ломать существующие конфиги; действует, только когда
+	// file_pattern не задан.
+	Pattern     string `toml:"pattern"`
 	LogThinking bool   `toml:"log_thinking"`
 	LogTools    bool   `toml:"log_tools"`
+}
+
+// NamePattern возвращает разобранный шаблон имени файла журнала.
+// Новая настройка file_pattern имеет приоритет над устаревшей pattern.
+func (l Log) NamePattern() (*chatlog.Pattern, error) {
+	if strings.TrimSpace(l.FilePattern) != "" {
+		return chatlog.ParsePattern(l.FilePattern)
+	}
+	return chatlog.LegacyPattern(l.Pattern), nil
+}
+
+// LegacyPatternIgnored сообщает, что в конфиге заданы обе настройки сразу
+// и устаревшая не действует — об этом стоит предупредить пользователя.
+func (l Log) LegacyPatternIgnored() bool {
+	return strings.TrimSpace(l.FilePattern) != "" && strings.TrimSpace(l.Pattern) != ""
 }
 
 // Agent — настройки агентного режима.
@@ -215,7 +370,13 @@ func Default() *Config {
 			DefaultServer:  "local",
 			RenderMarkdown: true,
 			ShowThinking:   true,
+			ShowTurnID:     true,
 			Mode:           ModeSafe,
+		},
+		Theme: Theme{
+			Style:      ThemeAuto,
+			CodeTheme:  DefaultCodeTheme,
+			InlineCode: DefaultInlineCode,
 		},
 		Input: Input{
 			Mouse: true,
@@ -228,7 +389,7 @@ func Default() *Config {
 		Log: Log{
 			Enabled:     true,
 			Dir:         "~/.local/share/ollchat/logs",
-			Pattern:     "chat-2006-01-02.md",
+			FilePattern: DefaultFilePattern,
 			LogThinking: false,
 			LogTools:    true,
 		},
@@ -373,6 +534,15 @@ func Load(path string) (cfg *Config, exists bool, err error) {
 	// deny-правил по умолчанию нельзя было бы отказаться осознанно.
 	loaded := Default()
 	loaded.Servers = nil
+	// Шаблон имени журнала снимаем с умолчания перед разбором: иначе конфиг,
+	// созданный до появления file_pattern, получил бы новый шаблон поверх своей
+	// настройки pattern и незаметно сменил бы поведение журнала. Пустыми обе
+	// настройки остаться не могут — умолчание подставит finalize.
+	loaded.Log.FilePattern = ""
+	// И по той же причине — правки цветов подсветки: TOML дописывает ключи
+	// в существующую карту, а не заменяет её, и умолчание пережило бы любой
+	// пользовательский раздел.
+	loaded.Theme.Tokens = nil
 	if _, err := toml.Decode(string(data), loaded); err != nil {
 		return nil, true, fmt.Errorf("разбор конфига %s: %w", path, err)
 	}
@@ -406,8 +576,17 @@ func (c *Config) finalize() error {
 		return fmt.Errorf("input.cursor.color: %w", err)
 	}
 
-	if c.Log.Pattern == "" {
-		c.Log.Pattern = "chat-2006-01-02.md"
+	if err := c.Theme.validate(); err != nil {
+		return err
+	}
+
+	// Устаревшая настройка pattern продолжает работать, но только когда
+	// file_pattern не задан; обе пустые — берём умолчание.
+	if strings.TrimSpace(c.Log.FilePattern) == "" && strings.TrimSpace(c.Log.Pattern) == "" {
+		c.Log.FilePattern = DefaultFilePattern
+	}
+	if _, err := c.Log.NamePattern(); err != nil {
+		return fmt.Errorf("log.file_pattern: %w", err)
 	}
 	c.Log.Dir = ExpandPath(c.Log.Dir)
 

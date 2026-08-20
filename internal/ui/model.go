@@ -76,6 +76,10 @@ type Model struct {
 	// на момент отправки: за время ответа выбранная модель может смениться,
 	// а в журнале должна остаться та, что действительно отвечала.
 	answeredBy string
+	// turnID — идентификатор текущего обмена, выданный журналом в send.
+	// Им помечаются блоки ленты, чтобы копия по Shift+F5 и запись в файле
+	// сослались на один и тот же обмен.
+	turnID string
 
 	// Подтверждение действия.
 	confirm       *agent.ConfirmRequest
@@ -181,9 +185,10 @@ func New(cfg *config.Config, guard *permissions.Guard, registry *tools.Registry,
 		modelName: modelName,
 		ta:        ta,
 		spin:      sp,
-		// Тему определяем здесь, до старта цикла событий Bubble Tea, —
-		// подробности в комментарии к detectStyle.
-		rend:         newRenderer(80, cfg.General.RenderMarkdown, detectStyle()),
+		// Оформление собираем здесь, до старта цикла событий Bubble Tea:
+		// стиль auto определяется запросом к терминалу — подробности
+		// в комментарии к detectStyle.
+		rend:         newRenderer(80, cfg.General.RenderMarkdown, cfg.Theme),
 		showThinking: cfg.General.ShowThinking,
 		think:        srv.Think,
 		mouseOn:      cfg.Input.Mouse,
@@ -204,6 +209,11 @@ func New(cfg *config.Config, guard *permissions.Guard, registry *tools.Registry,
 	}
 	if hint := toolDriftHint(cfg, registry); hint != "" {
 		m.addBlock(block{kind: blockHint, text: hint})
+	}
+	if cfg.Log.LegacyPatternIgnored() {
+		m.addBlock(block{kind: blockHint, text: "в разделе [log] заданы обе настройки имени файла: " +
+			"действует file_pattern = \"" + cfg.Log.FilePattern + "\", устаревшая pattern не влияет ни на что " +
+			"и её можно убрать"})
 	}
 	return m
 }
@@ -480,10 +490,14 @@ func (m *Model) send(text string) tea.Cmd {
 		return nil
 	}
 
+	// Обмен начинается здесь: журнал пометит этим идентификатором всё до
+	// EndTurn — вопрос, вложения, вызовы инструментов, рассуждения и ответ.
+	m.turnID = m.logger.BeginTurn()
+
 	// Одно время на блок ленты и на запись журнала: копирование по Shift+F5
 	// собирает запись из блока, и отметки обязаны совпасть с журналом.
 	asked := time.Now()
-	m.addBlock(block{kind: blockUser, text: text, at: asked})
+	m.addBlock(block{kind: blockUser, text: text, at: asked, turn: m.turnID})
 	if err := m.logger.WriteAt(asked, chatlog.KindQuestion, text); err != nil {
 		m.statusMsg = "журнал: " + err.Error()
 	}
@@ -631,6 +645,10 @@ func (m *Model) finishTurn() {
 			m.statusMsg = "журнал: " + err.Error()
 		}
 	}
+	// Обмен закрыт: дальнейшие записи снова сеансовые. Строго после записи
+	// ответа и рассуждений — иначе они получили бы номер 00.
+	m.logger.EndTurn()
+
 	m.liveIdx = -1
 	m.thinkIdx = -1
 }
@@ -642,6 +660,7 @@ func (m *Model) finishTurn() {
 // сохранённый снаружи индекс после неудачной попытки указывает не туда.
 func (m *Model) stampTurn(ts time.Time) {
 	from := lastUserBlock(m.blocks) + 1
+	last := -1
 	for i := from; i < len(m.blocks); i++ {
 		if m.blocks[i].kind != blockAssistant {
 			continue
@@ -652,5 +671,19 @@ func (m *Model) stampTurn(ts time.Time) {
 		if m.blocks[i].model == "" {
 			m.blocks[i].model = m.answeredBy
 		}
+		if m.blocks[i].turn == "" {
+			m.blocks[i].turn = m.turnID
+		}
+		if strings.TrimSpace(m.blocks[i].text) != "" {
+			last = i
+		}
+	}
+	// Идентификатор показывается один раз за обмен — под последним куском
+	// ответа. Ответ, разорванный вызовами инструментов, лежит в нескольких
+	// блоках, и метка под каждым из них была бы шумом.
+	if last >= 0 && m.blocks[last].turn != "" {
+		b := m.blocks[last]
+		b.showTurnID = true
+		m.updateBlock(last, b)
 	}
 }

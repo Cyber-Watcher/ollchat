@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -166,7 +167,11 @@ func run() error {
 		return err
 	}
 
-	logger := chatlog.New(cfg.Log.Dir, cfg.Log.Pattern, cfg.Log.Enabled)
+	logPattern, err := cfg.Log.NamePattern()
+	if err != nil {
+		return fmt.Errorf("log.file_pattern: %w", err)
+	}
+	logger := chatlog.NewFromPattern(cfg.Log.Dir, logPattern, time.Now(), cfg.Log.Enabled)
 	defer logger.Close()
 	if err := logger.WriteSessionHeader(srv.Name, srv.URL, model); err != nil {
 		fmt.Fprintln(os.Stderr, "предупреждение: не удалось писать журнал: "+err.Error())
