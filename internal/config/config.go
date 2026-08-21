@@ -116,6 +116,11 @@ type Theme struct {
 	CodeTheme string `toml:"code_theme"`
 	// CodeBG — заливка блока кода. Пусто — фон терминала.
 	CodeBG string `toml:"code_bg"`
+	// Italic — рисовать ли заметки, рассуждения и выделение курсивом:
+	// auto (по терминалу), on, off. Терминал без курсива показывает вместо
+	// него инверсию — серую заливку строки; так выглядит справка в tmux
+	// с умолчанием TERM=screen-256color.
+	Italic string `toml:"italic"`
 	// InlineCode и InlineCodeBG — цвет и заливка кода в тексте (`так`).
 	InlineCode   string `toml:"inline_code"`
 	InlineCodeBG string `toml:"inline_code_bg"`
@@ -123,6 +128,13 @@ type Theme struct {
 	// например {"NameTag": "#83a598"}. Имена — виды токенов chroma.
 	Tokens map[string]string `toml:"tokens"`
 }
+
+// Значения настройки theme.italic.
+const (
+	ItalicAuto = "auto"
+	ItalicOn   = "on"
+	ItalicOff  = "off"
+)
 
 // validate проверяет имена стилей и цвета.
 //
@@ -138,6 +150,18 @@ func (t *Theme) validate() error {
 			return fmt.Errorf("theme.style: неизвестный стиль %q (допустимы %s и %s)",
 				t.Style, ThemeAuto, strings.Join(themeStyleNames(), ", "))
 		}
+	}
+	// Курсив: auto — смотреть на терминал. Терминал без поддержки курсива
+	// (TERM=screen-256color, умолчание tmux) рисует его инверсией, и лента
+	// выглядит залитой серым.
+	if t.Italic == "" {
+		t.Italic = ItalicAuto
+	}
+	switch t.Italic {
+	case ItalicAuto, ItalicOn, ItalicOff:
+	default:
+		return fmt.Errorf("theme.italic: %q — допустимы %s, %s и %s",
+			t.Italic, ItalicAuto, ItalicOn, ItalicOff)
 	}
 	if t.CodeTheme != "" {
 		if _, ok := chromastyles.Registry[t.CodeTheme]; !ok {

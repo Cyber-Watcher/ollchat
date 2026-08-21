@@ -172,6 +172,11 @@ func New(cfg *config.Config, guard *permissions.Guard, registry *tools.Registry,
 	ta.KeyMap.InsertNewline.SetKeys("alt+enter", "ctrl+j")
 	applyCursor(&ta, cfg.Input.Cursor)
 
+	// Курсив: терминал, который его не умеет, показывает вместо него инверсию —
+	// строка выглядит залитой серым. Решается один раз при запуске, до первой
+	// отрисовки; настройка theme.italic позволяет задать это руками.
+	applyItalics(ItalicsEnabled(cfg.Theme.Italic, termName()))
+
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 
 	m := &Model{

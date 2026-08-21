@@ -97,6 +97,11 @@ func (r *renderer) setWidth(w int) {
 		r.glam = nil
 		return
 	}
+	// Терминал без курсива рисует его инверсией: выделение *вот такое*
+	// в ответе модели превратилось бы в серую заливку, как справка в tmux.
+	if !ItalicsEnabled(r.theme.Italic, termName()) {
+		disableItalics(&style)
+	}
 	g, err := glamour.NewTermRenderer(
 		glamour.WithStyles(style),
 		glamour.WithWordWrap(w),

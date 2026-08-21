@@ -1,0 +1,12 @@
+[Unit]
+Description=Ночной прогон моделей Ollama (olleval)
+After=ollama.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=ai
+Environment=PATH=/home/ai/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Прогон живёт в сессии tmux: к нему можно подключиться и посмотреть, что идёт,
+# а обрыв ssh на него не влияет. Сама служба лишь запускает сессию.
+ExecStart=/usr/bin/tmux new-session -d -s olleval-night /home/ai/bin/olleval-night.sh

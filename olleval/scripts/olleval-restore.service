@@ -1,0 +1,11 @@
+[Unit]
+Description=Вернуть Ollama в общий доступ после ночного прогона
+
+[Service]
+Type=oneshot
+User=ai
+Environment=PATH=/home/ai/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Открывает сервер, как только его больше незачем держать закрытым: окно
+# кончилось или прогон умер. Операция идемпотентная — если сервер и так открыт,
+# службу не трогает.
+ExecStart=/home/ai/bin/olleval-restore.sh

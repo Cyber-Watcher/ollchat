@@ -195,9 +195,15 @@ func (m *Model) openModelPicker() tea.Cmd {
 		if mi.Details.ContextLength > 0 {
 			ctxCol = "ctx " + ctxmeter.FormatTokens(mi.Details.ContextLength)
 		}
+		// Квантование приходит из /api/tags, но не у каждой модели: у сборок
+		// без него поле пустое, и колонка съехала бы влево на всей строке.
+		quantCol := strings.TrimSpace(mi.Details.QuantizationLevel)
+		if quantCol == "" {
+			quantCol = "—"
+		}
 		items = append(items, pickerItem{
 			label:   mi.Name,
-			columns: []string{mi.Details.ParameterSize, ctxCol, strings.Join(marks, ",")},
+			columns: []string{mi.Details.ParameterSize, quantCol, ctxCol, strings.Join(marks, ",")},
 			value:   mi.Name,
 		})
 	}
