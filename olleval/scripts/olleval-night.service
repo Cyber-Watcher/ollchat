@@ -1,0 +1,23 @@
+# OLLEVAL_USER — имя учётки, под которой идут прогоны. Подставьте своё
+# перед установкой: учётных записей в репозитории не держим.
+#   sed -i "s/OLLEVAL_USER/$USER/g" olleval-*.service
+[Unit]
+Description=Ночной прогон моделей Ollama (olleval)
+After=ollama.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=OLLEVAL_USER
+Environment=PATH=/home/OLLEVAL_USER/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Прогон живёт в сессии tmux: к нему можно подключиться и посмотреть, что идёт,
+# а обрыв ssh на него не влияет. Сама служба лишь запускает сессию.
+#
+# KillMode=process обязателен. Без него systemd после выхода ExecStart (клиент
+# tmux завершается сразу, отдав работу серверу) гасит весь cgroup службы —
+# вместе с сервером tmux и прогоном внутри. Замерено на стенде 22.08.2026:
+# каждый тик писал в журнал «Starting… Deactivated successfully» той же секундой,
+# сессии tmux не оставалось, каталог ночи не создавался. С KillMode=process
+# тот же запуск оставляет живую сессию.
+KillMode=process
+ExecStart=/usr/bin/tmux new-session -d -s olleval-night /home/OLLEVAL_USER/bin/olleval-night.sh

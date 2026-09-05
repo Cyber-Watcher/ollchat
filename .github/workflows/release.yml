@@ -1,0 +1,202 @@
+name: Release
+
+# Выпускается каждый коммит, попавший в main: версия выводится из коммитов после
+# последнего тега, тег ставится здесь же, архивы прикладываются к Release.
+#
+# Тег, поставленный руками, тоже выпускается — это запасной ход, когда версию
+# надо выбрать осознанно:
+#
+#   git tag -a v1.2.0 -m "..." && git push origin v1.2.0
+#
+# Чтобы влить в main без выпуска, добавьте [skip release] в сообщение коммита.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия, например v1.2.0 (пусто — поднять patch у последней)"
+        required: false
+
+# Два выпуска разом подрались бы за тег.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Вся история: версия берётся из тегов, а описание выпуска —
+          # из коммитов после предыдущего.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Проверок и тестов здесь намеренно нет: они прогоняются на рабочей
+      # машине до отправки — `go test ./...`, `go vet ./...`, `gofmt -l .`,
+      # плюс `go test -race ./...`. Выпуск занимается выпуском.
+      #
+      # Расхождение поймает шаг кросс-сборки ниже: то, что не собирается
+      # под все цели, до архивов не дойдёт.
+
+      - name: определить версию
+        id: version
+        run: |
+          set -euo pipefail
+
+          # Выпуск по тегу releases ровно этот тег; описание тогда считается
+          # от предыдущего тега, а не от выпускаемого.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            before=$(git tag --list 'v*' --sort=-v:refname | grep -vFx "${GITHUB_REF_NAME}" | head -n1)
+            echo "version=${GITHUB_REF_NAME}" >>"$GITHUB_OUTPUT"
+            echo "previous=${before}" >>"$GITHUB_OUTPUT"
+            echo "tag_exists=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          previous=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+
+          # Явно заданная версия важнее выведенной.
+          requested="${{ github.event.inputs.version }}"
+          if [ -n "$requested" ]; then
+            echo "version=${requested}" >>"$GITHUB_OUTPUT"
+            echo "previous=${previous}" >>"$GITHUB_OUTPUT"
+            echo "tag_exists=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$previous" ]; then
+            echo "version=v0.1.0" >>"$GITHUB_OUTPUT"
+            echo "previous=" >>"$GITHUB_OUTPUT"
+            echo "tag_exists=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Размер шага определяют Conventional Commits: ломающая правка поднимает
+          # старшую цифру, новая возможность — среднюю, всё остальное — младшую.
+          subjects=$(git log --format='%s%n%b' "${previous}..HEAD")
+          bump=patch
+          if grep -qE '^[a-z]+(\([^)]*\))?!:|BREAKING[ -]CHANGE' <<<"$subjects"; then
+            bump=major
+          elif grep -qE '^feat(\([^)]*\))?:' <<<"$subjects"; then
+            bump=minor
+          fi
+
+          # Тег, поставленный руками, бывает вида v1.2, а не v1.2.0.
+          IFS=. read -r major minor patch <<<"${previous#v}"
+          minor=${minor:-0}; patch=${patch:-0}
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          echo "version=v${major}.${minor}.${patch}" >>"$GITHUB_OUTPUT"
+          echo "previous=${previous}" >>"$GITHUB_OUTPUT"
+          echo "tag_exists=false" >>"$GITHUB_OUTPUT"
+          echo "выпуск ${previous} → v${major}.${minor}.${patch} (${bump})"
+
+      - name: пропустить, если коммит просит
+        id: gate
+        run: |
+          if git log -1 --format='%B' | grep -qF '[skip release]'; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "в сообщении коммита стоит [skip release]"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: создать тег
+        if: steps.gate.outputs.skip == 'false' && steps.version.outputs.tag_exists == 'false'
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+
+          # Тег может уже быть, если прогон повторили.
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            echo "${version} уже существует"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${version}" -m "ollchat ${version}"
+          git push origin "${version}"
+
+      - name: собрать архивы выпуска
+        if: steps.gate.outputs.skip == 'false'
+        run: ./scripts/build-dist.sh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+
+      - name: написать описание выпуска
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          previous="${{ steps.version.outputs.previous }}"
+
+          {
+            echo "## Изменения"
+            echo
+            if [ -n "$previous" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "${previous}..HEAD"
+              echo
+              echo
+              echo "**Полный список правок**: https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${version}"
+            else
+              echo "- первый выпуск"
+            fi
+            echo
+            echo "## Установка"
+            echo
+            echo "Скачайте архив под свою систему ниже. Внутри один статический бинарь:"
+            echo "ни библиотек, ни среды выполнения ставить не нужно."
+            echo
+            echo '```bash'
+            echo "tar -xzf ollchat_${version}_linux_amd64.tar.gz"
+            echo "sudo install ollchat_${version}_linux_amd64/ollchat /usr/local/bin/"
+            echo "ollchat --init-config && ollchat"
+            echo '```'
+            echo
+            echo "Либо из исходников:"
+            echo
+            echo '```bash'
+            echo "go install github.com/${GITHUB_REPOSITORY}/cmd/ollchat@${version}"
+            echo '```'
+            echo
+            echo "Сверить архив с \`checksums.txt\`:"
+            echo
+            echo '```bash'
+            echo "sha256sum -c checksums.txt --ignore-missing"
+            echo '```'
+            echo
+            echo "В сборках под linux рядом лежит \`olldiagtools\` — отдельная программа для замера"
+            echo "видеопамяти на сервере с Ollama."
+          } >notes.md
+
+          cat notes.md
+
+      - name: опубликовать
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            dist/* \
+            --title "ollchat ${{ steps.version.outputs.version }}" \
+            --notes-file notes.md \
+            --verify-tag

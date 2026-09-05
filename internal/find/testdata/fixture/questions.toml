@@ -1,0 +1,123 @@
+# Вопросы к фикстурной коллекции (этап 91, R7.1): ожидаемая книга — файл,
+# в котором лежит ответ. Признак попадания — кусок из этой книги в первых K.
+
+[[case]]
+query = "Как создать горутину и что такое небуферизованный канал?"
+book = "goroutines"
+
+[[case]]
+query = "Что делает оператор select с веткой default?"
+book = "goroutines"
+
+[[case]]
+query = "Как включить детектор гонок при тестировании Go?"
+book = "goroutines"
+
+[[case]]
+query = "Чем RWMutex отличается от Mutex?"
+book = "mutex"
+
+[[case]]
+query = "Как дождаться завершения нескольких горутин?"
+book = "mutex"
+
+[[case]]
+query = "Как выполнить инициализацию ровно один раз из многих горутин?"
+book = "mutex"
+
+[[case]]
+query = "Что такое atomic.CompareAndSwap?"
+book = "mutex"
+
+[[case]]
+query = "Чем requests отличаются от limits в Kubernetes?"
+book = "kubernetes-limits"
+
+[[case]]
+query = "Почему под получает OOMKilled?"
+book = "kubernetes-limits"
+
+[[case]]
+query = "Какие классы QoS есть у подов и кого вытесняют первым?"
+book = "kubernetes-limits"
+
+[[case]]
+query = "Что делает ResourceQuota?"
+book = "kubernetes-limits"
+
+[[case]]
+query = "Почему COPY package.json ставят перед COPY . в Dockerfile?"
+book = "docker-layers"
+
+[[case]]
+query = "Что такое multi-stage build?"
+book = "docker-layers"
+
+[[case]]
+query = "Как посмотреть слои образа Docker?"
+book = "docker-layers"
+
+[[case]]
+query = "Какие параметры у формулы BM25 и какие значения обычны?"
+book = "bm25"
+
+[[case]]
+query = "Что хранит инвертированный индекс?"
+book = "bm25"
+
+[[case]]
+query = "Почему BM25 не находит синонимы?"
+book = "bm25"
+
+[[case]]
+query = "Какая размерность у векторов bge-m3?"
+book = "embeddings"
+
+[[case]]
+query = "Зачем квантовать векторы до int8?"
+book = "embeddings"
+
+[[case]]
+query = "Как меряют близость эмбеддингов?"
+book = "embeddings"
+
+[[case]]
+query = "Как работает Reciprocal Rank Fusion?"
+book = "rrf"
+
+[[case]]
+query = "Что делает кросс-энкодер и почему его применяют только к верхушке?"
+book = "rrf"
+
+[[case]]
+query = "Какими метриками меряют качество поиска?"
+book = "rrf"
+
+[[case]]
+query = "Как GraphRAG находит темы в графе понятий?"
+book = "graphrag"
+
+[[case]]
+query = "Зачем нужно разрешение сущностей в графе?"
+book = "graphrag"
+
+[[case]]
+query = "Почему схему извлечения графа выбирают до первого прогона?"
+book = "graphrag"
+
+[[case]]
+query = "Как включить службу systemd при загрузке и запустить сразу?"
+book = "systemd"
+
+[[case]]
+query = "Как посмотреть журнал одной службы systemd?"
+book = "systemd"
+
+[[case]]
+query = "Что означает ошибка certificate signed by unknown authority?"
+book = "tls-certs"
+
+[[case]]
+query = "На сколько дней выдаёт сертификаты Let's Encrypt?"
+book = "tls-certs"
+

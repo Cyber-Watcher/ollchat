@@ -1,0 +1,11 @@
+[Unit]
+Description=Проверка, не пора ли вернуть Ollama в общий доступ
+
+[Timer]
+# Смещён на 7 минут от тика прогонов, чтобы две службы не толкались.
+OnCalendar=*-*-* *:07/15:00
+Persistent=true
+Unit=olleval-restore.service
+
+[Install]
+WantedBy=timers.target

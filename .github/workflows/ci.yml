@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Новый толчок в ту же ветку обесценивает предыдущий прогон.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  check:
+    name: кросс-сборка
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Тестов, gofmt и go vet здесь нет намеренно. Всё это прогоняется
+      # на рабочей машине до отправки, вместе с детектором гонок:
+      #
+      #   go test ./... && go vet ./... && gofmt -l .
+      #   go test -race ./...
+      #
+      # Держать их ещё и здесь значит узнавать о поломке позже и дороже,
+      # чем она уже стала известна.
+
+      # Единственное, чего на рабочей машине не проверить, — сборка под чужие
+      # системы. Пусть расхождение вылезает здесь, а не в момент выпуска.
+      - name: кросс-сборка под все системы
+        run: ./scripts/build-dist.sh
+        env:
+          VERSION: ci-${{ github.sha }}
+
+# Живые проверки сюда намеренно не входят: им нужен сервер Ollama с моделями,
+# своя SearXNG и собранная база знаний по книгам. Они запускаются вручную:
+#
+#   OLLCHAT_TEST_SERVER=http://СЕРВЕР:11434 OLLCHAT_TEST_MODEL=МОДЕЛЬ \
+#     go test ./internal/agent/ -v -timeout 30m
+#   OLLCHAT_KB_LIVE=1 go test ./internal/kb/live/ -v
+#   OLLCHAT_SEARX_URL=http://СЕРВЕР:8888 go test ./internal/tools/live/ -v

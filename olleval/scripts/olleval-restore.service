@@ -1,0 +1,14 @@
+# OLLEVAL_USER — имя учётки, под которой идут прогоны. Подставьте своё
+# перед установкой: учётных записей в репозитории не держим.
+#   sed -i "s/OLLEVAL_USER/$USER/g" olleval-*.service
+[Unit]
+Description=Вернуть Ollama в общий доступ после ночного прогона
+
+[Service]
+Type=oneshot
+User=OLLEVAL_USER
+Environment=PATH=/home/OLLEVAL_USER/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Открывает сервер, как только его больше незачем держать закрытым: окно
+# кончилось или прогон умер. Операция идемпотентная — если сервер и так открыт,
+# службу не трогает.
+ExecStart=/home/OLLEVAL_USER/bin/olleval-restore.sh
