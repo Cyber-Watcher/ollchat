@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Граница каталога, а не подстрока.
@@ -192,5 +193,57 @@ func TestRebaseReportsMissingButSucceeds(t *testing.T) {
 	}
 	if res.Books != 2 {
 		t.Errorf("переписано %d книг, ожидалось 2", res.Books)
+	}
+}
+
+// Перенос между машинами не должен делать книгу «изменившейся».
+//
+// ResilioSync переносит время правки только до секунды. Замер 05.09.2026 на одном
+// и том же файле: «…22:33:20.608379056» на отдающей машине против
+// «…22:33:20.000000000» на принимающей. Пока сравнение шло по наносекундам,
+// на принимающей машине изменившимися выглядели ВСЕ книги, и `--kb-sync`
+// перечитал бы библиотеку целиком: номера книг раздаёт индексация, а граф
+// ссылается на кусок парой «номер книги, номер куска».
+func TestUnchangedIgnoresSubsecondModTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "книга.pdf")
+	if err := os.WriteFile(path, []byte("текст книги"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stat := func() os.FileInfo {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	setTime := func(at time.Time) os.FileInfo {
+		t.Helper()
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return stat()
+	}
+
+	exact := time.Date(2026, 8, 26, 22, 33, 20, 608379056, time.Local)
+	info := setTime(exact)
+	rec := BookRec{Size: info.Size(), ModTime: info.ModTime().UnixNano()}
+
+	// Ровно та же секунда, наносекунды обнулены — так файл выглядит после переноса.
+	if info := setTime(exact.Truncate(time.Second)); !rec.Unchanged(info) {
+		t.Error("после переноса книга считается изменившейся — сравнение снова ушло в наносекунды")
+	}
+
+	// Другая секунда — это уже настоящая правка.
+	if info := setTime(exact.Add(2 * time.Second)); rec.Unchanged(info) {
+		t.Error("правка, сдвинувшая время на секунды, осталась незамеченной")
+	}
+
+	// Тот же момент, но другой размер — тоже правка.
+	if err := os.WriteFile(path, []byte("текст книги стал длиннее"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if info := setTime(exact.Truncate(time.Second)); rec.Unchanged(info) {
+		t.Error("изменившийся размер остался незамеченным")
 	}
 }
