@@ -30,6 +30,15 @@ import (
 // отдельной командой под tmux или nohup, а не из чата. Прерывание безопасно —
 // разобранные куски отмечены, и повторный запуск продолжит с того же места.
 
+// buildExtractor — чем сборка спрашивает модель: один сервер (*graphex.Extractor)
+// или пул узлов (*graphex.Pool). Проверка перед стартом входит в интерфейс,
+// потому что она обязательна для обоих и делает разное: у одиночного —
+// «сервер жив и модель на нём есть», у пула — ещё и «веса модели совпадают».
+type buildExtractor interface {
+	graph.Extractor
+	Check(ctx context.Context) error
+}
+
 // Build собирает или доливает граф коллекции.
 func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, workers int,
 	allowModelChange, allowPromptChange, redoEmpty, linkNew bool, logPath, kind, note string) error {
@@ -48,15 +57,33 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 	if len(cfg.Servers) > 0 {
 		fallback = cfg.Servers[0].URL
 	}
-	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
-	if ex == nil {
-		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s "+
-			"(например \"glm-4.7-flash:q8_0\")", cfg.Path)
+
+	// Извлекатель: пул узлов, если в настройках заведены [[graph.nodes]]
+	// (этап 95), иначе один сервер, как было. Оба удовлетворяют одному
+	// интерфейсу, поэтому дальше по коду разницы нет.
+	var (
+		ex   buildExtractor
+		pool *graphex.Pool
+	)
+	if nodes := cfg.Graph.ExtractNodes(); len(nodes) > 0 {
+		p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, nil)
+		if err != nil {
+			return fmt.Errorf("узлы сборки (graph.nodes): %w", err)
+		}
+		pool, ex = p, p
+	} else {
+		one := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
+		if one == nil {
+			return fmt.Errorf("извлечение не настроено: задайте graph.model в %s "+
+				"(например \"glm-4.7-flash:q8_0\")", cfg.Path)
+		}
+		ex = one
 	}
 
 	// Проверка до начала работы. Иначе при закрытом сервере (а на время ночных
 	// прогонов Ollama на стенде слушает только localhost) человек несколько
 	// минут смотрит на неподвижную строку хода вместо внятного отказа.
+	// У пула та же проверка сверяет ещё и веса модели на узлах.
 	if err := ex.Check(context.Background()); err != nil {
 		return err
 	}
@@ -88,6 +115,18 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 		fmt.Fprintf(stdout, "снят признак идущей сборки: %s\n", s)
 	}
 	fmt.Fprintf(stdout, "коллекция %s, модель извлечения %s\n", name, ex.Model())
+	if pool != nil {
+		var parts []string
+		for _, s := range pool.Stats() {
+			parts = append(parts, s.Name)
+		}
+		fmt.Fprintf(stdout, "узлов сборки: %d (%s), слотов всего %d\n",
+			len(parts), strings.Join(parts, ", "), pool.Slots())
+		// Паспорт помнит все узлы, которыми граф когда-либо собирался.
+		if err := g.AddNodes(pool.Names()); err != nil {
+			return err
+		}
+	}
 	if folder != "" {
 		fmt.Fprintf(stdout, "отбор по пути: %q — книг %d, кусков %d\n", folder, len(books), inFolder)
 	} else {
@@ -115,6 +154,22 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 		fmt.Fprintf(stdout, "связывание новых имён: порог близости %.2f, арбитр %s\n", link.MinCos, ex.Model())
 	}
 
+	// Число воркеров. Без ключа сборка брала четыре независимо от настроек;
+	// с пулом это означало бы, что часть карт простаивает, поэтому по умолчанию
+	// берётся сумма слотов узлов, а на одном сервере — graph.workers.
+	if workers <= 0 {
+		if pool != nil {
+			workers = pool.Slots()
+		} else {
+			workers = cfg.Graph.Workers
+		}
+	}
+
+	// Сторож возврата отвалившихся узлов живёт ровно столько, сколько заход.
+	if pool != nil {
+		go pool.Watch(ctx)
+	}
+
 	start := time.Now()
 	res, err := graph.Build(ctx, coll, g, ex, graph.BuildOpts{
 		Link:              link,
@@ -125,7 +180,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 		AllowModelChange:  allowModelChange,
 		AllowPromptChange: allowPromptChange,
 		RedoEmpty:         redoEmpty,
-	}, graphProgress(logPath))
+	}, graphProgress(logPath, poolLine(pool)))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return err
@@ -145,6 +200,17 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 	fmt.Fprintf(stdout, "  пусто: %d, пропущено: %d\n", res.Empty, res.Skipped)
 	fmt.Fprintf(stdout, "  сущностей: %d (+%d), связей: %d (+%d)\n",
 		res.Entities, res.NewEntities, res.Edges, res.NewEdges)
+	if pool != nil {
+		fmt.Fprintf(stdout, "  по узлам: %s\n", pool.Line())
+	}
+	// Очередь на общий замок записи. Пока карта одна, она тонет в секундах
+	// генерации; на нескольких узлах это первый подозреваемый, если суммарная
+	// скорость вышла заметно ниже суммы одиночных.
+	if res.Done > 0 && res.LockWait > 0 {
+		share := res.LockWait.Seconds() / (elapsed.Seconds() * float64(workers)) * 100
+		fmt.Fprintf(stdout, "  очередь на запись: %s суммарно (%.1f%% времени воркеров)\n",
+			res.LockWait.Round(time.Second), share)
+	}
 
 	// Оценка остатка — то, ради чего и делается замер на малом числе кусков:
 	// «три часа» и «трое суток» это разные решения. Остаток берётся из самой
@@ -337,7 +403,16 @@ func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
 //
 // В файл идут полные строки с отметкой времени, а не возврат каретки: `\r`
 // хорош для живого терминала и бесполезен в журнале, где нужна история.
-func graphProgress(logPath string) func(graph.BuildProgress) {
+// poolLine — как показать вклад узлов в строке хода. nil-пул даёт nil:
+// на одном сервере разбивке неоткуда взяться и печатать её незачем.
+func poolLine(p *graphex.Pool) func() string {
+	if p == nil {
+		return nil
+	}
+	return p.Line
+}
+
+func graphProgress(logPath string, nodes func() string) func(graph.BuildProgress) {
 	var last time.Time
 	var logFile *os.File
 	if logPath != "" {
@@ -364,12 +439,18 @@ func graphProgress(logPath string) func(graph.BuildProgress) {
 			eta := time.Duration(float64(p.Total-p.Done)/p.Rate()) * time.Second
 			rest = fmt.Sprintf(", ещё ~%s", eta.Round(time.Minute))
 		}
-		fmt.Fprintf(os.Stderr, "\r\033[K%d/%d кусков · %.1f/с · понятий %d · связей %d%s · %s",
-			p.Done, p.Total, p.Rate(), p.Entities, p.Edges, rest, book)
+		by := ""
+		if nodes != nil {
+			if s := nodes(); s != "" {
+				by = " · " + s
+			}
+		}
+		fmt.Fprintf(os.Stderr, "\r\033[K%d/%d кусков · %.1f/с · понятий %d · связей %d%s%s · %s",
+			p.Done, p.Total, p.Rate(), p.Entities, p.Edges, rest, by, book)
 		if logFile != nil {
-			fmt.Fprintf(logFile, "%s %d/%d кусков · %.1f/с · понятий %d · связей %d%s · %s\n",
+			fmt.Fprintf(logFile, "%s %d/%d кусков · %.1f/с · понятий %d · связей %d%s%s · %s\n",
 				time.Now().Format("15:04:05"),
-				p.Done, p.Total, p.Rate(), p.Entities, p.Edges, rest, book)
+				p.Done, p.Total, p.Rate(), p.Entities, p.Edges, rest, by, book)
 		}
 	}
 }

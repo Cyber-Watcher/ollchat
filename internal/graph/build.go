@@ -133,6 +133,14 @@ type BuildResult struct {
 	// на начало захода. По нему считается остаток: «ещё столько-то часов».
 	Pending  int
 	Canceled bool
+
+	// LockWait — сколько воркеры суммарно простояли в очереди на общий замок
+	// записи. Смысл появился с пулом узлов (этап 95): пока карта одна, запись
+	// тонет в трёх-четырёх секундах генерации, а на нескольких картах она
+	// становится подозреваемой номер один. Число печатается в итоге захода,
+	// чтобы подозрение проверялось замером, а не рассуждением: при
+	// --graph-link-new под этим же замком идут запросы к эмбеддеру и арбитру.
+	LockWait time.Duration
 }
 
 // Build разбирает куски коллекции и наполняет граф.
@@ -232,6 +240,7 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 
 	var (
 		mu       sync.Mutex
+		lockWait time.Duration
 		done     int
 		empty    int
 		skipped  int
@@ -254,7 +263,9 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 			}
 			facts, err, badAnswer := askModel(runCtx, ex, system, j.book, j.unit, j.from, j.to, j.text, opt.Retry)
 
+			queued := time.Now()
 			mu.Lock()
+			lockWait += time.Since(queued)
 			switch {
 			case err != nil && !badAnswer && ctx.Err() == nil:
 				// Сервер отвалился совсем — работать дальше бессмысленно,
@@ -354,6 +365,7 @@ send:
 		firstErr = err
 	}
 
+	res.LockWait = lockWait
 	res.BuildProgress = BuildProgress{
 		Total: res.Total, Done: done, Empty: empty, Skipped: skipped,
 		Entities: g.Entities().Count(), Edges: g.Edges().Count(),

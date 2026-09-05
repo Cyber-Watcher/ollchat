@@ -36,6 +36,11 @@ type Extractor struct {
 	maxTokens int
 	temp      float64
 	sem       chan struct{}
+
+	// retryPause — шаг задержки между повторами сорванного запроса.
+	// Поле, а не постоянная, ради тестов: проверка выключения узла в пуле
+	// иначе ждала бы по шесть секунд на каждую неудачу.
+	retryPause time.Duration
 }
 
 // New собирает извлекатель по настройкам.
@@ -77,14 +82,15 @@ func New(o Options, fallbackURL string, timeout time.Duration, headers map[strin
 		timeout = 5 * time.Minute
 	}
 	return &Extractor{
-		client:    ollama.New(url, 60*time.Second, timeout, headers),
-		url:       url,
-		model:     o.Model,
-		keepAlive: o.KeepAlive,
-		numCtx:    o.NumCtx,
-		maxTokens: o.MaxTokens,
-		temp:      o.Temperature,
-		sem:       make(chan struct{}, workers),
+		client:     ollama.New(url, 60*time.Second, timeout, headers),
+		url:        url,
+		model:      o.Model,
+		keepAlive:  o.KeepAlive,
+		numCtx:     o.NumCtx,
+		maxTokens:  o.MaxTokens,
+		temp:       o.Temperature,
+		sem:        make(chan struct{}, workers),
+		retryPause: 2 * time.Second,
 	}
 }
 
@@ -151,6 +157,38 @@ func (e *Extractor) Check(ctx context.Context) error {
 		e.url, e.model, strings.Join(names, ", "))
 }
 
+// ModelStamp — отпечаток весов модели на сервере: чем она отличается
+// от одноимённой модели на соседнем сервере.
+type ModelStamp struct {
+	Digest string // sha256 весов из /api/tags
+	Quant  string // уровень квантования, «Q4_K_M»
+	Size   int64  // размер файла в байтах
+}
+
+// Stamp снимает отпечаток модели извлечения на этом сервере.
+//
+// Нужен пулу узлов (pool.go): одно имя `qwen3.8:latest` на двух серверах может
+// указывать на разные файлы — другое квантование, другая дата загрузки. Граф,
+// собранный наполовину одними весами, наполовину другими, выглядит исправным
+// и не чинится ничем, кроме полной пересборки.
+//
+// Всё берётся из /api/tags: там есть и digest, и уровень квантования,
+// поэтому второй запрос к /api/show не нужен.
+func (e *Extractor) Stamp(ctx context.Context) (ModelStamp, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tags, err := e.client.Tags(ctx)
+	if err != nil {
+		return ModelStamp{}, fmt.Errorf("не удалось получить список моделей: %w", err)
+	}
+	for _, m := range tags {
+		if m.Name == e.model || strings.HasPrefix(m.Name, e.model+":") {
+			return ModelStamp{Digest: m.Digest, Quant: m.Details.QuantizationLevel, Size: m.Size}, nil
+		}
+	}
+	return ModelStamp{}, fmt.Errorf("нет модели %q", e.model)
+}
+
 // Extract спрашивает модель и возвращает её ответ как есть — разбирает его
 // уже пакет graph.
 //
@@ -209,7 +247,7 @@ func (e *Extractor) Extract(ctx context.Context, system, user string) (string, e
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-time.After(time.Duration(try+1) * 2 * time.Second):
+		case <-time.After(time.Duration(try+1) * e.retryPause):
 		}
 	}
 }

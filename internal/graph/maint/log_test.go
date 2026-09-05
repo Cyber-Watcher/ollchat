@@ -19,7 +19,7 @@ import (
 // перенаправили.
 func TestGraphProgressWritesLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ход.log")
-	report := graphProgress(path)
+	report := graphProgress(path, nil)
 
 	report(graph.BuildProgress{
 		Total: 100, Done: 7, Entities: 42, Edges: 99,
@@ -54,14 +54,14 @@ func TestGraphProgressWritesLog(t *testing.T) {
 // Недоступный путь не роняет сборку: журнал хода — удобство, а не условие
 // работы. Сборка идёт часами, и терять её из-за опечатки в пути нельзя.
 func TestGraphProgressBadPathSurvives(t *testing.T) {
-	report := graphProgress(filepath.Join(t.TempDir(), "нет-такого-каталога", "ход.log"))
+	report := graphProgress(filepath.Join(t.TempDir(), "нет-такого-каталога", "ход.log"), nil)
 	report(graph.BuildProgress{Total: 10, Done: 1, Book: "книга"})
 }
 
 // Без пути ключ выключен и файлов не появляется.
 func TestGraphProgressNoPath(t *testing.T) {
 	dir := t.TempDir()
-	report := graphProgress("")
+	report := graphProgress("", nil)
 	report(graph.BuildProgress{Total: 10, Done: 1, Book: "книга"})
 	entries, err := os.ReadDir(dir)
 	if err != nil {

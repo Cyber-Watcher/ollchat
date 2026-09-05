@@ -586,6 +586,16 @@ type Mix struct {
 	QuotesWithoutTools int `toml:"quotes_without_tools"`
 }
 
+// GraphNode — один сервер Ollama, занятый сборкой графа.
+//
+// Имя, а не адрес, попадает в строку хода, журнал сборки и паспорт графа:
+// эти три места читают посторонние, а адрес сервера — частные данные.
+type GraphNode struct {
+	Name    string `toml:"name"`    // короткое имя для показа: «a100», «rtx3090»
+	URL     string `toml:"url"`     // адрес сервера Ollama
+	Workers int    `toml:"workers"` // сколько запросов держать на нём разом; 0 — 4
+}
+
 // Graph — граф понятий поверх базы знаний (см. GraphRAGPlan.md).
 //
 // Пустая model выключает сборку графа: искать по уже собранному это не мешает,
@@ -596,6 +606,17 @@ type Graph struct {
 	Workers     int     `toml:"workers"`
 	NumCtx      int     `toml:"num_ctx"`
 	Temperature float64 `toml:"temperature"`
+
+	// Nodes — несколько серверов Ollama для сборки графа: каждый со своей
+	// видеокартой (этап 95). Пусто — прежнее поведение: один сервер из url.
+	//
+	// Нужно потому, что модель извлечения не умеет параллельных запросов:
+	// на одной карте `workers` почти ничего не покупает (замер 26.08.2026 —
+	// ускорение 0.96–1.47x на четырёх слотах), а вторая карта это настоящий
+	// второй слот. Модель и её веса на узлах обязаны совпадать, иначе половина
+	// графа окажется собрана одной моделью, половина другой; сборка это
+	// проверяет и отказывается идти.
+	Nodes []GraphNode `toml:"nodes"`
 
 	// MaxTokens — потолок длины ответа модели (num_predict). Замерено
 	// 23.08.2026: без него на отдельных кусках модель писала 3 648 токенов
@@ -1382,6 +1403,54 @@ func (g Graph) ExtractOptions() graphex.Options {
 		NumCtx: g.NumCtx, MaxTokens: g.MaxTokens, Temperature: g.Temperature}
 }
 
+// ExtractNodes — узлы пула для graphex.NewPool. Пусто — сборка идёт по-старому,
+// одним сервером из ExtractOptions.
+func (g Graph) ExtractNodes() []graphex.Node {
+	if len(g.Nodes) == 0 {
+		return nil
+	}
+	out := make([]graphex.Node, 0, len(g.Nodes))
+	for _, n := range g.Nodes {
+		w := n.Workers
+		if w <= 0 {
+			w = g.Workers
+		}
+		out = append(out, graphex.Node{Name: n.Name, URL: n.URL, Workers: w})
+	}
+	return out
+}
+
+// validateGraphNodes проверяет список узлов сборки одного раздела настроек.
+// section — имя раздела для сообщения об ошибке: «graph» или «graph.lab».
+func validateGraphNodes(section string, nodes []GraphNode) error {
+	seen := map[string]bool{}
+	for i, n := range nodes {
+		if n.Name == "" {
+			return fmt.Errorf("%s.nodes[%d]: не задано имя узла", section, i)
+		}
+		if seen[n.Name] {
+			return fmt.Errorf("%s.nodes: имя узла %q встречается дважды", section, n.Name)
+		}
+		seen[n.Name] = true
+		if n.URL == "" {
+			return fmt.Errorf("%s.nodes: у узла %q не задан url", section, n.Name)
+		}
+		u, err := url.Parse(n.URL)
+		if err != nil {
+			return fmt.Errorf("%s.nodes: узел %q, некорректный url: %w", section, n.Name, err)
+		}
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%s.nodes: узел %q, url должен начинаться с http:// или https:// и содержать хост",
+				section, n.Name)
+		}
+		if n.Workers < 0 || n.Workers > 16 {
+			return fmt.Errorf("%s.nodes: узел %q, workers = %d — допустимо от 1 до 16 (0 — как graph.workers)",
+				section, n.Name, n.Workers)
+		}
+	}
+	return nil
+}
+
 // Rules собирает правила открытия графа из его раздела настроек.
 //
 // С этапа 91 (R3) это единственный путь от настроек к поведению графа:
@@ -1445,6 +1514,16 @@ func (c *Config) finalize() error {
 	for name, g := range c.GraphNamed {
 		if g.Format != 0 && !graph.KnownVersion(g.Format) {
 			return fmt.Errorf("graph.%s.format = %d: неизвестный формат графа", name, g.Format)
+		}
+	}
+	// Узлы сборки: опечатка в имени или адресе должна быть ошибкой запуска,
+	// а не выясняться через час работы, когда узел впервые понадобится.
+	if err := validateGraphNodes("graph", c.graphBase.Nodes); err != nil {
+		return err
+	}
+	for name, g := range c.GraphNamed {
+		if err := validateGraphNodes("graph."+name, g.Nodes); err != nil {
+			return err
 		}
 	}
 

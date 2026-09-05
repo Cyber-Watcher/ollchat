@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -134,6 +135,15 @@ type Meta struct {
 	// Model — чем извлекались сущности. Смена модели меняет качество графа,
 	// поэтому она записана: иначе через месяц не ответить, что именно собрано.
 	Model string `json:"model,omitempty"`
+
+	// Nodes — имена узлов сборки, участвовавших хоть в одном заходе
+	// (этап 95). Пусто — граф собран одним сервером, как было до 05.09.2026.
+	//
+	// Имена, а не адреса: паспорт читают посторонние, а адрес сервера —
+	// частные данные. Нужно на будущее расследование «какой картой собран
+	// этот кусок графа»: узлы могут различаться скоростью и версией Ollama,
+	// и, если однажды найдётся перекос по качеству, начинать придётся отсюда.
+	Nodes []string `json:"nodes,omitempty"`
 
 	// Kind — рабочий граф или опытный. Пусто у собранных до 03.09.2026 —
 	// такие считаются рабочими: раньше других и не было.
@@ -587,6 +597,29 @@ func (g *Graph) Stats(chunks int) Stats {
 // SetModel записывает в паспорт модель извлечения.
 func (g *Graph) SetModel(model string) error {
 	g.meta.Model = model
+	return g.saveMeta()
+}
+
+// AddNodes дописывает в паспорт имена узлов сборки, объединением с прежними:
+// заходы идут разными наборами карт, и паспорт должен помнить все.
+func (g *Graph) AddNodes(names []string) error {
+	have := map[string]bool{}
+	for _, n := range g.meta.Nodes {
+		have[n] = true
+	}
+	added := false
+	for _, n := range names {
+		if n == "" || have[n] {
+			continue
+		}
+		have[n] = true
+		g.meta.Nodes = append(g.meta.Nodes, n)
+		added = true
+	}
+	if !added {
+		return nil
+	}
+	sort.Strings(g.meta.Nodes)
 	return g.saveMeta()
 }
 
