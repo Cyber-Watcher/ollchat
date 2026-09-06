@@ -165,7 +165,7 @@ func Archive(collDir string, o ArchiveOpts) (ArchiveResult, error) {
 func skipInArchive(rel string, fi os.FileInfo) bool {
 	base := filepath.Base(rel)
 	switch {
-	case base == lockFile, base == "ARCHIVE":
+	case base == lockFile, base == vecLockFile, base == "ARCHIVE":
 		return true
 	case strings.HasPrefix(base, workPrefix):
 		return true

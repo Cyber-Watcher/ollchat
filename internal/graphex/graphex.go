@@ -58,6 +58,20 @@ type Options struct {
 	NumCtx      int     // окно контекста запроса
 	MaxTokens   int     // предел ответа
 	Temperature float64 // температура выборки
+
+	// Stall — сколько поток ответа может молчать, прежде чем запрос считается
+	// зависшим. 0 — без предела.
+	//
+	// Сборке он нужнее, чем чату: она идёт часами и через интернет, а предел
+	// на ожидание заголовков молчащий поток не ловит. Оборванный канал без
+	// сторожа держит слот на карте до конца chat_timeout — и, поскольку
+	// у qwen35 слот один, стоит в очереди перед всеми остальными.
+	Stall time.Duration
+
+	// NodeWait — сколько пул ждёт возвращения узлов, когда живых не осталось.
+	// 0 — не ждать: заход останавливается сразу. Одиночным извлекателем
+	// не используется.
+	NodeWait time.Duration
 }
 
 func New(o Options, fallbackURL string, timeout time.Duration, headers map[string]string) *Extractor {
@@ -82,7 +96,7 @@ func New(o Options, fallbackURL string, timeout time.Duration, headers map[strin
 		timeout = 5 * time.Minute
 	}
 	return &Extractor{
-		client:     ollama.New(url, 60*time.Second, timeout, headers),
+		client:     ollama.NewWithStall(url, 60*time.Second, timeout, o.Stall, headers),
 		url:        url,
 		model:      o.Model,
 		keepAlive:  o.KeepAlive,

@@ -63,7 +63,7 @@ func rankFixture(t *testing.T) (*Graph, uint32) {
 		v[0] = first[id]
 		data = append(data, v...)
 	}
-	if err := g.SaveEntityVectors("проба", dim, data); err != nil {
+	if err := g.SaveEntityVectors("проба", "", dim, data); err != nil {
 		t.Fatal(err)
 	}
 	return g, root
@@ -151,7 +151,7 @@ func TestNeighborsFusionKeepsWeight(t *testing.T) {
 		}
 	}
 	// Уместность у «частого» и «редкого» одинаковая, у «стороны» нулевая.
-	if err := g.SaveEntityVectors("проба", 2, []int8{
+	if err := g.SaveEntityVectors("проба", "", 2, []int8{
 		127, 0, // корень
 		127, 0, // частый
 		127, 0, // редкий — та же близость
@@ -201,7 +201,7 @@ func TestNeighborsKeepVectorlessNeighbors(t *testing.T) {
 		}
 	}
 	// Векторы посчитаны только первым двум понятиям из трёх.
-	if err := g.SaveEntityVectors("проба", 2, []int8{127, 0, 0, 127}); err != nil {
+	if err := g.SaveEntityVectors("проба", "", 2, []int8{127, 0, 0, 127}); err != nil {
 		t.Fatal(err)
 	}
 	got := g.neighborsOf(root, 5, []int8{0, 127}, testRank)
@@ -235,7 +235,7 @@ func TestNeighborsPoolIsBounded(t *testing.T) {
 	// (5 × 8 = 40 мест) и подняться не должен.
 	data := make([]int8, (n+1)*2)
 	data[len(data)-2] = 127
-	if err := g.SaveEntityVectors("проба", 2, data); err != nil {
+	if err := g.SaveEntityVectors("проба", "", 2, data); err != nil {
 		t.Fatal(err)
 	}
 	got := g.neighborsOf(root, 5, []int8{127, 0}, testRank)

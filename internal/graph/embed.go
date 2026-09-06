@@ -75,6 +75,17 @@ func embedText(e Entity, aliases []string, limit int) string {
 	return strings.Join(parts, ", ")
 }
 
+// EmbedTextOf — текст, который уходит эмбеддеру за это понятие: имя и до
+// VectorAliases частей из безопасных синонимов. Наружу — ради замеров:
+// сравнивать векторы, посчитанные в разное время, честно только по тому же
+// тексту, что строит сам счёт, а не по его пересказу в скрипте.
+func (g *Graph) EmbedTextOf(e Entity) string {
+	if g == nil || g.ents == nil {
+		return ""
+	}
+	return embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases)
+}
+
 // EmbedEntities считает векторы всех понятий графа и кладёт их рядом с ним.
 //
 // Считается всё разом, а не докатывается: понятий десятки тысяч против сотен
@@ -89,25 +100,21 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	}
 	o = o.norm()
 
-	all := g.ents.All()
-	if len(all) == 0 {
-		return fmt.Errorf("в графе нет понятий")
+	// Один счёт векторов на граф: второй писатель — отказ, а не гонка файлов.
+	release, err := lockVectors(g.dir)
+	if err != nil {
+		return err
 	}
-	// Номера идут подряд с единицы, но на всякий случай ищем наибольший:
-	// место в файле определяется номером, а не порядком в списке.
-	maxID := uint32(0)
-	for _, e := range all {
-		if e.ID > maxID {
-			maxID = e.ID
-		}
+	defer release()
+
+	texts, err := g.embedTexts()
+	if err != nil {
+		return err
 	}
 
-	texts := make([]string, maxID)
-	for _, e := range all {
-		if e.ID >= 1 && e.ID <= maxID {
-			texts[e.ID-1] = embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases)
-		}
-	}
+	// Отпечаток снимается до счёта: узнать о чужих весах после того, как
+	// хвост посчитан, значит выбросить его.
+	digest := embedderDigest(ctx, emb)
 
 	// Досчёт: уже посчитанное берём как есть, считаем только хвост.
 	//
@@ -125,6 +132,16 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 			already = len(texts) // граф ужался: досчитывать нечего, считаем заново
 			kept = nil
 		}
+		// Досчёт хвостом на другом сервере — тот самый случай, когда одно имя
+		// модели указывает на разные веса. Догонщик (vecfollow.go) сверяет
+		// отпечаток перед каждой пачкой; обычный досчёт обязан делать то же,
+		// иначе он не только смешает пространства, но и запишет в паспорт
+		// новый отпечаток, стерев след смешения.
+		if already > 0 {
+			if err := checkDigest(g.vecs.Digest(), digest, emb.Model()); err != nil {
+				return err
+			}
+		}
 	}
 	if already > 0 {
 		texts = texts[already:]
@@ -132,6 +149,67 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 			return nil // всё уже посчитано
 		}
 	}
+
+	dim, data, err := embedBatches(ctx, emb, texts, o, onProgress)
+	if err != nil {
+		return err
+	}
+	if already > 0 {
+		if len(kept) != already*dim {
+			// Размерность прежних векторов не та — склеивать нельзя.
+			return fmt.Errorf("прежние векторы не той размерности: %d на %d понятий",
+				len(kept), already)
+		}
+		data = append(kept, data...)
+	}
+	return g.SaveEntityVectors(emb.Model(), digest, dim, data)
+}
+
+// embedTexts собирает тексты понятий по местам: место N-1 — понятие с номером N.
+func (g *Graph) embedTexts() ([]string, error) {
+	all := g.ents.All()
+	if len(all) == 0 {
+		return nil, fmt.Errorf("в графе нет понятий")
+	}
+	// Номера идут подряд с единицы, но на всякий случай ищем наибольший:
+	// место в файле определяется номером, а не порядком в списке.
+	maxID := uint32(0)
+	for _, e := range all {
+		if e.ID > maxID {
+			maxID = e.ID
+		}
+	}
+	texts := make([]string, maxID)
+	for _, e := range all {
+		if e.ID >= 1 && e.ID <= maxID {
+			texts[e.ID-1] = embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases)
+		}
+	}
+	return texts, nil
+}
+
+// embedderDigest снимает отпечаток весов эмбеддера, если сервер его отдаёт.
+//
+// Ошибку глотаем намеренно: отпечаток — проверка, а не условие работы, и её
+// отсутствие не повод отказываться считать. Пустое значение просто выключает
+// сверку — так же, как у пула узлов сборки.
+func embedderDigest(ctx context.Context, emb kb.Embedder) string {
+	st, ok := emb.(interface {
+		Stamp(context.Context) (string, error)
+	})
+	if !ok {
+		return ""
+	}
+	d, err := st.Stamp(ctx)
+	if err != nil {
+		return ""
+	}
+	return d
+}
+
+// embedBatches считает векторы для всех текстов и возвращает их подряд.
+func embedBatches(ctx context.Context, emb kb.Embedder, texts []string, o EmbedOpts,
+	onProgress func(EmbedProgress)) (int, []int8, error) {
 
 	// Пустое имя эмбеддер отвергнет, а место в файле занять обязано:
 	// подставляем пробел, вектор такого понятия всё равно ни с чем не совпадёт.
@@ -208,7 +286,7 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	close(queue)
 	wg.Wait()
 	if first != nil {
-		return first
+		return 0, nil, first
 	}
 
 	var dim int
@@ -219,24 +297,16 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 				dim = len(v)
 			}
 			if len(v) != dim {
-				return fmt.Errorf("размерность векторов разъехалась: %d против %d", len(v), dim)
+				return 0, nil, fmt.Errorf("размерность векторов разъехалась: %d против %d", len(v), dim)
 			}
 			data = append(data, kb.Quantize(v)...)
 		}
 	}
 	if dim == 0 {
-		return fmt.Errorf("сервер не вернул ни одного вектора")
+		return 0, nil, fmt.Errorf("сервер не вернул ни одного вектора")
 	}
 	if len(data)/dim != len(texts) {
-		return fmt.Errorf("посчитано %d векторов на %d понятий", len(data)/dim, len(texts))
+		return 0, nil, fmt.Errorf("посчитано %d векторов на %d понятий", len(data)/dim, len(texts))
 	}
-	if already > 0 {
-		if len(kept) != already*dim {
-			// Размерность прежних векторов не та — склеивать нельзя.
-			return fmt.Errorf("прежние векторы не той размерности: %d на %d понятий",
-				len(kept), already)
-		}
-		data = append(kept, data...)
-	}
-	return g.SaveEntityVectors(emb.Model(), dim, data)
+	return dim, data, nil
 }

@@ -13,7 +13,7 @@ func TestEntityVectorsCRC(t *testing.T) {
 	dir := t.TempDir()
 	v := &EntityVectors{dir: dir}
 	data := []int8{1, 2, 3, 4, 5, 6}
-	if err := v.save("m", 3, data); err != nil {
+	if err := v.save("m", "", 3, data); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	got := openEntityVectors(dir)

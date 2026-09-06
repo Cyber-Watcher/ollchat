@@ -140,3 +140,43 @@ func TestEmbedEntitiesModelChangeForcesFull(t *testing.T) {
 		t.Fatalf("в паспорте осталась модель %q", got)
 	}
 }
+
+// Досчёт хвостом на сервере с другими весами той же модели — отказ до счёта.
+//
+// Догонщик это сверял с 06.09.2026, а обычный --graph-embed нет: он смешал бы
+// пространства и записал бы в паспорт новый отпечаток, стерев след смешения.
+func TestEmbedTopUpRefusesForeignWeights(t *testing.T) {
+	g := growGraph(t, 3)
+	first := &countingEmbedder{model: "m", digest: "AAA", dim: 4}
+	if err := g.EmbedEntities(t.Context(), first, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.VectorsInfo().Digest; got != "AAA" {
+		t.Fatalf("в паспорте отпечаток %q", got)
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, err := g.Entities().Add("новое"+string(rune('a'+i)), TypeConcept); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	other := &countingEmbedder{model: "m", digest: "BBB", dim: 4}
+	err := g.EmbedEntities(t.Context(), other, EmbedOpts{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "другим файлом модели") {
+		t.Fatalf("досчёт чужими весами прошёл: %v", err)
+	}
+	if other.asked != 0 {
+		t.Errorf("до отказа посчитали %d векторов", other.asked)
+	}
+	if got := g.VectorsInfo(); got.Digest != "AAA" || got.Count != 3 {
+		t.Errorf("паспорт тронут: %+v", got)
+	}
+
+	// Полный пересчёт — единственный честный путь, и он идёт.
+	if err := g.EmbedEntities(t.Context(), other, EmbedOpts{Recount: true}, nil); err != nil {
+		t.Fatalf("полный пересчёт чужими весами: %v", err)
+	}
+	if got := g.VectorsInfo(); got.Digest != "BBB" || got.Count != 5 {
+		t.Errorf("после пересчёта паспорт %+v", got)
+	}
+}

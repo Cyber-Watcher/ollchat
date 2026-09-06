@@ -76,6 +76,9 @@ func graphBusy(dir string) string {
 		// Мёртвый хозяин замка — дело сборки: она снимет его сама при
 		// следующем заходе и скажет об этом. Здесь он не считается занятостью.
 	}
+	if what := vectorsBusy(dir); what != "" {
+		parts = append(parts, what)
+	}
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), workPrefix) {

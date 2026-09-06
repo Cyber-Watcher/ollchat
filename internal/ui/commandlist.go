@@ -58,6 +58,8 @@ var commands = []cmdInfo{
 		{Name: "noask", Desc: "не спрашивать; правила deny всё равно действуют (прежние имена — yolo, no-ask)"},
 	}},
 	{Name: "permissions", Desc: "действующие правила разрешений"},
+	{Name: "nodes", Alias: []string{"узлы"},
+		Desc: "состояние серверов сборки: карта, память, слоты, чужая работа", Need: "kb"},
 	{Name: "tools", Args: "[iterations <n|off>]", Desc: "доступные инструменты и предел их вызовов"},
 	{Name: "think", Args: "[on|off]", Desc: "режим рассуждений модели"},
 	{Name: "mouse", Args: "[on|off]", Desc: "мышь приложению или терминалу (F2)"},

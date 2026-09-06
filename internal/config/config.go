@@ -594,6 +594,16 @@ type GraphNode struct {
 	Name    string `toml:"name"`    // короткое имя для показа: «a100», «rtx3090»
 	URL     string `toml:"url"`     // адрес сервера Ollama
 	Workers int    `toml:"workers"` // сколько запросов держать на нём разом; 0 — 4
+
+	// Probe — адрес наблюдателя ollnode на этом сервере (этап 96). Пусто —
+	// узел без наблюдателя: сборка идёт как прежде, просто не видно чужой
+	// работы на карте.
+	Probe string `toml:"probe"`
+
+	// ProbeToken — токен наблюдателя. Пусто — берётся из переменной окружения
+	// OLLNODE_TOKEN. Держать секрет в переменной безопаснее, чем в файле
+	// настроек, который копируют между машинами.
+	ProbeToken string `toml:"probe_token"`
 }
 
 // Graph — граф понятий поверх базы знаний (см. GraphRAGPlan.md).
@@ -626,6 +636,28 @@ type Graph struct {
 
 	// Retry — повторять ли один раз кусок, на котором модель не выдала JSON.
 	Retry bool `toml:"retry"`
+
+	// StallTimeout — сколько поток ответа модели может молчать, прежде чем
+	// запрос считается зависшим. Пусто — 2 минуты, "0" — без предела.
+	//
+	// Заведено этапом 95: сборка идёт часами и через интернет, а chat_timeout
+	// ограничивает только ожидание ЗАГОЛОВКОВ. Уже начавшийся поток, замолчавший
+	// на оборванном канале, до этого не ограничивал никто — и держал слот
+	// на карте, пока не истекут десять минут ожидания заголовков (которые
+	// давно пришли). Замер из журнала стенда 27.08.2026: чужой запрос
+	// без сторожа провисел 9 ч 49 мин и заблокировал карту всем.
+	StallTimeout string `toml:"stall_timeout"`
+	stallTimeout time.Duration
+
+	// NodeWait — сколько ждать возвращения узлов, когда живых не осталось
+	// вовсе. Пусто — 15 минут, "0" — не ждать (прежнее поведение: заход
+	// останавливается сразу).
+	//
+	// Для канала через интернет отказ по первому же обрыву слишком дорог:
+	// прерванный заход возобновляем, но ночная сборка при этом простаивает
+	// до утра. Пока идёт ожидание, узлы проверяются каждые полминуты.
+	NodeWait string `toml:"node_wait"`
+	nodeWait time.Duration
 
 	// Ниже — разметка тем и их описание. Числа вынесены сюда не для красоты:
 	// подобранные на одном графе, они перестают работать на графе вдвое
@@ -1397,11 +1429,18 @@ func (k KB) RerankOptions() kbrerank.Options {
 	return kbrerank.Options{URL: k.RerankURL, Model: k.RerankModel, Timeout: k.RerankTimeoutDuration()}
 }
 
-// ExtractOptions — настройки извлечения для graphex.New.
+// ExtractOptions — настройки извлечения для graphex.New и graphex.NewPool.
 func (g Graph) ExtractOptions() graphex.Options {
 	return graphex.Options{URL: g.URL, Model: g.Model, KeepAlive: g.KeepAlive, Workers: g.Workers,
-		NumCtx: g.NumCtx, MaxTokens: g.MaxTokens, Temperature: g.Temperature}
+		NumCtx: g.NumCtx, MaxTokens: g.MaxTokens, Temperature: g.Temperature,
+		Stall: g.stallTimeout, NodeWait: g.nodeWait}
 }
+
+// StallTimeoutDuration — предел молчания потока при извлечении. Ноль — без предела.
+func (g Graph) StallTimeoutDuration() time.Duration { return g.stallTimeout }
+
+// NodeWaitDuration — сколько ждать возвращения узлов, когда живых нет.
+func (g Graph) NodeWaitDuration() time.Duration { return g.nodeWait }
 
 // ExtractNodes — узлы пула для graphex.NewPool. Пусто — сборка идёт по-старому,
 // одним сервером из ExtractOptions.
@@ -1415,9 +1454,41 @@ func (g Graph) ExtractNodes() []graphex.Node {
 		if w <= 0 {
 			w = g.Workers
 		}
-		out = append(out, graphex.Node{Name: n.Name, URL: n.URL, Workers: w})
+		out = append(out, graphex.Node{Name: n.Name, URL: n.URL, Workers: w,
+			Probe: n.Probe, ProbeToken: n.ProbeToken})
 	}
 	return out
+}
+
+// parseGraphDurations разбирает сроки раздела графа: предел молчания потока
+// и ожидание возвращения узлов. Разбирается на запуске, а не при каждом
+// обращении: опечатка в сроке должна быть ошибкой запуска, а не тихим
+// умолчанием посреди ночной сборки.
+func parseGraphDurations(g *Graph, section string) error {
+	if g.StallTimeout == "" {
+		g.StallTimeout = "2m"
+	}
+	d, err := time.ParseDuration(g.StallTimeout)
+	if err != nil {
+		return fmt.Errorf("%s.stall_timeout: %w", section, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("%s.stall_timeout не может быть отрицательным", section)
+	}
+	g.stallTimeout = d
+
+	if g.NodeWait == "" {
+		g.NodeWait = "15m"
+	}
+	w, err := time.ParseDuration(g.NodeWait)
+	if err != nil {
+		return fmt.Errorf("%s.node_wait: %w", section, err)
+	}
+	if w < 0 {
+		return fmt.Errorf("%s.node_wait не может быть отрицательным", section)
+	}
+	g.nodeWait = w
+	return nil
 }
 
 // validateGraphNodes проверяет список узлов сборки одного раздела настроек.
@@ -1442,6 +1513,13 @@ func validateGraphNodes(section string, nodes []GraphNode) error {
 		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("%s.nodes: узел %q, url должен начинаться с http:// или https:// и содержать хост",
 				section, n.Name)
+		}
+		if n.Probe != "" {
+			pu, err := url.Parse(n.Probe)
+			if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+				return fmt.Errorf("%s.nodes: узел %q, probe должен быть адресом вида "+
+					"http://хост:11435", section, n.Name)
+			}
 		}
 		if n.Workers < 0 || n.Workers > 16 {
 			return fmt.Errorf("%s.nodes: узел %q, workers = %d — допустимо от 1 до 16 (0 — как graph.workers)",
@@ -1521,10 +1599,20 @@ func (c *Config) finalize() error {
 	if err := validateGraphNodes("graph", c.graphBase.Nodes); err != nil {
 		return err
 	}
+	if err := parseGraphDurations(&c.Graph, "graph"); err != nil {
+		return err
+	}
+	if err := parseGraphDurations(&c.graphBase, "graph"); err != nil {
+		return err
+	}
 	for name, g := range c.GraphNamed {
 		if err := validateGraphNodes("graph."+name, g.Nodes); err != nil {
 			return err
 		}
+		if err := parseGraphDurations(&g, "graph."+name); err != nil {
+			return err
+		}
+		c.GraphNamed[name] = g
 	}
 
 	// Скорость ответа в строке состояния. Недопустимое значение — ошибка

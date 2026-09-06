@@ -45,7 +45,7 @@ func resolveFixture(t *testing.T) *Graph {
 		v[axis[i]] = 127
 		data = append(data, v...)
 	}
-	if err := g.SaveEntityVectors("проба", dim, data); err != nil {
+	if err := g.SaveEntityVectors("проба", "", dim, data); err != nil {
 		t.Fatal(err)
 	}
 	return g

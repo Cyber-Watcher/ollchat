@@ -59,6 +59,19 @@ type entVecMeta struct {
 	// файл данных и паспорт остались от разных записей при совпавшем размере.
 	// Ноль — паспорт старого образца, без суммы; принимается как есть.
 	CRC uint32 `json:"crc,omitempty"`
+
+	// Digest — отпечаток весов эмбеддера (sha256 из /api/tags).
+	//
+	// **Зачем отдельно от Model.** Одно имя `bge-m3:latest` на двух серверах
+	// может указывать на разные файлы — другое квантование, другая дата
+	// загрузки. Векторы, посчитанные наполовину одними весами, наполовину
+	// другими, лежат в разных углах пространства, и **по выдаче этого не
+	// увидеть**: поиск продолжает отвечать, просто хуже. Тот же довод, по
+	// которому пул узлов сверяет веса модели извлечения (graphex/pool.go).
+	//
+	// Пусто — паспорт старого образца или сервер digest не отдал; тогда сверка
+	// пропускается, а не считается провалившейся.
+	Digest string `json:"digest,omitempty"`
 }
 
 const (
@@ -92,7 +105,15 @@ func openEntityVectors(dir string) *EntityVectors {
 		return v
 	}
 	data, err := os.ReadFile(filepath.Join(dir, entVecDataFile))
-	if err != nil || len(data) != v.meta.Count*v.meta.Dim {
+	want := v.meta.Count * v.meta.Dim
+	// Файл **длиннее** паспорта — это оборвавшаяся дозапись, а не порча:
+	// данные пишутся первыми, паспорт вторым, и паспорт здесь точка фиксации.
+	// Лишний хвост читается как небывший и будет срезан следующей дозаписью.
+	// Терпеть его обязательно: иначе один обрыв питания стоил бы недель счёта.
+	if err == nil && len(data) > want && want > 0 {
+		data = data[:want]
+	}
+	if err != nil || len(data) != want {
 		if err == nil {
 			v.problem = fmt.Sprintf("размер %s (%d байт) не совпадает с паспортом (%d понятий × %d); "+
 				"пересчитать: --graph-embed", entVecDataFile, len(data), v.meta.Count, v.meta.Dim)
@@ -141,6 +162,15 @@ func (v *EntityVectors) Model() string {
 	return v.meta.Model
 }
 
+func (v *EntityVectors) Digest() string {
+	if v == nil {
+		return ""
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.meta.Digest
+}
+
 func (v *EntityVectors) Dim() int {
 	if v == nil {
 		return 0
@@ -172,13 +202,22 @@ func (v *EntityVectors) at(id uint32) []int8 {
 //
 // Не дозапись, а перезапись: понятия нумеруются подряд, и частичное обновление
 // потребовало бы держать на диске дырки. Файл невелик — десятки мегабайт.
-func (v *EntityVectors) save(model string, dim int, data []int8) error {
+func (v *EntityVectors) save(model, digest string, dim int, data []int8) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	return v.saveLocked(model, digest, dim, data)
+}
+
+// metaBytes — паспорт в JSON. Отдельной функцией, потому что его пишут двое:
+// полная запись и дозапись (vecappend.go).
+func metaBytes(m entVecMeta) ([]byte, error) { return json.Marshal(m) }
+
+// saveLocked — то же под уже взятым замком.
+func (v *EntityVectors) saveLocked(model, digest string, dim int, data []int8) error {
 	bytes := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data))
 	meta := entVecMeta{Magic: entVecMagic, Model: model, Dim: dim, Count: len(data) / dim,
-		CRC: crc32.ChecksumIEEE(bytes)}
-	raw, err := json.Marshal(meta)
+		CRC: crc32.ChecksumIEEE(bytes), Digest: digest}
+	raw, err := metaBytes(meta)
 	if err != nil {
 		return err
 	}
@@ -266,6 +305,10 @@ type EntityVectorsInfo struct {
 	Model string
 	Dim   int
 	Count int
+
+	// Digest — отпечаток весов эмбеддера, которым считано. Пусто у паспортов
+	// старого образца и там, где сервер его не отдал.
+	Digest string
 }
 
 // VectorsInfo сообщает состояние смыслового входа.
@@ -282,7 +325,7 @@ func (g *Graph) VectorsInfo() EntityVectorsInfo {
 		return EntityVectorsInfo{}
 	}
 	return EntityVectorsInfo{Ready: g.vecs.Ready(), Model: g.vecs.Model(),
-		Dim: g.vecs.Dim(), Count: g.vecs.Count()}
+		Dim: g.vecs.Dim(), Count: g.vecs.Count(), Digest: g.vecs.Digest()}
 }
 
 // Existing возвращает уже посчитанные векторы, если они годны для этой модели
@@ -311,14 +354,14 @@ func (v *EntityVectors) Existing(model string, dim int) ([]int8, int) {
 }
 
 // SaveEntityVectors записывает посчитанные векторы понятий.
-func (g *Graph) SaveEntityVectors(model string, dim int, data []int8) error {
+func (g *Graph) SaveEntityVectors(model, digest string, dim int, data []int8) error {
 	if g == nil || g.vecs == nil {
 		return fmt.Errorf("граф не открыт")
 	}
 	if dim <= 0 || len(data) == 0 || len(data)%dim != 0 {
 		return fmt.Errorf("векторы понятий: длина %d не делится на размерность %d", len(data), dim)
 	}
-	return g.vecs.save(model, dim, data)
+	return g.vecs.save(model, digest, dim, data)
 }
 
 // ── Поиск двойников среди понятий ────────────────────────────────────────────
@@ -465,5 +508,5 @@ func (g *Graph) SetVectorsForTest(model string, dim int) error {
 	if g.vecs == nil {
 		g.vecs = &EntityVectors{dir: g.dir}
 	}
-	return g.vecs.save(model, dim, make([]int8, dim))
+	return g.vecs.save(model, "", dim, make([]int8, dim))
 }

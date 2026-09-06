@@ -86,6 +86,8 @@ type cliFlags struct {
 	graphWorkers          *int
 	graphRedoEmpty        *bool
 	graphLinkNew          *bool
+	graphIgnoreBusy       *bool
+	nodes                 *bool
 	graphLog              *string
 	graphNewModel         *bool
 	graphNewPrompt        *bool
@@ -121,6 +123,12 @@ type cliFlags struct {
 	graphTune             *string
 	graphTuneList         *string
 	graphTuneShow         *int
+	graphTuneBetas        *string
+	graphEmbedFollow      *string
+	graphEmbedNode        *string
+	graphEmbedEvery       *string
+	graphEmbedLimit       *int
+	graphEmbedOnce        *bool
 	graphDrift            *string
 	graphDriftSim         *float64
 	graphDriftShow        *int
@@ -244,6 +252,10 @@ func parseFlags() *cliFlags {
 	f.graphWorkers = flag.Int("graph-workers", 0, "с --graph-build: сколько кусков разбирать одновременно")
 	f.graphRedoEmpty = flag.Bool("graph-redo-empty", false,
 		"с --graph-build: перепройти куски, помеченные пустыми")
+	f.graphIgnoreBusy = flag.Bool("graph-ignore-busy", false,
+		"с --graph-build: идти, даже если наблюдатели говорят, что карты заняты чужой работой")
+	f.nodes = flag.Bool("nodes", false,
+		"состояние серверов сборки по данным ollnode: карта, память, слоты, беды из журнала")
 	f.graphLog = flag.String("graph-log", "",
 		"с --graph-build: дозаписывать ход в этот файл строками с отметкой времени")
 	f.graphNewModel = flag.Bool("graph-allow-model-change", false,
@@ -313,6 +325,8 @@ func parseFlags() *cliFlags {
 		"подобрать разрешение разбиения: --graph-tune books")
 	f.graphTuneList = flag.String("graph-tune-resolutions", "",
 		"с --graph-tune: какие значения перебрать, через запятую (по умолчанию 1,3,5,8)")
+	f.graphTuneBetas = flag.String("graph-tune-betas", "",
+		"с --graph-tune: перебрать долю смысла в весе связи (β) при неизменном γ: --graph-tune-betas 0,0.5,1,2")
 	f.graphTuneShow = flag.Int("graph-tune-show", 3,
 		"с --graph-tune: сколько крупнейших тем показать составом (0 — не показывать)")
 	f.graphDrift = flag.String("graph-drift", "",
@@ -373,6 +387,16 @@ func parseFlags() *cliFlags {
 		"с --graph-resolve: выписать все пары в файл TSV")
 	f.graphEmbed = flag.String("graph-embed", "",
 		"посчитать векторы понятий графа — смысловой вход: --graph-embed books")
+	f.graphEmbedFollow = flag.String("graph-embed-follow", "",
+		"досчитывать векторы новых понятий по мере их появления: --graph-embed-follow books")
+	f.graphEmbedNode = flag.String("graph-embed-node", "",
+		"с --graph-embed-follow: отдельный сервер с эмбеддером, чтобы не занимать карту сборки")
+	f.graphEmbedEvery = flag.String("graph-embed-every", "",
+		"с --graph-embed-follow: срок между кругами (по умолчанию 10m)")
+	f.graphEmbedLimit = flag.Int("graph-embed-limit", 0,
+		"с --graph-embed-follow: сколько понятий считать за заход (0 — тысяча)")
+	f.graphEmbedOnce = flag.Bool("graph-embed-once", false,
+		"с --graph-embed-follow: один круг и выход")
 	f.graphRecheck = flag.String("graph-recheck", "",
 		"передоописать моделью извлечения самые рыхлые темы: --graph-recheck books")
 	f.graphRecheckN = flag.Int("graph-recheck-count", 0,
@@ -458,7 +482,10 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, kmaint.Embed(os.Stdout, cfg, *f.kbEmbed, *f.kbDry)
 	case *f.graphBuild != "":
 		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, *f.graphFolder, *f.graphLimit, *f.graphWorkers,
-			*f.graphNewModel, *f.graphNewPrompt, *f.graphRedoEmpty, *f.graphLinkNew, *f.graphLog, *f.graphKind, *f.graphNote)
+			*f.graphNewModel, *f.graphNewPrompt, *f.graphRedoEmpty, *f.graphLinkNew, *f.graphIgnoreBusy,
+			*f.graphLog, *f.graphKind, *f.graphNote)
+	case *f.nodes:
+		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
 	case *f.graphArchive != "":
@@ -505,7 +532,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Bench(os.Stdout, cfg, *f.graphBench, models, *f.graphFolder,
 			*f.graphLimit, *f.graphWorkers, *f.graphBenchKeep)
 	case *f.graphTune != "":
-		return true, gmaint.Tune(os.Stdout, cfg, *f.graphTune, *f.graphTuneList, *f.graphTuneShow)
+		return true, gmaint.Tune(os.Stdout, cfg, *f.graphTune, *f.graphTuneList,
+			*f.graphTuneBetas, *f.graphTuneShow)
 	case *f.graphDrift != "":
 		return true, gmaint.Drift(os.Stdout, cfg, *f.graphDrift, *f.graphDriftSim, *f.graphDriftShow)
 	case *f.graphEntryEval != "":
@@ -534,6 +562,17 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			*f.graphResolveCross, *f.graphResolveShow, *f.graphResolveOut)
 	case *f.graphEmbed != "":
 		return true, gmaint.Embed(os.Stdout, cfg, *f.graphEmbed, *f.graphEmbedRecount)
+	case *f.graphEmbedFollow != "":
+		every, err := parseEvery(*f.graphEmbedEvery)
+		if err != nil {
+			return true, err
+		}
+		return true, gmaint.EmbedFollow(os.Stdout, cfg, *f.graphEmbedFollow, gmaint.EmbedFollowOpts{
+			Node:  *f.graphEmbedNode,
+			Every: every,
+			Limit: *f.graphEmbedLimit,
+			Once:  *f.graphEmbedOnce,
+		})
 	case *f.graphRecheck != "":
 		return true, gmaint.Recheck(os.Stdout, cfg, *f.graphRecheck, *f.graphRecheckN, 0)
 	case *f.graphComm != "":
@@ -546,6 +585,25 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Status(os.Stdout, cfg, name, *f.graphFolder)
 	}
 	return false, nil
+}
+
+// parseEvery разбирает срок между кругами догонщика векторов.
+//
+// Пустая строка — «как по умолчанию», а не ноль: ноль здесь означал бы
+// «без пауз», и опечатка стоила бы карты, занятой вхолостую.
+func parseEvery(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("--graph-embed-every %q: не срок вида 30s, 10m, 1h", s)
+	}
+	if d < time.Second {
+		return 0, fmt.Errorf("--graph-embed-every %s: слишком часто, наименьший срок — секунда", s)
+	}
+	return d, nil
 }
 
 func run() error {

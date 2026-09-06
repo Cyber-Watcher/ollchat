@@ -41,7 +41,8 @@ type buildExtractor interface {
 
 // Build собирает или доливает граф коллекции.
 func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, workers int,
-	allowModelChange, allowPromptChange, redoEmpty, linkNew bool, logPath, kind, note string) error {
+	allowModelChange, allowPromptChange, redoEmpty, linkNew, ignoreBusy bool,
+	logPath, kind, note string) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -65,7 +66,22 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 		ex   buildExtractor
 		pool *graphex.Pool
 	)
-	if nodes := cfg.Graph.ExtractNodes(); len(nodes) > 0 {
+	nodes := cfg.Graph.ExtractNodes()
+	named := len(nodes) > 0
+	if !named && cfg.Graph.NodeWaitDuration() > 0 {
+		// Один сервер — тоже узел, если велено пережидать обрывы. Сборка идёт
+		// часами и через интернет: без этого первый же обрыв канала останавливал
+		// заход, и ночь простаивала до утра. node_wait = 0 возвращает прежнее
+		// поведение — отказ по первой же смерти сервера.
+		url := cfg.Graph.URL
+		if url == "" {
+			url = fallback
+		}
+		if url != "" && cfg.Graph.Model != "" {
+			nodes = []graphex.Node{{Name: "основной", URL: url, Workers: cfg.Graph.Workers}}
+		}
+	}
+	if len(nodes) > 0 {
 		p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, nil)
 		if err != nil {
 			return fmt.Errorf("узлы сборки (graph.nodes): %w", err)
@@ -115,16 +131,50 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 		fmt.Fprintf(stdout, "снят признак идущей сборки: %s\n", s)
 	}
 	fmt.Fprintf(stdout, "коллекция %s, модель извлечения %s\n", name, ex.Model())
-	if pool != nil {
-		var parts []string
-		for _, s := range pool.Stats() {
-			parts = append(parts, s.Name)
-		}
+	if named && pool != nil {
 		fmt.Fprintf(stdout, "узлов сборки: %d (%s), слотов всего %d\n",
-			len(parts), strings.Join(parts, ", "), pool.Slots())
+			len(nodes), strings.Join(pool.Names(), ", "), pool.Slots())
 		// Паспорт помнит все узлы, которыми граф когда-либо собирался.
+		// Неявный «основной» туда не пишется: он означает «сервер из настроек»
+		// и через месяц не скажет ничего.
 		if err := g.AddNodes(pool.Names()); err != nil {
 			return err
+		}
+	}
+	if w := cfg.Graph.NodeWaitDuration(); w > 0 && pool != nil {
+		fmt.Fprintf(stdout, "обрыв связи: ждать возвращения узла до %s, потом остановка\n", w)
+	}
+
+	// Наблюдатели (этап 96): что происходит на картах прямо сейчас. Запускать
+	// сборку поверх чужого обучения — значит встать с ним в очередь на часы
+	// и получить числа, которым нельзя верить.
+	if pool != nil && pool.HasProbes() {
+		pool.Poll(context.Background(), false)
+		busy, free := 0, 0
+		for _, st := range pool.Stats() {
+			if st.Probe == nil {
+				continue
+			}
+			fmt.Fprintf(stdout, "  %s: %s\n", st.Name, st.Probe.Line())
+			if reason := st.Probe.Busy(0); reason != "" {
+				fmt.Fprintf(stdout, "    занято — %s\n", reason)
+				busy++
+			} else {
+				free++
+			}
+			for _, j := range st.Probe.Journal {
+				fmt.Fprintf(stdout, "    журнал (%s): %s\n", j.Kind, j.Text)
+			}
+		}
+		if busy > 0 && free == 0 && !ignoreBusy {
+			return fmt.Errorf(
+				"на всех узлах карта занята чужой работой или модель вытеснена в ОЗУ.\n" +
+					"Сборка встанет с чужим счётом в очередь и пойдёт в разы медленнее.\n" +
+					"Дождитесь освобождения или запустите с ключом --graph-ignore-busy")
+		}
+		if busy > 0 {
+			fmt.Fprintf(stdout, "занятых узлов %d из %d — работа пойдёт на свободные\n",
+				busy, busy+free)
 		}
 	}
 	if folder != "" {
@@ -180,7 +230,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 		AllowModelChange:  allowModelChange,
 		AllowPromptChange: allowPromptChange,
 		RedoEmpty:         redoEmpty,
-	}, graphProgress(logPath, poolLine(pool)))
+	}, graphProgress(logPath, poolLine(pool, named)))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return err
@@ -200,7 +250,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 	fmt.Fprintf(stdout, "  пусто: %d, пропущено: %d\n", res.Empty, res.Skipped)
 	fmt.Fprintf(stdout, "  сущностей: %d (+%d), связей: %d (+%d)\n",
 		res.Entities, res.NewEntities, res.Edges, res.NewEdges)
-	if pool != nil {
+	if named && pool != nil {
 		fmt.Fprintf(stdout, "  по узлам: %s\n", pool.Line())
 	}
 	// Очередь на общий замок записи. Пока карта одна, она тонет в секундах
@@ -405,8 +455,8 @@ func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
 // хорош для живого терминала и бесполезен в журнале, где нужна история.
 // poolLine — как показать вклад узлов в строке хода. nil-пул даёт nil:
 // на одном сервере разбивке неоткуда взяться и печатать её незачем.
-func poolLine(p *graphex.Pool) func() string {
-	if p == nil {
+func poolLine(p *graphex.Pool, named bool) func() string {
+	if p == nil || !named {
 		return nil
 	}
 	return p.Line
@@ -1108,9 +1158,24 @@ func Drift(stdout io.Writer, cfg *config.Config, name string, similarity float64
 	fmt.Fprintf(stdout, "\n%s\n", d.Verdict())
 
 	// Цена решения — она и удерживает от пересчёта по каждой книге.
+	//
+	// Считается от Changed, а не от Themes: описания переносятся на темы,
+	// сохранившие состав (этап 79, internal/graph/carry.go). До 06.09.2026
+	// здесь стояло «пересчёт сотрёт описания у **всех** N тем» — текст пережил
+	// заведение переноса и завышал цену впятеро (замер того дня: 6 830 тем,
+	// перенеслось бы 5 369). Врал он ровно там, где вредно: по этой строке
+	// решают, пересчитывать или ждать, и завышенная цена удерживала от дешёвого.
+	//
+	// Векторы понятий из цены убраны: от разбиения они не зависят вовсе —
+	// пишет их только embed.go, а community.go и carry.go к ним не прикасаются.
 	if d.Themes > 0 {
-		fmt.Fprintf(stdout, "\nпересчёт сотрёт описания у всех %d тем: заново это резюме "+
-			"(~35 мин карты), разборы (~22 мин) и векторы понятий (~20 мин)\n", d.Themes)
+		fmt.Fprintf(stdout, "\nцена пересчёта: описания перенесутся на %d тем из %d, "+
+			"заново описывать %d\n", d.Kept, d.Themes, d.Changed)
+		if mins := summaryMinutes(d.Changed); mins > 0 {
+			fmt.Fprintf(stdout, "  примерно %d мин карты на резюме (по замеру 27.08.2026: "+
+				"2 590 резюме за 35 мин) плюс разборы у тех тем, где они были\n", mins)
+		}
+		fmt.Fprintln(stdout, "  векторы понятий от разбиения не зависят и в эту цену не входят")
 	}
 
 	if show > 0 {
@@ -1140,27 +1205,174 @@ func pieces(n int) string {
 	}
 }
 
-// Tune подбирает разрешение разбиения.
+// summaryMinutes — грубая оценка времени карты на описание тем.
 //
-// Считает на процессоре и ничего не сохраняет: перебрать десяток значений
-// дешевле, чем рассуждать об одном.
-func Tune(stdout io.Writer, cfg *config.Config, name, list string, samples int) error {
-	var resolutions []float64
+// Замер 27.08.2026 (этап 79): 2 590 резюме за 35 минут, то есть около 0.81 с
+// на тему. Оценка **грубая**, и названа она таковой в самом выводе: скорость
+// зависит от модели описания и от того, свободна ли карта.
+func summaryMinutes(themes int) int {
+	if themes <= 0 {
+		return 0
+	}
+	const secPerTheme = 35 * 60.0 / 2590.0
+	if m := int(float64(themes)*secPerTheme/60 + 0.5); m > 1 {
+		return m
+	}
+	return 1
+}
+
+// tuneAxis — по чему бежит таблица подбора: по γ или по β.
+//
+// Две ручки крутятся порознь и никогда вместе: γ меняет размер тем, β —
+// то, из чего они собраны, и таблица, где меняются обе, не отвечает
+// ни на один вопрос.
+type tuneAxis struct {
+	title string // как называется столбец: «γ» или «β»
+	cur   float64
+	value func(graph.TuneRow) float64
+}
+
+// parseTuneList разбирает список чисел через запятую.
+//
+// allowZero нужен для β: ноль там — не «не задано», а опорная строка опыта
+// «связи как есть», без которой остальные строки не с чем сравнивать.
+func parseTuneList(list, what string, allowZero bool) ([]float64, error) {
+	var out []float64
 	for _, part := range strings.Split(list, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
 		v, err := strconv.ParseFloat(part, 64)
-		if err != nil || v <= 0 {
-			return fmt.Errorf("разрешение %q не число больше нуля", part)
+		if err != nil || v < 0 || (v == 0 && !allowZero) {
+			return nil, fmt.Errorf("%s %q не число больше нуля", what, part)
 		}
-		resolutions = append(resolutions, v)
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// printSenseBlend рассказывает, что дало подмешивание смысла в веса связей.
+//
+// Числа нужны, чтобы отличить «β не помогла» от «β не сработала»: если у рёбер
+// не нашлось векторов или фон замерен неверно, разбиение осталось прежним
+// не потому, что смысл бесполезен.
+func printSenseBlend(stdout io.Writer, rows []graph.TuneRow) {
+	var any graph.SenseBlend
+	for _, r := range rows {
+		if r.Blend.Ready {
+			any = r.Blend
+			break
+		}
+	}
+	if !any.Ready {
+		return
+	}
+	fmt.Fprintf(stdout, "\nподмешивание смысла: фон %.3f (близость случайной пары понятий), "+
+		"рёбер %d,\n  вес изменён у %d, без вектора у одного из концов %d",
+		any.Background, any.Edges, any.Blended, any.NoVector)
+	if any.Edges > 0 {
+		fmt.Fprintf(stdout, " (%.0f%%)", 100*float64(any.NoVector)/float64(any.Edges))
+	}
+	fmt.Fprintln(stdout)
+	for _, r := range rows {
+		if !r.Blend.Ready || r.Blend.Blended == 0 {
+			continue
+		}
+		fmt.Fprintf(stdout, "  β = %.1f: ослаблено %.0f%% рёбер, усилено %.0f%%\n", r.Beta,
+			100*float64(r.Blend.Weakened)/float64(r.Blend.Blended),
+			100*float64(r.Blend.Blended-r.Blend.Weakened)/float64(r.Blend.Blended))
+	}
+}
+
+// printThemeCosine печатает смысловую связность тем по каждой строке подбора.
+//
+// Мера отвечает на вопрос, которого не задаёт ни одно число выше: связная ли
+// тема **по смыслу**, а не по связям. Разбиение оптимизирует связи, поэтому
+// по связям оно хорошо всегда; векторы в счёт не входили и судят со стороны.
+// Разбор — в internal/graph/themecosine.go.
+func printThemeCosine(stdout io.Writer, rows []graph.TuneRow, axis tuneAxis, name string) {
+	var ready bool
+	for _, r := range rows {
+		if r.Cos.Ready() {
+			ready = true
+			break
+		}
+	}
+	if !ready {
+		fmt.Fprintf(stdout, "\nсмысловая связность тем не считалась: "+
+			"векторы понятий не посчитаны — ollchat --graph-embed %s\n", name)
+		return
+	}
+
+	fmt.Fprintln(stdout, "\nсмысловая связность тем (векторы понятий):")
+	fmt.Fprintf(stdout, "%6s %8s %9s %8s %8s %11s %9s %10s\n",
+		axis.title, "тем", "внутри", "фон", "зазор", "случайное", "крупных", "их зазор")
+	fmt.Fprintln(stdout, "  "+dashes(74))
+	for _, r := range rows {
+		mark := " "
+		if axis.value(r) == axis.cur {
+			mark = "*"
+		}
+		if !r.Cos.Ready() {
+			fmt.Fprintf(stdout, "%s%5.1f %8s %9s %8s %8s %11s %9s %10s\n", mark, axis.value(r),
+				"—", "—", "—", "—", "—", "—", "—")
+			continue
+		}
+		fmt.Fprintf(stdout, "%s%5.1f %8d %9.3f %8.3f %8.3f %11.3f %9d %10.3f\n", mark, axis.value(r),
+			r.Cos.Themes, r.Cos.In, r.Cos.Out, r.Cos.Gap, r.CosNull.Gap,
+			r.Cos.Big, r.Cos.GapBig)
+	}
+
+	// Покрытие и размер выборки — одни на все строки: разбиение меняется,
+	// а векторы и зерно нет.
+	for _, r := range rows {
+		if !r.Cos.Ready() {
+			continue
+		}
+		fmt.Fprintf(stdout, "\n  «внутри» — близость понятий одной темы, "+
+			"«фон» — близость к случайному понятию графа;\n"+
+			"  судить надо по зазору: у темы-каши он около нуля.\n")
+		fmt.Fprintf(stdout, "  «случайное» — зазор того же разбиения с перемешанным составом: "+
+			"нулевая гипотеза.\n"+
+			"  Если зазор не выше случайного, мера ничего не меряет, и выводов по ней делать нельзя.\n")
+		fmt.Fprintf(stdout, "  «крупных» — тем от %d понятий, и зазор у них: "+
+			"каша живёт в хвосте, а не в срединной теме,\n"+
+			"  которая при любом γ состоит из двух-трёх понятий.\n", graph.CosBigMembers)
+		fmt.Fprintf(stdout, "  считано по темам от %d понятий, до %d пар на тему "+
+			"с каждой стороны; вектор есть у %.0f%% понятий.\n",
+			graph.CosMinMembers, r.Cos.Pairs, 100*r.Cos.Covered)
+		if r.Cos.Covered < 0.99 {
+			fmt.Fprintf(stdout, "  понятия без вектора в счёт не идут — "+
+				"досчитать: ollchat --graph-embed %s\n", name)
+		}
+		break
+	}
+}
+
+// Tune подбирает разрешение разбиения.
+//
+// Считает на процессоре и ничего не сохраняет: перебрать десяток значений
+// дешевле, чем рассуждать об одном.
+func Tune(stdout io.Writer, cfg *config.Config, name, list, betaList string, samples int) error {
+	resolutions, err := parseTuneList(list, "разрешение", false)
+	if err != nil {
+		return err
+	}
+	// Ноль — допустимая β: это «связи как есть», опорная строка опыта, без
+	// которой остальные не с чем сравнивать.
+	betas, err := parseTuneList(betaList, "β", true)
+	if err != nil {
+		return err
 	}
 	if len(resolutions) == 0 {
 		// Вокруг нынешнего значения: подбор почти всегда начинается с вопроса
 		// «а не сдвинуть ли то, что стоит».
 		resolutions = []float64{1, 3, 5, 8}
+	}
+	if len(betas) > 0 && len(list) > 0 {
+		return fmt.Errorf("--graph-tune-resolutions и --graph-tune-betas вместе не работают: " +
+			"γ и β меняют разное, и таблица, где крутятся обе, не отвечает ни на один вопрос")
 	}
 
 	base, err := kb.OpenBase(cfg.KB.Dir)
@@ -1182,37 +1394,64 @@ func Tune(stdout io.Writer, cfg *config.Config, name, list string, samples int) 
 		MaxSize:  cfg.Graph.MaxCommunity,
 		MaxDepth: cfg.Graph.SplitDepth,
 	}
-	rows, err := g.Tune(opt, resolutions, samples, 6)
+	var rows []graph.TuneRow
+	if len(betas) > 0 {
+		// γ берётся из настроек и не двигается: смысл опыта в том, чтобы
+		// сравнить β при прочих равных.
+		opt.Resolution = cfg.Graph.Resolution
+		rows, err = g.TuneBeta(opt, betas, samples, 6)
+	} else {
+		rows, err = g.Tune(opt, resolutions, samples, 6)
+	}
 	if err != nil {
 		return err
 	}
-
 	// Ноль в настройках означает «как в пакете», и показывать его как ноль
 	// значит прятать от человека то, с чем он сравнивает.
-	cur := cfg.Graph.Resolution
-	if cur <= 0 {
-		cur = graph.DefaultResolution
+	gamma := cfg.Graph.Resolution
+	if gamma <= 0 {
+		gamma = graph.DefaultResolution
 	}
-	fmt.Fprintf(stdout, "коллекция %s, понятий %d, связей %d\n\n",
+	// Ось перебора: по чему бегут строки таблицы и что помечается звёздочкой
+	// как «действует сейчас».
+	axis := tuneAxis{title: "γ", cur: gamma, value: func(r graph.TuneRow) float64 { return r.Resolution }}
+	if len(betas) > 0 {
+		// β в настройках нет: подмешивание смысла — опыт, а не режим работы.
+		// Действующее значение — ноль, связи как есть.
+		axis = tuneAxis{title: "β", cur: 0, value: func(r graph.TuneRow) float64 { return r.Beta }}
+	}
+
+	fmt.Fprintf(stdout, "коллекция %s, понятий %d, связей %d\n",
 		name, g.Entities().Count(), g.Edges().Count())
+	if axis.title == "β" {
+		fmt.Fprintf(stdout, "перебор β при γ = %.1f: вес связи умножается на 1 + β·(близость − фон)\n",
+			gamma)
+	}
+	fmt.Fprintln(stdout)
 	fmt.Fprintf(stdout, "%6s %8s %10s %9s %11s %10s %10s\n",
-		"γ", "тем", "крупнейшая", "срединная", "крупнее нормы", "из одной", "связность")
+		axis.title, "тем", "крупнейшая", "срединная", "крупнее нормы", "из одной", "связность")
 	fmt.Fprintln(stdout, "  "+dashes(70))
 	for _, r := range rows {
 		mark := " "
-		if cur > 0 && r.Resolution == cur {
+		if axis.value(r) == axis.cur {
 			mark = "*" // то, что стоит в настройках сейчас
 		}
 		fmt.Fprintf(stdout, "%s%5.1f %8d %10d %9d %11d %10d %10.2f\n",
-			mark, r.Resolution, r.Topics, r.Largest, r.Median, r.Oversized, r.Singletons, r.Cohesion)
+			mark, axis.value(r), r.Topics, r.Largest, r.Median, r.Oversized, r.Singletons, r.Cohesion)
 	}
-	fmt.Fprintf(stdout, "\n  * — то, что действует сейчас (γ = %.1f)\n", cur)
+	fmt.Fprintf(stdout, "\n  * — то, что действует сейчас (%s = %.1f)\n", axis.title, axis.cur)
+
+	// Смысловая связность — отдельной таблицей, а не столбцами в общей: она
+	// считается не всегда (нужны векторы понятий), и пустые графы в общей
+	// таблице читались бы как нули, то есть как приговор разбиению.
+	printThemeCosine(stdout, rows, axis, name)
+	printSenseBlend(stdout, rows)
 
 	// Числа не отличают связную тему от свалки одинакового размера, поэтому
 	// крупнейшие темы показываются составом.
 	if samples > 0 {
 		for _, r := range rows {
-			fmt.Fprintf(stdout, "\nγ = %.1f, крупнейшие темы:\n", r.Resolution)
+			fmt.Fprintf(stdout, "\n%s = %.1f, крупнейшие темы:\n", axis.title, axis.value(r))
 			for _, s := range r.Samples {
 				fmt.Fprintf(stdout, "  понятий %-5d %s\n", s.Members, strings.Join(s.Names, ", "))
 			}

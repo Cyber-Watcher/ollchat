@@ -96,6 +96,36 @@ func (e *Embedder) Model() string {
 	return e.model
 }
 
+// Stamp — отпечаток весов модели эмбеддингов (sha256 из /api/tags).
+//
+// **Зачем.** Одно имя `bge-m3:latest` на двух серверах может указывать
+// на разные файлы: другое квантование, другая дата загрузки. Векторы,
+// посчитанные вперемешку, лежат в разных углах пространства, и **по выдаче
+// этого не увидеть** — поиск продолжает отвечать, просто хуже. Отпечаток
+// записывается в паспорт векторов и сверяется при досчёте: ровно тем же
+// приёмом пул узлов сборки не даёт собрать граф двумя весами модели
+// извлечения (internal/graphex/pool.go).
+//
+// Пустая строка без ошибки означает «сервер digest не отдал»; сверка тогда
+// пропускается, а не считается провалившейся.
+func (e *Embedder) Stamp(ctx context.Context) (string, error) {
+	if e == nil {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tags, err := e.client.Tags(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, m := range tags {
+		if m.Name == e.model || strings.HasPrefix(m.Name, e.model+":") {
+			return m.Digest, nil
+		}
+	}
+	return "", fmt.Errorf("на сервере %s нет модели %q", e.client.BaseURL(), e.model)
+}
+
 // URL — адрес сервера эмбеддингов, для отчётов и подсказок.
 func (e *Embedder) URL() string {
 	if e == nil {

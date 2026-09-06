@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"github.com/Cyber-Watcher/ollchat/internal/document"
+	"github.com/Cyber-Watcher/ollchat/internal/nodeprobe"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
@@ -238,6 +240,7 @@ func commandHandlers() []cmdHandler {
 			m.addBlock(block{kind: blockNotice, text: m.permissionsReport()})
 			return nil
 		}},
+		{names: []string{"nodes", "узлы"}, run: (*Model).nodesCmd},
 		{names: []string{"tools"}, run: (*Model).toolsCmd},
 		{names: []string{"think"}, run: (*Model).thinkCmd},
 		{names: []string{"calc"}, run: (*Model).calcArgCmd},
@@ -385,6 +388,56 @@ func (m *Model) psCmd() tea.Cmd {
 			fmt.Fprintf(&b, "  %s — окно %s, в видеопамяти %.1f ГБ, выгрузка в %s\n",
 				r.Name, ctxmeter.FormatTokens(r.ContextLength),
 				float64(r.SizeVRAM)/(1024*1024*1024), shortTime(r.ExpiresAt))
+		}
+		return noticeMsg{text: strings.TrimRight(b.String(), "\n")}
+	}
+}
+
+// nodesCmd показывает состояние серверов сборки по данным наблюдателей ollnode.
+//
+// Опрос идёт в фоне: наблюдателей может быть несколько, каждый за своей сетью,
+// и держать из-за них интерфейс нельзя. Недоступный наблюдатель — строка
+// в ответе, а не ошибка команды: данные вспомогательные.
+func (m *Model) nodesCmd(_ string) tea.Cmd {
+	nodes := m.cfg.Graph.ExtractNodes()
+	if len(nodes) == 0 {
+		return func() tea.Msg {
+			return noticeMsg{text: "узлы сборки не заданы: раздел [[graph.nodes]] пуст, " +
+				"граф собирается одним сервером из graph.url"}
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := contextWithTimeout(30)
+		defer cancel()
+		var b strings.Builder
+		for i, n := range nodes {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			fmt.Fprintf(&b, "**%s** — слотов %d\n", n.Name, n.Workers)
+			if n.Probe == "" {
+				b.WriteString("наблюдателя нет (probe у узла не задан)\n")
+				continue
+			}
+			rep, err := nodeprobe.NewClient(n.Probe, n.ProbeToken, 10*time.Second).Node(ctx, false)
+			if err != nil {
+				fmt.Fprintf(&b, "%v\n", err)
+				continue
+			}
+			fmt.Fprintf(&b, "%s\n", rep.Line())
+			for _, p := range rep.Foreign() {
+				fmt.Fprintf(&b, "чужой процесс %d %s — %d МиБ\n", p.PID, p.Name, p.UsedMiB)
+			}
+			for _, mm := range rep.Evicted() {
+				fmt.Fprintf(&b, "модель %s вытеснена: на карте %d%%, в ОЗУ %.1f ГиБ\n",
+					mm.Name, mm.VRAMPct, float64(mm.SizeRAM)/(1<<30))
+			}
+			for _, j := range rep.Journal {
+				fmt.Fprintf(&b, "журнал (%s): %s\n", j.Kind, j.Text)
+			}
+			for _, ms := range rep.Missing {
+				fmt.Fprintf(&b, "не видно (%s): %s\n", ms.Section, ms.Reason)
+			}
 		}
 		return noticeMsg{text: strings.TrimRight(b.String(), "\n")}
 	}

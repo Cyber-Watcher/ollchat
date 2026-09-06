@@ -42,7 +42,7 @@ func linkGraph(t *testing.T, emb nameEmbedder) *Graph {
 		t.Fatalf("Add: %d %v", id, err)
 	}
 	vecs, _ := emb.Embed(context.Background(), []string{"Garbage collection"})
-	if err := g.SaveEntityVectors(emb.Model(), 8, kb.Quantize(vecs[0])); err != nil {
+	if err := g.SaveEntityVectors(emb.Model(), "", 8, kb.Quantize(vecs[0])); err != nil {
 		t.Fatal(err)
 	}
 	return g
