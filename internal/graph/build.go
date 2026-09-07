@@ -190,7 +190,7 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 	// Так известно общее число заранее: без него полоса хода врёт, а по ней
 	// человек решает, ждать ему или идти спать.
 	var jobs []kb.ChunkRef
-	var left int
+	var left, tocSkipped int
 	err := coll.EachChunkRef(filter, func(c kb.ChunkRef) error {
 		key := ChunkKey{Doc: c.Doc, Ord: c.Ord}
 		if mark, ok := g.Progress().MarkOf(key); ok {
@@ -199,6 +199,16 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 			if !opt.RedoEmpty || mark != MarkEmpty {
 				return nil
 			}
+		}
+		// Оглавление (FlagTOC, этап 99) модели не показывается: в нём все
+		// понятия книги стоят рядом, и извлечение даёт связи «всё со всем».
+		// Помечается пропущенным сразу, чтобы не считаться остатком.
+		if c.TOC {
+			if err := g.Progress().Mark(key, MarkSkipped); err != nil {
+				return err
+			}
+			tocSkipped++
+			return nil
 		}
 		left++
 		if opt.Limit > 0 && len(jobs) >= opt.Limit {
@@ -367,7 +377,7 @@ send:
 
 	res.LockWait = lockWait
 	res.BuildProgress = BuildProgress{
-		Total: res.Total, Done: done, Empty: empty, Skipped: skipped,
+		Total: res.Total, Done: done, Empty: empty, Skipped: skipped + tocSkipped,
 		Entities: g.Entities().Count(), Edges: g.Edges().Count(),
 		Elapsed: time.Since(started), Book: lastBook,
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
@@ -25,7 +26,7 @@ func (s *source) EachChunkRef(f kb.ChunkFilter, fn func(kb.ChunkRef) error) erro
 			continue
 		}
 		ref := kb.ChunkRef{Index: c.Index, Doc: c.Doc, Ord: c.Ord,
-			UnitFrom: c.UnitFrom, UnitTo: c.UnitTo, Unit: c.Unit, Book: c.Book}
+			UnitFrom: c.UnitFrom, UnitTo: c.UnitTo, Unit: c.Unit, Book: c.Book, TOC: c.TOC}
 		if err := fn(ref); err != nil {
 			return err
 		}
@@ -303,5 +304,33 @@ func TestFolderFilterByFileName(t *testing.T) {
 	}
 	if res.Total != 3 {
 		t.Errorf("взято кусков = %d, ожидалось 3 одной книги", res.Total)
+	}
+}
+
+// Кусок с признаком оглавления модели не показывается: помечается пропущенным
+// сразу и в остаток не входит (этап 99).
+func TestBuildSkipsTableOfContents(t *testing.T) {
+	g, _ := graph(t)
+	var asked atomic.Int32
+	m := &model{answer: func(int) (string, error) { asked.Add(1); return goodAnswer, nil }}
+	src := chunksFor(10, "/AI/книга.pdf")
+	src.chunks[0].TOC = true
+	src.chunks[5].TOC = true
+
+	res, err := Build(context.Background(), src, g, m, BuildOpts{Workers: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done != 8 || res.Skipped != 2 || res.Pending != 0 {
+		t.Fatalf("разобрано %d, пропущено %d, остаток %d", res.Done, res.Skipped, res.Pending)
+	}
+	if asked.Load() != 8 {
+		t.Fatalf("модель спросили %d раз, ожидалось 8", asked.Load())
+	}
+	for _, ord := range []uint32{0, 5} {
+		key := ChunkKey{Doc: src.chunks[ord].Doc, Ord: src.chunks[ord].Ord}
+		if mark, ok := g.Progress().MarkOf(key); !ok || mark != MarkSkipped {
+			t.Errorf("оглавление %v не помечено пропущенным: %v %v", key, mark, ok)
+		}
 	}
 }

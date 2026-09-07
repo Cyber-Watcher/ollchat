@@ -238,3 +238,53 @@ func TestEvidenceWithManyEntitiesFirst(t *testing.T) {
 		t.Errorf("первым идёт %v, а ожидался кусок книги 1, где названы оба понятия", res.Chunks[0])
 	}
 }
+
+// Слово рамки вопроса само по себе в граф не входит, даже если в графе
+// есть понятие с таким именем; из двух слов — входит по-прежнему.
+//
+// Замер 07.09.2026: по 9 английским вопросам из 16 понятиями входа стояли
+// «AND», «The», «WITH», «In»; по-русски «связаны» находило «Связанность».
+func TestEntrySkipsQuestionFrameWords(t *testing.T) {
+	g, _ := graph(t)
+	add := func(name string, docs ...uint32) uint32 {
+		id, _, err := g.Entities().Add(name, TypeConcept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, d := range docs {
+			if err := g.Mentions().Add(id, ChunkKey{Doc: d, Ord: uint32(i + 1)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	and := add("AND", 1, 2, 3)
+	the := add("The", 1)
+	coredns := add("CoreDNS", 1, 2)
+	svyaz := add("Связанность", 1, 2) // две книги: StemMinBooks его уже пропускает
+	names := func(q string) map[string]bool {
+		out := map[string]bool{}
+		for _, e := range g.Search(q, SearchOpts{}).Entities {
+			out[e.Name] = true
+		}
+		return out
+	}
+	got := names("configuring CoreDNS and the Corefile")
+	if got["AND"] || got["The"] {
+		t.Fatalf("предлог и артикль вошли в граф: %v", got)
+	}
+	if !got["CoreDNS"] {
+		t.Fatalf("настоящее понятие потеряно: %v", got)
+	}
+	if got := names("как связаны CoreDNS и Corefile"); got["Связанность"] || !got["CoreDNS"] {
+		t.Fatalf("слово рамки вошло или понятие потеряно: %v", got)
+	}
+	// Из двух слов имя по-прежнему находится.
+	if _, _, err := g.Entities().Add("AND operator", TypeConcept); err != nil {
+		t.Fatal(err)
+	}
+	if got := names("how does the AND operator work"); !got["AND operator"] {
+		t.Fatalf("двухсловное имя не найдено: %v", got)
+	}
+	_, _, _, _ = and, the, coredns, svyaz
+}

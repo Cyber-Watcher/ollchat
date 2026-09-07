@@ -266,6 +266,7 @@ func (g *Graph) linkEntities(query string, opt SearchOpts) []FoundEntity {
 
 	found := map[uint32]FoundEntity{}
 	covered := make([]bool, len(words))
+	stop := g.rules.stopSet()
 
 	for size := 3; size >= 1; size-- {
 		for i := 0; i+size <= len(words); i++ {
@@ -273,6 +274,12 @@ func (g *Graph) linkEntities(query string, opt SearchOpts) []FoundEntity {
 				continue
 			}
 			phrase := strings.Join(words[i:i+size], " ")
+			// Слово рамки вопроса само по себе входом не бывает: «AND»,
+			// «The», «In» — настоящие понятия графа, но не по предлогу
+			// и артиклю вопроса (DefaultEntryStopWords).
+			if size == 1 && stop[phrase] {
+				continue
+			}
 			// Сперва точное написание, затем основы слов: вопрос задают живой
 			// речью («чем переранжировать»), а понятия записаны словарной
 			// формой («переранжирование»).
@@ -359,15 +366,53 @@ func (g *Graph) evidence(seeds []FoundEntity, limit int) []ChunkKey {
 	for k, n := range score {
 		list = append(list, pair{k, n})
 	}
+	// Порядок: сперва куски, где названо больше искомых понятий; при равном
+	// числе — **по очереди книг**, а не по номеру книги.
+	//
+	// До 07.09.2026 ничья решалась ключом «книга, кусок» по возрастанию, и у
+	// частого понятия все места разбирали книги с меньшими номерами: замер
+	// на паре «оригинал — перевод» (docs/eval/pairfind-0906.md) — по 16
+	// английским вопросам перевод не попал в подтверждения ни разу, потому что
+	// его файл стоит по алфавиту позже и получил больший номер при индексации.
+	// Ранжирование по вопросу (RankWith) идёт уже среди отобранных и выбрать
+	// то, чего здесь нет, не может. Очередь книг даёт каждой книге место
+	// в пуле, а какая из них ближе к вопросу — решает ранжирование.
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].n != list[j].n {
 			return list[i].n > list[j].n
 		}
-		return list[i].key < list[j].key // устойчивый порядок
+		return list[i].key < list[j].key
 	})
-	if len(list) > limit {
-		list = list[:limit]
+	// Номер куска в очереди своей книги внутри одного балла.
+	pos := make([]int, len(list))
+	seen := map[uint64]int{} // (балл, книга) → сколько уже выдано
+	for i, p := range list {
+		k := uint64(p.n)<<32 | uint64(UnpackChunk(p.key).Doc)
+		pos[i] = seen[k]
+		seen[k]++
 	}
+	idx := make([]int, len(list))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		i, j := idx[a], idx[b]
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		if pos[i] != pos[j] {
+			return pos[i] < pos[j]
+		}
+		return list[i].key < list[j].key
+	})
+	if len(idx) > limit {
+		idx = idx[:limit]
+	}
+	ordered := make([]pair, 0, len(idx))
+	for _, i := range idx {
+		ordered = append(ordered, list[i])
+	}
+	list = ordered
 	out := make([]ChunkKey, 0, len(list))
 	for _, p := range list {
 		out = append(out, UnpackChunk(p.key))

@@ -214,6 +214,13 @@ func (s *searcher) Candidates(query string, opt SearchOpts) ([]Hit, error) {
 		}
 	}
 
+	// Оглавления и указатели в выдачу не идут (FlagTOC, этап 99): по словам
+	// они совпадают с любым вопросом по книге, а ответа в них нет.
+	for id := range scores {
+		if s.store.Rec(id).Flags&uint16(FlagTOC) != 0 {
+			delete(scores, id)
+		}
+	}
 	if len(scores) == 0 {
 		return nil, nil
 	}

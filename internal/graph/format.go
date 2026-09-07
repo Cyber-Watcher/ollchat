@@ -281,7 +281,11 @@ func evidenceLine(src Chunks, r FoundRelation, runes int) string {
 	//
 	// Первый подходящий кусок и берётся: перебирать все ради «лучшего» незачем,
 	// разницы между двумя кусками, где связь названа прямо, для читателя нет.
-	var first string
+	//
+	// Оглавление подтверждением не считается (решение владельца 07.09.2026):
+	// в нём оба конца связи стоят рядом всегда — как и все остальные понятия
+	// книги. Берётся только если других кусков у связи нет.
+	var first, toc string
 	for _, k := range keys {
 		if k.Doc == 0 && k.Ord == 0 {
 			continue
@@ -295,6 +299,12 @@ func evidenceLine(src Chunks, r FoundRelation, runes int) string {
 		if line == "" {
 			continue
 		}
+		if info.TOC || kb.LooksLikeTOC(info.Text) {
+			if toc == "" {
+				toc = line
+			}
+			continue
+		}
 		if hasBoth(text, r.Src, r.Dst) {
 			return line
 		}
@@ -302,7 +312,10 @@ func evidenceLine(src Chunks, r FoundRelation, runes int) string {
 			first = line
 		}
 	}
-	return first
+	if first != "" {
+		return first
+	}
+	return toc
 }
 
 // hasBoth — стоят ли в куске оба конца связи.

@@ -199,7 +199,10 @@ func (w *Writer) flush() error {
 			Ord:      w.pendOrds[i],
 			UnitFrom: clampUint16(c.UnitFrom),
 			UnitTo:   clampUint16(c.UnitTo),
-			Flags:    uint16(c.Flags),
+			// Признак оглавления ставится здесь, в единственном месте записи
+			// кусков в индекс: нарезка у PDF, EPUB и текстов разная, а признак
+			// один (этап 99).
+			Flags:    uint16(c.Flags | tocFlag(c.Text)),
 			Tokens:   clampUint16(countTokens(c.Text)),
 			BlockOff: uint64(off),
 			InBlock:  offsets[i],
@@ -387,4 +390,12 @@ func clampUint16(v int) uint16 {
 // раз разбирать текст при поиске накладно.
 func countTokens(text string) int {
 	return len(Tokens(text, nil))
+}
+
+// tocFlag — FlagTOC, если кусок похож на оглавление, иначе ноль.
+func tocFlag(text string) ChunkFlags {
+	if LooksLikeTOC(text) {
+		return FlagTOC
+	}
+	return 0
 }

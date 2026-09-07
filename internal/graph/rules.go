@@ -25,6 +25,11 @@ type Rules struct {
 	StemMinLen   int
 	StemMinBooks int
 
+	// EntryStopWords — слова, которые сами по себе входом в граф не бывают,
+	// см. DefaultEntryStopWords. nil — умолчание; пустой список — правило
+	// выключено.
+	EntryStopWords []string
+
 	// Смысловой вход и показ связей, см. DefaultSenseTie и соседей.
 	SenseTie      float64
 	SenseMargin   float64
@@ -60,6 +65,9 @@ func (r Rules) Normalized() Rules { return r.norm() }
 func (r Rules) norm() Rules {
 	if r.StemMinLen <= 0 {
 		r.StemMinLen = DefaultStemMinLen
+	}
+	if r.EntryStopWords == nil {
+		r.EntryStopWords = DefaultEntryStopWords
 	}
 	if r.StemMinBooks <= 0 {
 		r.StemMinBooks = DefaultStemMinBooks
@@ -111,4 +119,16 @@ func (g *Graph) Rules() Rules {
 		return DefaultRules()
 	}
 	return g.rules
+}
+
+// stopSet — слова рамки вопроса в виде множества, в нормализованном
+// написании: вопрос нормализуется тем же Normalize перед разбором.
+func (r Rules) stopSet() map[string]bool {
+	out := make(map[string]bool, len(r.EntryStopWords))
+	for _, w := range r.EntryStopWords {
+		if w = Normalize(w); w != "" {
+			out[w] = true
+		}
+	}
+	return out
 }

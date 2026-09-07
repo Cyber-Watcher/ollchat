@@ -89,6 +89,11 @@ func (o SearchOpts) rrfK() float64 {
 // (те же куски, те же векторы, тот же порядок), на скорость — да.
 const defaultSemanticWeight = 1.5
 
+// DefaultSemanticWeight — то же наружу: отбор подтверждений графа
+// (graph.RankWithVector) сливает слова и смысл той же ручкой, что поиск
+// по книгам, и умолчание у них одно.
+const DefaultSemanticWeight = defaultSemanticWeight
+
 // DefaultQueryTimeout — сколько ждать вектор ОДНОГО вопроса, если срок
 // не задан настройкой kb.query_timeout.
 //
@@ -145,8 +150,12 @@ func (c *Collection) searchVectors(query []int8, limit int, allow map[uint32]boo
 			defer wg.Done()
 			local := make([]Hit, 0, limit)
 			for i := from; i < to; i++ {
-				if allow != nil && !allow[c.store.Rec(i).Doc] {
+				rec := c.store.Rec(i)
+				if allow != nil && !allow[rec.Doc] {
 					continue
+				}
+				if rec.Flags&uint16(FlagTOC) != 0 {
+					continue // оглавление — не ответ (этап 99)
 				}
 				cos := Cosine(c.vectors.At(i), query)
 				if cos < minCos {

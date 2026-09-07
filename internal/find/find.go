@@ -124,6 +124,12 @@ type Result struct {
 	Relations []graph.FoundRelation
 	Excerpts  []Excerpt
 
+	// Evidence — подтверждения графа как их отобрал поиск, до слияния
+	// с выдержками книг: после слияния они обрезаются по TopK вслед за
+	// книгами, и по Excerpts их не пересчитать. Читают замеры
+	// (privatescripts/pairfind), чтобы мерить тот же путь, а не свой.
+	Evidence []graph.ChunkKey
+
 	// WordsOnly и WordsWhy — смысловой поиск не участвовал и почему именно.
 	// Разделено на признак и объяснение, потому что причины разные: сервер
 	// не ответил (поломка) и модель не задана (так настроено).
@@ -270,12 +276,16 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 			// бережёт контекст модели от одноразовых понятий, здесь человек
 			// ищет как раз редкое — и прятать это от него незачем.
 			MinMentions: 0,
-			Rank:        graph.RankWith(d.Coll),
+			// Подтверждения — по словам и по смыслу вопроса: вектор уже
+			// посчитан для смыслового входа, а без него перевод книги
+			// не попадал в подтверждения по вопросу на другом языке.
+			Rank:        graph.RankWithVector(d.Coll, qv, o.SemanticWeight),
 			QueryVector: qv,
 			Neighbors:   o.Rank,
 		})
 		msGraph = time.Since(tGraph).Milliseconds()
 		res.Entities, res.Relations, res.GraphNote = gres.Entities, gres.Relations, gres.Note
+		res.Evidence = gres.Chunks
 		res.Excerpts = fromGraph(d.Coll, gres.Chunks, o)
 
 		// Граф собран не по всей библиотеке — об этом надо сказать прямо,

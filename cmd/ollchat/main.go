@@ -69,6 +69,8 @@ type cliFlags struct {
 	kbDoctor              *string
 	kbQuick               *bool
 	kbYears               *string
+	kbFlagTOC             *string
+	graphForgetTOC        *string
 	kbReindex             *string
 	kbRecnt               *bool
 	graphBuild            *string
@@ -228,6 +230,10 @@ func parseFlags() *cliFlags {
 	f.kbDoctor = flag.String("kb-doctor", "", "проверить коллекцию: пропавшие книги, сканы, повторы (\"all\" — все)")
 	f.kbQuick = flag.Bool("kb-quick", false, "с --kb-doctor: без сверки книг по содержимому — быстрее, но повторы не найдутся")
 	f.kbYears = flag.String("kb-years", "", "проставить книгам коллекции год издания")
+	f.graphForgetTOC = flag.String("graph-forget-toc", "",
+		"убрать из графа упоминания и связи, извлечённые из оглавлений (после --kb-flag-toc): --graph-forget-toc books; с --kb-dry-run — только посчитать")
+	f.kbFlagTOC = flag.String("kb-flag-toc", "",
+		"пометить оглавления в индексе коллекции без перенарезки: --kb-flag-toc books (с --kb-dry-run — только посчитать)")
 	f.kbReindex = flag.String("kb-reindex", "", "перечитать книги коллекции заново: --kb-reindex books <путь>…")
 	f.kbRecnt = flag.Bool("kb-recount", false, "с --kb-years: перечитать год и там, где он уже стоит")
 
@@ -469,6 +475,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, flag.Args())
 	case *f.kbYears != "":
 		return true, kmaint.Years(os.Stdout, cfg, *f.kbYears, *f.kbRecnt)
+	case *f.kbFlagTOC != "":
+		return true, kmaint.FlagTOC(os.Stdout, cfg, *f.kbFlagTOC, *f.kbDry)
 	case *f.kbMerge != "":
 		return true, kmaint.Merge(os.Stdout, cfg, *f.kbMerge, *f.kbMergeF, *f.kbYes, *f.kbDry)
 	case *f.kbRebase != "":
@@ -488,6 +496,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
+	case *f.graphForgetTOC != "":
+		return true, gmaint.ForgetTOC(os.Stdout, cfg, *f.graphForgetTOC, *f.kbDry)
 	case *f.graphArchive != "":
 		return true, gmaint.Archive(os.Stdout, cfg, *f.graphArchive)
 	case *f.graphArchives != "":

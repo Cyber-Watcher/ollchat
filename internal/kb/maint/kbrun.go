@@ -725,6 +725,48 @@ func Years(stdout io.Writer, cfg *config.Config, name string, force bool) error 
 	return nil
 }
 
+// FlagTOC ставит признак оглавления кускам уже проиндексированных книг
+// (этап 99): без перенарезки, переписывается только поле признаков индекса.
+func FlagTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	started := time.Now()
+	res, err := coll.FlagTOC(ctx, dry, func(done, total int) {
+		fmt.Fprintf(os.Stderr, "\r\033[K%d/%d кусков", done, total)
+	})
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return err
+	}
+	what := "помечено"
+	if dry {
+		what = "было бы помечено"
+	}
+	fmt.Fprintf(stdout, "коллекция %s: кусков %d, оглавлений %s %d (%.1f%%), было с признаком %d, изменилось %d, за %s\n",
+		name, res.Total, what, res.Flagged, 100*float64(res.Flagged)/float64(max(res.Total, 1)),
+		res.Was, res.Changed, time.Since(started).Round(time.Second))
+	if res.WorstN > 0 {
+		title := fmt.Sprintf("книга %d", res.WorstDoc)
+		if b, ok := coll.Book(res.WorstDoc); ok && b.Title != "" {
+			title = fmt.Sprintf("«%s»", b.Title)
+		}
+		fmt.Fprintf(stdout, "  больше всего у %s: %d из %d кусков\n", title, res.WorstN, res.WorstTotal)
+	}
+	if !dry && res.Changed > 0 {
+		fmt.Fprintln(stdout, "  помеченные куски поиск не выдаёт, сборка графа их пропускает; уже извлечённое из них — --graph-forget-toc")
+	}
+	return nil
+}
+
 // Reindex перечитывает названные книги заново.
 //
 // Нужен, когда изменились правила разбора: книга не менялась, и доливка её

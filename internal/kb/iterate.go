@@ -30,6 +30,7 @@ type ChunkInfo struct {
 	Book BookRec // книга целиком: заголовок, автор, путь
 	Text string  // текст куска
 	Code bool    // кусок похож на листинг
+	TOC  bool    // оглавление или указатель (FlagTOC)
 }
 
 // ChunkFilter — какие куски нужны.
@@ -154,6 +155,7 @@ type ChunkRef struct {
 	UnitTo   int
 	Unit     string
 	Book     BookRec
+	TOC      bool // оглавление или указатель (FlagTOC): сборка графа такой кусок пропускает
 }
 
 // EachChunkRef обходит куски, не читая их тексты.
@@ -176,6 +178,7 @@ func (c *Collection) EachChunkRef(f ChunkFilter, fn func(ChunkRef) error) error 
 		ref := ChunkRef{
 			Index: i, Doc: rec.Doc, Ord: rec.Ord,
 			UnitFrom: int(rec.UnitFrom), UnitTo: int(rec.UnitTo), Unit: "стр.",
+			TOC: ChunkFlags(rec.Flags)&FlagTOC != 0,
 		}
 		if b, found := c.book(rec.Doc); found {
 			ref.Book = b
@@ -201,6 +204,30 @@ func (c *Collection) EachChunkRef(f ChunkFilter, fn func(ChunkRef) error) error 
 // коллекции стоил бы 268 тысяч сравнений на каждую, поэтому строится
 // отображение — один раз при первом обращении. Память: по шестнадцать байт
 // на кусок, на всю библиотеку это единицы мегабайт.
+// ChunkVectorByRef — вектор куска по устойчивой ссылке «книга, номер».
+//
+// nil, false — куска нет или вектор ему ещё не посчитан: покрытие векторов —
+// начальный отрезок хранилища, и куски долитых книг ждут --kb-embed. Нужен
+// отбору подтверждений графа (graph.RankWithVector): 64 кандидата сверяются
+// с вектором вопроса по номеру, без обхода всей библиотеки.
+func (c *Collection) ChunkVectorByRef(doc, ord uint32) ([]int8, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.store == nil || c.vectors == nil {
+		return nil, false
+	}
+	c.refOnce.Do(c.buildRefIndex)
+	i, ok := c.byRef[uint64(doc)<<32|uint64(ord)]
+	if !ok {
+		return nil, false
+	}
+	v := c.vectors.At(i)
+	if v == nil {
+		return nil, false
+	}
+	return v, true
+}
+
 func (c *Collection) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -221,6 +248,7 @@ func (c *Collection) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 		Index: i, Doc: rec.Doc, Ord: rec.Ord,
 		UnitFrom: int(rec.UnitFrom), UnitTo: int(rec.UnitTo), Unit: "стр.",
 		Text: texts[i], Code: ChunkFlags(rec.Flags)&FlagCode != 0,
+		TOC: ChunkFlags(rec.Flags)&FlagTOC != 0,
 	}
 	if b, found := c.book(rec.Doc); found {
 		info.Book = b
@@ -295,6 +323,7 @@ func (c *Collection) EachChunk(f ChunkFilter, fn func(ChunkInfo) error) error {
 				Unit:     "стр.",
 				Text:     texts[i],
 				Code:     ChunkFlags(rec.Flags)&FlagCode != 0,
+				TOC:      ChunkFlags(rec.Flags)&FlagTOC != 0,
 			}
 			if b, found := c.book(rec.Doc); found {
 				info.Book = b

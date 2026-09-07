@@ -743,6 +743,13 @@ type Graph struct {
 	// из 60, потому что «связаны» совпадает с ней основой.
 	StemMinBooks int `toml:"stem_min_books"`
 
+	// EntryStopWords — слова рамки вопроса, которые сами по себе входом
+	// в граф не бывают: артикли, предлоги, союзы, вопросительные слова.
+	// Не задано — встроенный список graph.DefaultEntryStopWords; задать
+	// пустой список — выключить правило. Замер 07.09.2026: «AND», «The»,
+	// «WITH», «In» входили в граф по 9 английским вопросам из 16.
+	EntryStopWords []string `toml:"entry_stop_words"`
+
 	// SenseTie — ступень огрубления смысловой близости: всё, что попало в одну
 	// ступень, считается одинаково близким, и выбор внутри неё решает
 	// распространённость понятия. 0 — умолчание (0.05).
@@ -1541,16 +1548,17 @@ func (g Graph) Rules() graph.Rules {
 		mode = graph.GroupOff
 	}
 	return graph.Rules{
-		Name:          g.Name,
-		StemMinLen:    g.StemMinLen,
-		StemMinBooks:  g.StemMinBooks,
-		SenseTie:      g.SenseTie,
-		SenseMargin:   g.SenseMargin,
-		VectorAliases: g.VectorAliases,
-		MaxEvidences:  g.MaxEvidences,
-		Groups:        mode,
-		MergesOff:     g.MergesEnabled != nil && !*g.MergesEnabled,
-		Format:        g.Format,
+		Name:           g.Name,
+		StemMinLen:     g.StemMinLen,
+		StemMinBooks:   g.StemMinBooks,
+		EntryStopWords: g.EntryStopWords,
+		SenseTie:       g.SenseTie,
+		SenseMargin:    g.SenseMargin,
+		VectorAliases:  g.VectorAliases,
+		MaxEvidences:   g.MaxEvidences,
+		Groups:         mode,
+		MergesOff:      g.MergesEnabled != nil && !*g.MergesEnabled,
+		Format:         g.Format,
 	}
 }
 
