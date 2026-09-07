@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -123,5 +125,117 @@ func TestSmallPasteGoesToInput(t *testing.T) {
 	}
 	if len(m.pastes) != 0 {
 		t.Errorf("короткая вставка не должна сворачиваться: %v", m.pastes)
+	}
+}
+
+// input.collapse_paste = false: текст идёт в поле как есть, но вставка всё
+// равно известна — иначе Shift+F6 нечего было бы сворачивать.
+func TestPasteNotCollapsedWhenSettingOff(t *testing.T) {
+	m := newTestModelWith(t, func(c *config.Config) { c.Input.CollapsePaste = false })
+	big := strings.Repeat("строка текста\n", 100)
+
+	m.Update(tea.PasteMsg{Content: big})
+
+	if !strings.Contains(m.ta.Value(), "строка текста") {
+		t.Fatalf("при collapse_paste=false текст обязан попасть в поле целиком: %q", m.ta.Value())
+	}
+	if len(m.pastes) != 0 {
+		t.Errorf("свёрнутых вставок быть не должно: %v", m.pastes)
+	}
+	if len(m.pasteVault) != 1 {
+		t.Fatalf("вставка не запомнена: %v", m.pasteVault)
+	}
+
+	// Shift+F6 сворачивает её в метку.
+	if !m.collapseInPrompt() {
+		t.Fatal("свернуть вставку не удалось")
+	}
+	if strings.Contains(m.ta.Value(), "строка текста") {
+		t.Errorf("после сворачивания текста в поле быть не должно: %q", m.ta.Value())
+	}
+	if len(m.pastes) != 1 {
+		t.Errorf("свёрнутая вставка не поднялась в список: %v", m.pastes)
+	}
+	if got := m.expandPastes(m.ta.Value()); got != big {
+		t.Errorf("метка не разворачивается в исходный текст (%d знаков против %d)", len(got), len(big))
+	}
+}
+
+// F6 разворачивает метку в поле, Shift+F6 сворачивает обратно — и так по кругу.
+func TestExpandAndFoldPasteInPrompt(t *testing.T) {
+	m := newTestModel(t)
+	big := strings.Repeat("строка текста\n", 100)
+	m.Update(tea.PasteMsg{Content: big})
+	label := m.pastes[0].label()
+
+	if !m.expandInPrompt() {
+		t.Fatal("F6 не развернул вставку")
+	}
+	if !strings.Contains(m.ta.Value(), "строка текста") {
+		t.Fatalf("после разворота в поле нет текста: %q", m.ta.Value())
+	}
+	if len(m.pastes) != 0 {
+		t.Errorf("развёрнутая вставка не должна ждать подстановки: %v", m.pastes)
+	}
+	if m.expandInPrompt() {
+		t.Error("второй разворот менять ничего не должен")
+	}
+
+	if !m.collapseInPrompt() {
+		t.Fatal("Shift+F6 не свернул вставку")
+	}
+	if got := m.ta.Value(); !strings.Contains(got, label) {
+		t.Errorf("после сворачивания в поле нет метки: %q", got)
+	}
+	if m.collapseInPrompt() {
+		t.Error("повторное сворачивание менять ничего не должно")
+	}
+}
+
+// Вопрос со свёрнутой вставкой, возвращённый стрелкой вверх, обязан снова
+// знать свой текст: иначе повторная отправка ушла бы модели с мёртвой меткой.
+func TestHistoryKeepsPasteAlive(t *testing.T) {
+	m := newTestModel(t)
+	big := strings.Repeat("строка текста\n", 100)
+	m.Update(tea.PasteMsg{Content: big})
+	m.ta.InsertString(" разбери это")
+	sent := m.ta.Value()
+
+	// Отправка: список свёрнутых вставок сбрасывается, как в send().
+	m.hist.add(sent)
+	m.pastes = nil
+	m.ta.Reset()
+
+	back, ok := m.hist.back(m.ta.Value())
+	if !ok {
+		t.Fatal("история пуста")
+	}
+	m.setInput(back)
+
+	if len(m.pastes) != 1 {
+		t.Fatalf("вставка не поднялась из хранилища: %v", m.pastes)
+	}
+	if got := m.expandPastes(m.ta.Value()); !strings.HasPrefix(got, big) {
+		t.Errorf("вопрос из истории потерял текст вставки: %d знаков", len(got))
+	}
+}
+
+// Номера вставок не повторяются за сеанс: две метки с одним номером означали бы
+// два разных текста под одним именем, и вопрос из истории ушёл бы с чужим.
+func TestPasteNumbersAreUniquePerSession(t *testing.T) {
+	m := newTestModel(t)
+	m.Update(tea.PasteMsg{Content: strings.Repeat("первая вставка\n", 100)})
+	first := m.pastes[0].label()
+
+	m.pastes = nil // как после отправки
+	m.ta.Reset()
+	m.Update(tea.PasteMsg{Content: strings.Repeat("вторая вставка\n", 100)})
+	second := m.pastes[0].label()
+
+	if first == second {
+		t.Errorf("две вставки получили одну метку: %q", first)
+	}
+	if len(m.pasteVault) != 2 {
+		t.Errorf("в хранилище должны быть обе вставки: %v", len(m.pasteVault))
 	}
 }

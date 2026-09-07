@@ -24,6 +24,8 @@ type keymap struct {
 	savePDFFull key.Binding
 	copy        key.Binding
 	copyFull    key.Binding
+	pasteOpen   key.Binding
+	pasteFold   key.Binding
 	paste       key.Binding
 	servers     key.Binding
 	models      key.Binding
@@ -50,6 +52,8 @@ var keys = keymap{
 	savePDFFull: key.NewBinding(key.WithKeys("shift+f4", "shift+f16", "f16"), key.WithHelp("Shift+F4", "то же вместе с вопросом")),
 	copy:        key.NewBinding(key.WithKeys("f5"), key.WithHelp("F5", "копировать видимый ответ")),
 	copyFull:    key.NewBinding(key.WithKeys("shift+f5", "shift+f17", "f17"), key.WithHelp("Shift+F5", "то же вместе с вопросом")),
+	pasteOpen:   key.NewBinding(key.WithKeys("f6"), key.WithHelp("F6", "развернуть свёрнутую вставку в поле ввода")),
+	pasteFold:   key.NewBinding(key.WithKeys("shift+f6", "shift+f18", "f18"), key.WithHelp("Shift+F6", "свернуть вставку обратно в метку")),
 	paste:       key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("Ctrl+V", "вставить изображение из буфера обмена")),
 	servers:     key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl+S", "выбор сервера")),
 	models:      key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("Ctrl+R", "выбор модели")),
@@ -64,6 +68,7 @@ var keys = keymap{
 // all — все привязки, ради проверок и справки.
 func (k keymap) all() []key.Binding {
 	return []key.Binding{k.quit, k.esc, k.enter, k.up, k.down, k.mode, k.think, k.mouse, k.images,
-		k.find, k.savePDF, k.savePDFFull, k.copy, k.copyFull, k.paste, k.servers, k.models,
+		k.find, k.savePDF, k.savePDFFull, k.copy, k.copyFull, k.pasteOpen, k.pasteFold,
+		k.paste, k.servers, k.models,
 		k.pageUp, k.pageDown, k.halfUp, k.halfDown, k.top, k.bottom}
 }

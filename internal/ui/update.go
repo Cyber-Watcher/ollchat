@@ -550,6 +550,25 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.copyFull):
 		return m, m.copyAnswer(true)
 
+	// Свёрнутая вставка: развернуть в поле ввода и свернуть обратно.
+	// Молчать нельзя: нажатие без видимого следствия читается как поломка,
+	// поэтому строка состояния говорит и об отказе тоже.
+	case key.Matches(msg, keys.pasteOpen):
+		if m.expandInPrompt() {
+			m.statusMsg = "вставка развёрнута — Shift+F6 свернёт обратно"
+		} else {
+			m.statusMsg = "в поле нечего разворачивать"
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.pasteFold):
+		if m.collapseInPrompt() {
+			m.statusMsg = "вставка свёрнута в метку — F6 развернёт"
+		} else {
+			m.statusMsg = "в поле нечего сворачивать"
+		}
+		return m, nil
+
 	// Вставка изображения из буфера обмена. Через терминал картинка прийти не
 	// может — её забирает внешняя утилита, поэтому это отдельная команда,
 	// а не обычная вставка текста.
