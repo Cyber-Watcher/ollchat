@@ -124,3 +124,36 @@ func YearSpan(res []Result, now time.Time) (from, to int, note string) {
 	}
 	return from, to, note
 }
+
+// RetitleTechnical заменяет технические заголовки из метаданных именем файла.
+//
+// **Зачем.** Издательства оставляют в поле Title имя вёрсточного файла:
+// 08.09.2026 книга «Machine Learning in Social Networks» лежала в коллекции
+// под именем «502879_1_En_Print.indd», автор — «U6fonter». В ссылках выдачи
+// такое имя не узнать ни человеку, ни модели.
+//
+// **Почему не переиндексацией.** Перечитывание книги заводит ей новые куски
+// и новый номер, а граф ссылается на прежние — рассогласование стоило бы
+// разбора книги заново. Здесь правится только запись реестра: номер, куски
+// и вклад в граф остаются на месте, как это делает RefreshYears для годов.
+func (c *Collection) RetitleTechnical(dry bool) (fixed []string, err error) {
+	for _, b := range c.Books() {
+		if b.Kind != BookOK || !technicalTitle(b.Title) {
+			continue
+		}
+		name := titleFromFile(b.Path)
+		if name == "" || name == b.Title {
+			continue
+		}
+		fixed = append(fixed, b.Title+" → "+name)
+		if dry {
+			continue
+		}
+		rec := b
+		rec.Title = name
+		if err := c.appendDoc(rec); err != nil {
+			return fixed, err
+		}
+	}
+	return fixed, nil
+}

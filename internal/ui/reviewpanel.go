@@ -44,6 +44,24 @@ type reviewItem struct {
 	snippet  string
 	chunkID  string // для чтения куска целиком: books/12#37
 	fromNode uint32
+
+	// Выдержки по стороне пары: книга, страница и кусок текста, где понятие
+	// встретилось. Заводятся для ОБЕИХ сторон (этап 101, A2).
+	//
+	// **Зачем.** Человек решал «одно это или разное» по двум именам — самой
+	// бедной части данных. Книги советуют обратное: «Knowledge Graphs and LLMs
+	// in Action» (Negro, 2025, стр. 149) — держать доступ к тексту, из которого
+	// сущность извлечена, именно ради донастройки склейки. У пар двойников
+	// (r.Chunk пуст) выдержек не было вовсе — а это основной поток разбора.
+	fromEv evidence
+	toEv   evidence
+}
+
+// evidence — одна выдержка: откуда и что там написано.
+type evidence struct {
+	source  string // «Название книги, стр. 42»
+	snippet string
+	chunkID string // books/12#37 — чтобы открыть кусок целиком
 }
 
 // reviewPanel — состояние окна.
@@ -75,7 +93,14 @@ func (p *reviewPanel) height() int {
 	if rows == 0 {
 		rows = 1
 	}
-	return rows*2 + 3 // по две строки на пару, рамка и заголовок
+	// По две строки на пару, плюс две строки выдержек у выделенной пары
+	// (этап 101, A2): показывать выдержки у всех сразу — панель на пол-экрана,
+	// а решают всегда одну пару.
+	extra := 0
+	if len(p.items) > 0 {
+		extra = 2
+	}
+	return rows*2 + 3 + extra // рамка и заголовок
 }
 
 func (p *reviewPanel) move(delta int) { p.step(delta, len(p.items), p.visibleRows()) }
@@ -140,6 +165,11 @@ func (p *reviewPanel) view(width int) string {
 			tail = "источник: " + it.rec.Source
 		}
 		rows = append(rows, clip("     "+styPickerHint.Render(truncateLine(tail, inner-5)), inner+2))
+		if i == p.cursor {
+			rows = append(rows,
+				evidenceRow("◂", it.fromEv, inner),
+				evidenceRow("▸", it.toEv, inner))
+		}
 	}
 	b.WriteString(strings.Join(rows, "\n"))
 	return styPickerBox.Width(width - 2).Render(b.String())
@@ -232,20 +262,80 @@ func reviewItems(g *graph.Graph, coll *kb.Collection, judge bool) []reviewItem {
 		if r.To != 0 {
 			other, otherName = r.To, r.ToName
 		}
-		it.to, _ = weight(other, otherName)
+		var toNode uint32
+		it.to, toNode = weight(other, otherName)
 		if r.Chunk.Doc != 0 && coll != nil {
-			if ci, ok := coll.ChunkByRef(r.Chunk.Doc, r.Chunk.Ord); ok {
-				it.source = ci.Book.Title
-				if ci.Unit != "" && ci.UnitFrom > 0 {
-					it.source += fmt.Sprintf(", %s %d", ci.Unit, ci.UnitFrom)
-				}
-				it.snippet = cutRunes(oneLine(ci.Text), 90)
-				it.chunkID = fmt.Sprintf("%s/%d#%d", coll.Name(), r.Chunk.Doc, r.Chunk.Ord)
+			if ev, ok := evidenceOf(coll, r.Chunk); ok {
+				it.source, it.snippet, it.chunkID = ev.source, ev.snippet, ev.chunkID
+				it.fromEv = ev
 			}
 		}
+		// Выдержка по каждой стороне: у пары двойников куска-источника нет
+		// вовсе, а решать по одним именам — гадание (этап 101, A2).
+		if it.fromEv.snippet == "" {
+			it.fromEv, _ = firstEvidence(g, coll, it.fromNode)
+		}
+		it.toEv, _ = firstEvidence(g, coll, toNode)
 		out = append(out, it)
 	}
 	return out
+}
+
+// evidenceRow — строка выдержки одной стороны выделенной пары.
+//
+// Пусто бывает честно: понятие пришло из книги, которой больше нет на диске,
+// или его упоминания ещё не перенесены (backfill выдержек). Тогда так и
+// говорим, а не оставляем пустое место, которое читается как «данных нет».
+func evidenceRow(mark string, ev evidence, inner int) string {
+	text := ev.source
+	if ev.snippet != "" {
+		text += " «" + ev.snippet + "»"
+	}
+	if text == "" {
+		text = "выдержки нет"
+	}
+	return clip("     "+styPickerHint.Render(truncateLine(mark+" "+text, inner-5)), inner+2)
+}
+
+// evidenceOf — выдержка по ключу куска.
+func evidenceOf(coll *kb.Collection, key graph.ChunkKey) (evidence, bool) {
+	if coll == nil || key.Doc == 0 {
+		return evidence{}, false
+	}
+	ci, ok := coll.ChunkByRef(key.Doc, key.Ord)
+	if !ok {
+		return evidence{}, false
+	}
+	src := ci.Book.Title
+	if ci.Unit != "" && ci.UnitFrom > 0 {
+		src += fmt.Sprintf(", %s %d", ci.Unit, ci.UnitFrom)
+	}
+	return evidence{
+		source:  src,
+		snippet: cutRunes(oneLine(ci.Text), 120),
+		chunkID: fmt.Sprintf("%s/%d#%d", coll.Name(), key.Doc, key.Ord),
+	}, true
+}
+
+// firstEvidence — первое упоминание понятия, которое удалось прочитать.
+//
+// Первое, а не «лучшее»: выбор лучшего требует счёта, а человеку нужен пример
+// употребления, чтобы отличить «Java (язык)» от «Java (остров)». Кусок, который
+// не читается (книга уехала с диска), пропускается молча — выдержка не обещание.
+func firstEvidence(g *graph.Graph, coll *kb.Collection, id uint32) (evidence, bool) {
+	if g == nil || coll == nil || id == 0 {
+		return evidence{}, false
+	}
+	keys := g.Mentions().Of(id)
+	for i, key := range keys {
+		if i >= 5 { // дальше не ищем: пять неудач подряд — беда крупнее выдержки
+			break
+		}
+		if ev, ok := evidenceOf(coll, key); ok {
+			return ev, true
+		}
+	}
+	return evidence{}, false
 }
 
 func cutRunes(s string, n int) string {

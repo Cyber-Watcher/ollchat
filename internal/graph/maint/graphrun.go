@@ -40,7 +40,15 @@ type buildExtractor interface {
 }
 
 // Build собирает или доливает граф коллекции.
-func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, workers int,
+// bookQuery — часть имени или пути книги: собрать граф только по ней.
+//
+// Зачем отдельно от folder. Каталог — единица очереди («гони /AI»), и это
+// правильно, пока разбирают всё подряд. Но иногда десяток нужных книг лежит
+// в каталоге, где остаток на тридцать часов карты: 08.09.2026 девять книг
+// про графы приехали в /AI, где оставалось 33 594 куска. Отбор по имени
+// разбирает их за час, а не за полторы недели ночей (этап 101, часть C).
+func Build(stdout io.Writer, cfg *config.Config, name, folder, bookQuery string,
+	limit, workers int,
 	allowModelChange, allowPromptChange, redoEmpty, linkNew, ignoreBusy bool,
 	logPath, kind, note string) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
@@ -115,6 +123,22 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 	defer g.Close()
 
 	filter := kb.ChunkFilter{PathContains: folder}
+	// Отбор по имени книги сужает уже выбранный каталог: «--graph-folder /AI
+	// --graph-book-name Graph» — книги про графы внутри /AI. Без каталога
+	// ищется по всей коллекции.
+	var picked []uint32
+	if strings.TrimSpace(bookQuery) != "" {
+		for _, b := range coll.MatchingDocs(kb.ChunkFilter{PathContains: bookQuery}) {
+			if folder == "" || strings.Contains(b.Path, folder) {
+				picked = append(picked, b.ID)
+			}
+		}
+		if len(picked) == 0 {
+			return fmt.Errorf("в коллекции %s нет книг по «%s»%s", name, bookQuery,
+				folderNote(folder))
+		}
+		filter.Docs = picked
+	}
 	books := coll.MatchingDocs(filter)
 	inFolder := coll.CountChunks(filter)
 	if inFolder == 0 {
@@ -177,9 +201,16 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 				busy, busy+free)
 		}
 	}
-	if folder != "" {
+	switch {
+	case len(picked) > 0:
+		fmt.Fprintf(stdout, "отбор по книгам «%s»%s — книг %d, кусков %d\n",
+			bookQuery, folderNote(folder), len(books), inFolder)
+		for _, b := range books {
+			fmt.Fprintf(stdout, "  · %s\n", b.Title)
+		}
+	case folder != "":
 		fmt.Fprintf(stdout, "отбор по пути: %q — книг %d, кусков %d\n", folder, len(books), inFolder)
-	} else {
+	default:
 		fmt.Fprintf(stdout, "вся коллекция: книг %d, кусков %d\n", len(books), inFolder)
 	}
 	if limit > 0 {
@@ -224,6 +255,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder string, limit, wor
 	res, err := graph.Build(ctx, coll, g, ex, graph.BuildOpts{
 		Link:              link,
 		Folder:            folder,
+		Books:             picked,
 		Limit:             limit,
 		Workers:           workers,
 		Retry:             cfg.Graph.Retry,
@@ -1570,6 +1602,14 @@ func Bench(stdout io.Writer, cfg *config.Config, name, models, folder string,
 
 // orAll подставляет «вся коллекция», когда каталог не задан: пустая строка
 // в отчёте читается как потерянное значение.
+// folderNote — приписка про каталог, чтобы отказ и отчёт называли оба условия.
+func folderNote(folder string) string {
+	if strings.TrimSpace(folder) == "" {
+		return ""
+	}
+	return fmt.Sprintf(" в каталоге %s", folder)
+}
+
 func orAll(folder string) string {
 	if strings.TrimSpace(folder) == "" {
 		return "вся коллекция"

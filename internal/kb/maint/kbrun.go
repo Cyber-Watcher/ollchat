@@ -1241,3 +1241,37 @@ func chunksWord(n int) string {
 	}
 	return fmt.Sprintf("%d %s", n, word)
 }
+
+// Retitle — починить технические названия книг («502879_1_En_Print.indd»).
+//
+// Правится только запись реестра: номера книг, куски и вклад в граф остаются
+// на месте. Переиндексация здесь была бы вредна — она завела бы книге новые
+// куски, а граф ссылается на прежние.
+func Retitle(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	fixed, err := coll.RetitleTechnical(dry)
+	if err != nil {
+		return err
+	}
+	if len(fixed) == 0 {
+		fmt.Fprintf(stdout, "коллекция %s: технических названий не нашлось\n", name)
+		return nil
+	}
+	if dry {
+		fmt.Fprintf(stdout, "сухой прогон: починилось бы названий %d\n", len(fixed))
+	} else {
+		fmt.Fprintf(stdout, "коллекция %s: починено названий %d\n", name, len(fixed))
+	}
+	for _, f := range fixed {
+		fmt.Fprintln(stdout, "  ·", f)
+	}
+	return nil
+}

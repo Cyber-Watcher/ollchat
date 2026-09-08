@@ -36,6 +36,20 @@ type Rules struct {
 	VectorAliases int
 	MaxEvidences  int
 
+	// ChainHubLimit — сколько связей у понятия, чтобы считать его «хабом»
+	// и не пускать цепочку через него (этап 101, D1).
+	//
+	// **Замер 08.09.2026** на наборе из 60 пар понятий: без запрета цепочка
+	// находилась у 25 пар, и 88% этих цепочек шли через хаб — «ASCII → Go →
+	// string literals», «variadic → Go → NumOut», где у Go 11 466 связей.
+	// Такая цепочка формально верна и не объясняет ничего. С запретом (500)
+	// цепочка находится у 26 пар из 27 — то есть теряется одна, — и средняя
+	// длина даже короче: 2.27 шага против 2.44.
+	//
+	// Концы пути хабами быть могут: их назвал вопрос. Запрет касается только
+	// промежуточных узлов. 0 — умолчание (500), отрицательное — не запрещать.
+	ChainHubLimit int
+
 	// Groups — режим групп «про одно»: GroupOff, GroupUnion, GroupExpand.
 	// Пусто или незнакомое — off: молчаливо ничего не делать безопаснее,
 	// чем гадать.
@@ -83,6 +97,9 @@ func (r Rules) norm() Rules {
 	}
 	if r.MaxEvidences <= 0 {
 		r.MaxEvidences = DefaultMaxEvidences
+	}
+	if r.ChainHubLimit == 0 {
+		r.ChainHubLimit = DefaultChainHubLimit
 	}
 	switch r.Groups {
 	case GroupOff, GroupUnion, GroupExpand:

@@ -60,6 +60,7 @@ type cliFlags struct {
 	kbMergeF              *bool
 	kbYes                 *bool
 	kbEmbed               *string
+	kbRetitle             *string
 	kbRebase              *string
 	kbRebaseFrom          *string
 	kbRebaseTo            *string
@@ -216,6 +217,8 @@ func parseFlags() *cliFlags {
 	f.kbYes = flag.Bool("kb-yes", false,
 		"с --kb-merge: не спрашивать подтверждений (для скриптов);\n"+
 			"без него уплотнение дважды переспрашивает и требует ответа ДА")
+	f.kbRetitle = flag.String("kb-retitle", "",
+		"починить технические названия книг из метаданных: --kb-retitle books (с --kb-dry-run — только показать)")
 	f.kbEmbed = flag.String("kb-embed", "", "посчитать векторы(смыслы) коллекции (эмбеддинги) без запуска интерфейса")
 	f.kbRebase = flag.String("kb-rebase", "",
 		"переписать корень коллекции при переносе: --kb-rebase books --kb-rebase-to /новый/путь")
@@ -354,7 +357,7 @@ func parseFlags() *cliFlags {
 	f.graphBook = flag.String("graph-book", "",
 		"показать вклад книги в граф: --graph-book books --graph-book-name <часть имени>")
 	f.graphBookName = flag.String("graph-book-name", "",
-		"с --graph-book: часть имени или пути книги")
+		"с --graph-book, --graph-drop-book и --graph-build: часть имени или пути книги")
 	f.graphGroupsBuild = flag.String("graph-groups-build", "",
 		"собрать группы понятий: --graph-groups-build books --from merges|resolve|both")
 	f.graphGroupsFrom = flag.String("from", "both",
@@ -486,10 +489,13 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, kmaint.Rebase(os.Stdout, cfg, *f.kbRebase, *f.kbRebaseFrom, *f.kbRebaseTo, *f.kbDry)
 	case *f.kbRefresh != "":
 		return true, kmaint.Refresh(os.Stdout, cfg, *f.kbRefresh, *f.kbDry)
+	case *f.kbRetitle != "":
+		return true, kmaint.Retitle(os.Stdout, cfg, *f.kbRetitle, *f.kbDry)
 	case *f.kbEmbed != "":
 		return true, kmaint.Embed(os.Stdout, cfg, *f.kbEmbed, *f.kbDry)
 	case *f.graphBuild != "":
-		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, *f.graphFolder, *f.graphLimit, *f.graphWorkers,
+		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, *f.graphFolder, *f.graphBookName,
+			*f.graphLimit, *f.graphWorkers,
 			*f.graphNewModel, *f.graphNewPrompt, *f.graphRedoEmpty, *f.graphLinkNew, *f.graphIgnoreBusy,
 			*f.graphLog, *f.graphKind, *f.graphNote)
 	case *f.nodes:

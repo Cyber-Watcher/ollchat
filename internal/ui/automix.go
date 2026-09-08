@@ -89,6 +89,7 @@ func (m *Model) mixPlan() (mixJob, bool) {
 			NoTools:  m.toolsUnsupported(),
 		},
 		set: mixer.Settings{
+			Chain:              m.cfg.Mix.ChainOn(),
 			TableBoost:         m.cfg.KB.TableBoost,
 			Entities:           m.cfg.Mix.Entities,
 			Neighbors:          m.cfg.Mix.Neighbors,
@@ -224,6 +225,7 @@ func (m *Model) autoMix(question string) mixResult {
 		TableBoost:         m.cfg.KB.TableBoost,
 		Entities:           m.cfg.Mix.Entities,
 		Neighbors:          m.cfg.Mix.Neighbors,
+		Chain:              m.cfg.Mix.ChainOn(),
 		Rank:               m.live.Rank(),
 		TopK:               topK,
 		MaxPerBook:         maxPerBook,

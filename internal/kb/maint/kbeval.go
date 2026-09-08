@@ -154,6 +154,8 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 			string(mode), rep.Recall, rep.MRR, rep.NDCG, rep.AvgRank, len(rep.Missed))
 	}
 
+	printRagasNames(stdout)
+
 	// Порог воздержания (этап 91, R2.11): ниже какого разрыва первого
 	// и второго места выдача — шум. Таблица по режиму слияния, потому что
 	// так ищет kb_search; с реранкером шкала другая, и порог у него свой.
@@ -170,6 +172,24 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 		}
 	}
 	return nil
+}
+
+// printRagasNames — как наши колонки называются в общепринятых терминах.
+//
+// **Зачем.** Книги делят оценку RAG на четыре метрики (Ragas): faithfulness,
+// answer relevancy, context precision, context recall («Advanced RAG», гл. 9.5,
+// стр. 432–433; «LLM Engineer's Handbook», стр. 891). Наш замер закрывает две
+// из них, но под своими именами — и со стороны это читается как «у них меряют
+// одно, у нас другое». Одна строка снимает вопрос и заодно честно говорит,
+// чего здесь нет и почему.
+func printRagasNames(stdout io.Writer) {
+	fmt.Fprintln(stdout, "\nТо же в общепринятых названиях (Ragas):")
+	fmt.Fprintln(stdout, "  recall@K   = context recall — нашлось ли нужное место среди первых K")
+	fmt.Fprintln(stdout, "  MRR, nDCG ≈ context precision — насколько высоко оно стоит,")
+	fmt.Fprintln(stdout, "               то есть сколько лишнего модель прочтёт перед ним")
+	fmt.Fprintln(stdout, "  faithfulness и answer relevancy здесь не считаются: они про ОТВЕТ")
+	fmt.Fprintln(stdout, "               модели, а этот замер идёт без генерации вовсе")
+	fmt.Fprintln(stdout, "               (набор для них — docs/eval/kb_answers.toml)")
 }
 
 func dashes(n int) string {

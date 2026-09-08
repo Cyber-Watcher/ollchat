@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,9 @@ func (s *source) EachChunkRef(f kb.ChunkFilter, fn func(kb.ChunkRef) error) erro
 	var n int
 	for _, c := range s.chunks {
 		if f.PathContains != "" && !strings.Contains(c.Book.Path, f.PathContains) {
+			continue
+		}
+		if len(f.Docs) > 0 && !slices.Contains(f.Docs, c.Doc) {
 			continue
 		}
 		ref := kb.ChunkRef{Index: c.Index, Doc: c.Doc, Ord: c.Ord,
@@ -59,6 +63,22 @@ func chunksFor(n int, path string) *source {
 			Book: kb.BookRec{ID: 1, Title: "Проба", Path: path},
 			Text: fmt.Sprintf("фрагмент номер %d про KV-кэш (KV cache) и контекстное окно (context window)", i),
 		})
+	}
+	return s
+}
+
+// chunksOfBooks — куски нескольких книг: по n на каждую, номера с единицы.
+func chunksOfBooks(n int, paths ...string) *source {
+	s := &source{}
+	for b, path := range paths {
+		doc := uint32(b + 1)
+		for i := 0; i < n; i++ {
+			s.chunks = append(s.chunks, kb.ChunkInfo{
+				Index: len(s.chunks), Doc: doc, Ord: uint32(i + 1), UnitFrom: i + 1, Unit: "стр.",
+				Book: kb.BookRec{ID: doc, Title: path, Path: path},
+				Text: fmt.Sprintf("фрагмент %d книги %s про KV-кэш (KV cache)", i, path),
+			})
+		}
 	}
 	return s
 }
@@ -332,5 +352,53 @@ func TestBuildSkipsTableOfContents(t *testing.T) {
 		if mark, ok := g.Progress().MarkOf(key); !ok || mark != MarkSkipped {
 			t.Errorf("оглавление %v не помечено пропущенным: %v %v", key, mark, ok)
 		}
+	}
+}
+
+// Отбор по книгам: разбираются только выбранные, остальные не трогаются вовсе.
+//
+// Ради этого этап 101 и заводился: девять нужных книг лежат в каталоге,
+// где остаток на тридцать часов карты, и ждать их очереди незачем.
+func TestBuildTakesOnlyChosenBooks(t *testing.T) {
+	g, _ := graph(t)
+	var asked atomic.Int32
+	m := &model{answer: func(int) (string, error) { asked.Add(1); return goodAnswer, nil }}
+	src := chunksOfBooks(4, "/AI/первая.pdf", "/AI/вторая.pdf", "/AI/третья.pdf")
+
+	res, err := Build(context.Background(), src, g, m, BuildOpts{Workers: 2, Books: []uint32{2}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done != 4 {
+		t.Fatalf("разобрано %d кусков, ожидалось 4 (одна книга из трёх)", res.Done)
+	}
+	if asked.Load() != 4 {
+		t.Fatalf("модель спросили %d раз, ожидалось 4", asked.Load())
+	}
+	// Куски чужих книг не помечены ничем: их просто не было в этом заходе.
+	for _, c := range src.chunks {
+		_, marked := g.Progress().MarkOf(ChunkKey{Doc: c.Doc, Ord: c.Ord})
+		if c.Doc == 2 && !marked {
+			t.Errorf("кусок выбранной книги %v не разобран", c.Ord)
+		}
+		if c.Doc != 2 && marked {
+			t.Errorf("кусок чужой книги %d/%d попал в заход", c.Doc, c.Ord)
+		}
+	}
+}
+
+// Отбор по книге вместе с каталогом: условия складываются, а не заменяют друг друга.
+func TestBuildBooksAndFolderTogether(t *testing.T) {
+	g, _ := graph(t)
+	m := &model{answer: func(int) (string, error) { return goodAnswer, nil }}
+	src := chunksOfBooks(3, "/AI/нужная.pdf", "/DevOps/нужная.pdf")
+
+	res, err := Build(context.Background(), src, g, m,
+		BuildOpts{Workers: 1, Folder: "/AI/", Books: []uint32{1, 2}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done != 3 {
+		t.Fatalf("разобрано %d, ожидалось 3: книга из другого каталога не в счёт", res.Done)
 	}
 }

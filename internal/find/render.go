@@ -49,6 +49,15 @@ func Render(r Result, full bool, src graph.Chunks) string {
 		}, graph.RenderOpts{Collection: r.Collection}))
 	}
 
+	// Цепочка между двумя понятиями вопроса — сразу за связями: на вопрос
+	// «как связаны X и Y» она и есть ответ, а выдержки ниже её поясняют
+	// (этап 101, D1). Печатает тот же RenderPath, что и `/graph path`.
+	if len(r.Chain) > 0 {
+		b.WriteByte('\n')
+		b.WriteString(graph.RenderPath(src, r.Chain[0].From, r.Chain[len(r.Chain)-1].To,
+			r.Chain, true, graph.RenderOpts{Collection: r.Collection}))
+	}
+
 	if len(r.Excerpts) > 0 {
 		fmt.Fprintf(&b, "\nВыдержки из книг: %d\n", len(r.Excerpts))
 		for i, e := range r.Excerpts {

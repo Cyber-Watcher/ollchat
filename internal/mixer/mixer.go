@@ -48,6 +48,10 @@ import (
 // Settings — числа отбора и оформления. Приходят из конфига, но могут быть
 // изменены на сеанс или ключом командной строки.
 type Settings struct {
+	// Chain — класть ли в карту понятий цепочку между понятиями вопроса
+	// (этап 101, D1). Настройка mix.chain; пусто в конфиге — включено.
+	Chain bool
+
 	// Карта понятий.
 	Entities  int                // сколько понятий брать
 	Neighbors int                // сколько связей у каждого
@@ -100,6 +104,7 @@ type Result struct {
 
 	Entities  int  // понятий графа в карте
 	Relations int  // связей в карте
+	Chain     int  // шагов в цепочке между понятиями вопроса, 0 — цепочки не было
 	Chunks    int  // выдержек из книг
 	NoTools   bool // выдержки добавлены потому, что модель не умеет инструментов
 	Tokens    int  // оценка цены в токенах
@@ -197,6 +202,20 @@ func Build(question string, d Deps, s Settings) Result {
 	}
 	b.WriteString(head)
 	b.WriteString(graph.Render(nil, res, graph.RenderOpts{ForModel: true, Collection: s.Collection}))
+
+	// Цепочка между двумя понятиями вопроса — то же, что показывает `/search`
+	// (этап 101, D1). Модель может добыть её сама вызовом graph_path, но это
+	// лишний ход: вопрос «как связаны X и Y» задают часто, а цепочка коротка.
+	//
+	// Подтверждения (книга и страница) намеренно не печатаются: в карте понятий
+	// цитат нет вовсе, и строка со страницей провоцировала бы ссылаться на то,
+	// что модель не читала. За цитатами — kb_search, так и написано в шапке.
+	if chain := find.Chain(g, res.Entities, res.Relations, find.Opts{}); s.Chain && len(chain) > 0 {
+		b.WriteString("\n")
+		b.WriteString(graph.RenderPath(nil, chain[0].From, chain[len(chain)-1].To, chain, true,
+			graph.RenderOpts{ForModel: true, Collection: s.Collection}))
+		out.Chain = len(chain)
+	}
 
 	if want > 0 {
 		if q := books(coll, find.Expand(question, res.Entities, find.Opts{ExpandLimit: 3}), question, want, d, s); !q.Empty() {

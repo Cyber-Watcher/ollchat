@@ -223,7 +223,14 @@ func RenderPath(src Chunks, from, to string, steps []PathStep, ok bool, opt Rend
 	var b strings.Builder
 	fmt.Fprintf(&b, "Путь из %d шагов:\n", len(steps))
 	for i, s := range steps {
-		fmt.Fprintf(&b, "  %d. %s —%s→ %s\n", i+1, s.From, s.Type, s.To)
+		// Обратный шаг печатается стрелкой влево: в графе связь записана
+		// в другую сторону, и рисовать её «как удобно» значит врать
+		// о содержимом графа (этап 101, D1).
+		if s.Back {
+			fmt.Fprintf(&b, "  %d. %s ←%s— %s\n", i+1, s.From, s.Type, s.To)
+		} else {
+			fmt.Fprintf(&b, "  %d. %s —%s→ %s\n", i+1, s.From, s.Type, s.To)
+		}
 		if src == nil {
 			continue
 		}

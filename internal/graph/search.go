@@ -619,6 +619,12 @@ type PathStep struct {
 	Type     string
 	Weight   float32
 	Evidence ChunkKey
+
+	// Back — связь записана в обратную сторону: в графе «To —Type→ From».
+	// Цепочка «как связаны X и Y» направления не различает — идти по связи
+	// можно в любую сторону, — но печатать её надо честно, иначе «канал
+	// —использует→ горутина» прочтётся как утверждение графа (этап 101, D1).
+	Back bool
 }
 
 // Path ищет кратчайшую цепочку связей между двумя понятиями.
@@ -642,21 +648,42 @@ func (g *Graph) Path(from, to string, maxHops int) ([]PathStep, bool) {
 		return nil, true
 	}
 
+	hubLimit := g.rules.ChainHubLimit
 	visited := map[uint32]link{a.ID: {}}
 	queue := []uint32{a.ID}
 
+	// Обход идёт по связям В ОБЕ СТОРОНЫ.
+	//
+	// **Замер 08.09.2026.** Раньше обход шёл только по исходящим, и цепочка
+	// не находилась там, где связь записана в обратную сторону: на наборе
+	// из 60 пар путь находился у 22 из 27, а с двусторонним обходом — у 26.
+	// Вопрос «как связаны X и Y» направления не различает: если в книге
+	// написано «канал используется горутиной», это отвечает на вопрос
+	// о связи горутины и канала.
 	for hop := 0; hop < maxHops && len(queue) > 0; hop++ {
 		var next []uint32
 		for _, cur := range queue {
-			for _, e := range g.edge.Of(cur) {
-				if _, seen := visited[e.Dst]; seen {
+			for _, e := range g.edge.around(cur) {
+				other, back := e.Dst, false
+				if e.Dst == cur {
+					other, back = e.Src, true
+				}
+				if _, seen := visited[other]; seen {
 					continue
 				}
-				visited[e.Dst] = link{prev: cur, edge: e}
-				if e.Dst == b.ID {
+				visited[other] = link{prev: cur, edge: e, back: back}
+				if other == b.ID {
 					return buildPath(g, visited, a.ID, b.ID), true
 				}
-				next = append(next, e.Dst)
+				// Через «хаб» цепочка не идёт: путь «ASCII → Go → string
+				// literals» формально верен и не объясняет ничего, потому что
+				// через Go с его 11 466 связями проходит что угодно (замер
+				// 08.09.2026, этап 101 D1). Конец пути хабом быть может —
+				// его назвал вопрос, — а середина нет.
+				if hubLimit > 0 && len(g.edge.Neighbors(other)) >= hubLimit {
+					continue
+				}
+				next = append(next, other)
 			}
 		}
 		// Порядок обхода устойчив: иначе один и тот же вопрос даёт разные пути.
@@ -670,6 +697,7 @@ func (g *Graph) Path(from, to string, maxHops int) ([]PathStep, bool) {
 type link struct {
 	prev uint32
 	edge Edge
+	back bool // шли против направления связи
 }
 
 func buildPath(g *Graph, visited map[uint32]link, from, to uint32) []PathStep {
@@ -680,7 +708,7 @@ func buildPath(g *Graph, visited map[uint32]link, from, to uint32) []PathStep {
 		dst, _ := g.ents.Get(cur)
 		steps = append(steps, PathStep{
 			From: src.Name, To: dst.Name, Type: RelName(link.edge.Type),
-			Weight: link.edge.Weight, Evidence: link.edge.Evidence,
+			Weight: link.edge.Weight, Evidence: link.edge.Evidence, Back: link.back,
 		})
 		cur = link.prev
 	}

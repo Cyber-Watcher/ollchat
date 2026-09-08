@@ -53,6 +53,12 @@ type Opts struct {
 	// (подмешивание), "serve" (служба), "eval" (замер), "kb" (/kb search).
 	// Только для журнала шагов: поведение одно на всех.
 	Mode string
+	// ChainHops — сколько шагов позволено цепочке между двумя понятиями
+	// вопроса (этап 101, D1). 0 — три шага, отрицательное — не искать вовсе.
+	// Три, а не четыре: цепочка длиннее трёх шагов формально верна, но
+	// прочесть её человеку уже трудно.
+	ChainHops int
+
 	// ExpandLimit — сколько понятий графа дописывать к запросу для книг;
 	// 0 — все найденные (так ищет /search), 3 — так ищут инструмент и подмес.
 	ExpandLimit int
@@ -123,6 +129,19 @@ type Result struct {
 	Entities  []graph.FoundEntity
 	Relations []graph.FoundRelation
 	Excerpts  []Excerpt
+
+	// Chain — цепочка связей между двумя первыми понятиями вопроса, когда
+	// прямой связи между ними в графе нет (этап 101, D1).
+	//
+	// **Зачем.** На вопрос «как связаны X и Y» поиск показывал две отдельные
+	// карточки понятий и предлагал человеку самому додумать, что между ними.
+	// Цепочка отвечает на вопрос буквально: X —использует→ Z —часть→ Y.
+	// Книги называют это path retrieval и ставят его вторым уровнем после
+	// «понятие и его соседи» («Advanced RAG», разд. 7.2.2.1, стр. 349–351):
+	// простой факт — node/triple, многошаговый вопрос — path.
+	//
+	// Пусто, когда понятие одно, прямая связь уже показана или пути нет.
+	Chain []graph.PathStep
 
 	// Evidence — подтверждения графа как их отобрал поиск, до слияния
 	// с выдержками книг: после слияния они обрезаются по TopK вслед за
@@ -222,6 +241,39 @@ func Expand(query string, ents []graph.FoundEntity, o Opts) string {
 	return graph.ExpandQuery(query, ents, o.ExpandLimit)
 }
 
+// Chain ищет цепочку между двумя первыми понятиями вопроса.
+//
+// Экспортирована, потому что её зовёт и подмешивание (`internal/mixer`):
+// карта понятий для модели тоже отвечает на вопросы «как связаны X и Y»,
+// и цепочка там экономит модели вызов graph_path.
+//
+// Считается только когда нужна: понятий найдено хотя бы два и прямой связи
+// между первыми двумя в выдаче нет. Прямая связь уже отвечает на вопрос,
+// а цепочка поверх неё — шум.
+//
+// Длина ограничена: цепочка из шести шагов формально объясняет связь, но
+// прочесть её нельзя. Предел берётся из Opts.ChainHops (0 — три шага).
+func Chain(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation, o Opts) []graph.PathStep {
+	if g == nil || len(ents) < 2 || o.ChainHops < 0 {
+		return nil
+	}
+	a, b := ents[0].Name, ents[1].Name
+	for _, r := range rels {
+		if (r.Src == a && r.Dst == b) || (r.Src == b && r.Dst == a) {
+			return nil // прямая связь уже показана
+		}
+	}
+	hops := o.ChainHops
+	if hops == 0 {
+		hops = 3
+	}
+	steps, ok := g.Path(a, b, hops)
+	if !ok {
+		return nil
+	}
+	return steps
+}
+
 // Empty сообщает, что показывать нечего.
 func (r Result) Empty() bool {
 	return len(r.Entities) == 0 && len(r.Excerpts) == 0
@@ -287,6 +339,8 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 		res.Entities, res.Relations, res.GraphNote = gres.Entities, gres.Relations, gres.Note
 		res.Evidence = gres.Chunks
 		res.Excerpts = fromGraph(d.Coll, gres.Chunks, o)
+
+		res.Chain = Chain(d.Graph, res.Entities, res.Relations, o)
 
 		// Граф собран не по всей библиотеке — об этом надо сказать прямо,
 		// иначе «ничего не нашлось» прочтётся как «в книгах об этом не пишут».

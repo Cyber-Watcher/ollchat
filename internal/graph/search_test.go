@@ -288,3 +288,97 @@ func TestEntrySkipsQuestionFrameWords(t *testing.T) {
 	}
 	_, _, _, _ = and, the, coredns, svyaz
 }
+
+// Цепочка не идёт через «хаб»: путь через понятие с сотнями связей формально
+// верен и ничего не объясняет (этап 101, D1, замер 08.09.2026).
+func TestPathAvoidsHubs(t *testing.T) {
+	dir := collection(t)
+	g, err := Create(dir, "books", 1000, Rules{ChainHubLimit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	add := func(name string) uint32 {
+		id, _, err := g.Entities().Add(name, TypeConcept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	edge := func(a, b uint32, ord uint32) {
+		if err := g.Edges().Add(Edge{Src: a, Dst: b, Type: RelUses, Weight: 1,
+			Evidence: ChunkKey{Doc: 1, Ord: ord}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	from, to := add("ASCII"), add("string literals")
+	hub := add("Go")                         // хаб: наберём ему связей выше предела
+	mid1, mid2 := add("байт"), add("строка") // обходной путь, длиннее на шаг
+
+	// Короткий путь через хаб: ASCII → Go → string literals.
+	edge(from, hub, 1)
+	edge(hub, to, 2)
+	for i := 0; i < 6; i++ { // хабу — связи со стороной, чтобы перевалить предел 5
+		edge(hub, add("шум"+string(rune('a'+i))), uint32(10+i))
+	}
+	// Длинный, но осмысленный: ASCII → байт → строка → string literals.
+	edge(from, mid1, 3)
+	edge(mid1, mid2, 4)
+	edge(mid2, to, 5)
+
+	steps, ok := g.Path("ASCII", "string literals", 4)
+	if !ok {
+		t.Fatal("путь обязан найтись обходной дорогой")
+	}
+	for _, s := range steps {
+		if s.From == "Go" || s.To == "Go" {
+			t.Fatalf("цепочка прошла через хаб: %v", steps)
+		}
+	}
+	if len(steps) != 3 {
+		t.Fatalf("ожидался обходной путь из трёх шагов, получено %v", steps)
+	}
+
+	// Запрет снят — берётся короткий путь через хаб, как было раньше.
+	g.rules = Rules{ChainHubLimit: -1}.norm()
+	steps, ok = g.Path("ASCII", "string literals", 4)
+	if !ok || len(steps) != 2 {
+		t.Fatalf("без запрета ожидался короткий путь из двух шагов, получено %v (%v)", steps, ok)
+	}
+}
+
+// Цепочка идёт по связи в любую сторону, но печатается честно: шаг против
+// направления связи рисуется стрелкой влево (этап 101, D1).
+func TestPathWalksBothDirections(t *testing.T) {
+	g, _ := graph(t)
+	add := func(name string) uint32 {
+		id, _, err := g.Entities().Add(name, TypeConcept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	a, mid, b := add("горутина"), add("канал"), add("рантайм")
+	// Обе связи ведут В середину: из «горутины» пути по исходящим нет вовсе.
+	for _, e := range []Edge{
+		{Src: a, Dst: mid, Type: RelUses, Weight: 1, Evidence: ChunkKey{Doc: 1, Ord: 1}},
+		{Src: b, Dst: mid, Type: RelPart, Weight: 1, Evidence: ChunkKey{Doc: 1, Ord: 2}},
+	} {
+		if err := g.Edges().Add(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	steps, ok := g.Path("горутина", "рантайм", 3)
+	if !ok || len(steps) != 2 {
+		t.Fatalf("ожидалась цепочка из двух шагов, получено %v (%v)", steps, ok)
+	}
+	if steps[0].Back {
+		t.Errorf("первый шаг идёт по направлению связи: %v", steps[0])
+	}
+	if !steps[1].Back {
+		t.Errorf("второй шаг идёт против направления и обязан это показывать: %v", steps[1])
+	}
+}

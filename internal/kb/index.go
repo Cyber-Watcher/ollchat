@@ -406,8 +406,14 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			rec.Year, rec.YearSrc = p.doc.Year, string(p.doc.YearSrc)
 			rec.Format, rec.Units, rec.UnitWord = string(p.doc.Kind), p.doc.Units, p.doc.Unit
 			rec.Chunks = len(p.chunks)
-			if rec.Title == "" {
-				rec.Title = filepath.Base(p.cand.path)
+			// Заголовок из метаданных бывает техническим: издательства
+			// оставляют в поле Title имя вёрсточного файла. Живой пример
+			// 08.09.2026: «Machine Learning in Social Networks» приехала
+			// с заголовком «502879_1_En_Print.indd» (файл InDesign), автор —
+			// «U6fonter». В ссылках выдачи такое имя не узнать ни человеку,
+			// ни модели, а поиск по названию книги по нему не работает.
+			if rec.Title == "" || technicalTitle(rec.Title) {
+				rec.Title = titleFromFile(p.cand.path)
 			}
 			if err := w.Append(rec.ID, p.chunks); err != nil {
 				return res, err
@@ -886,3 +892,42 @@ func throttle(report func(Progress)) func(Progress) {
 
 // ErrCanceled сообщает, что работу прервал пользователь.
 var ErrCanceled = errors.New("индексация прервана")
+
+// technicalTitle — похоже ли на служебное имя из метаданных, а не на название.
+//
+// Признаки, взятые с живых книг: расширение вёрсточной или офисной программы,
+// приставка «Microsoft Word - », имя из одних цифр и подчёркиваний. Остальное
+// считаем настоящим названием: заголовок из метаданных обычно лучше имени
+// файла — в нём есть подзаголовок и правильный регистр.
+func technicalTitle(title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if t == "" {
+		return true
+	}
+	for _, ext := range []string{".indd", ".docx", ".doc", ".qxd", ".fm", ".tex", ".idml"} {
+		if strings.HasSuffix(t, ext) {
+			return true
+		}
+	}
+	if strings.HasPrefix(t, "microsoft word - ") || strings.HasPrefix(t, "untitled") {
+		return true
+	}
+	// «502879_1_En_Print» — цифры, подчёркивания и короткие куски латиницы.
+	digits := 0
+	for _, r := range t {
+		if r >= '0' && r <= '9' {
+			digits++
+		}
+	}
+	return digits*2 >= len([]rune(t))
+}
+
+// titleFromFile — название по имени файла, как есть, вместе с расширением.
+//
+// Расширение не срезается намеренно: книги без метаданных показываются с ним
+// с самого начала («Учебник по Go 2019.pdf»), и срезать его только у книг
+// с техническим заголовком значило бы завести два вида названий в одной
+// выдаче. Поймано тестом `TestYearsFromIndexAndRefresh` 08.09.2026.
+func titleFromFile(path string) string {
+	return filepath.Base(path)
+}

@@ -2,10 +2,13 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -139,5 +142,68 @@ func TestBashNormalCommandStillWorks(t *testing.T) {
 	}
 	if !strings.Contains(out, "Код возврата: 3") || !strings.Contains(out, "к stderr") {
 		t.Errorf("stderr и код возврата должны попадать в вывод: %q", out)
+	}
+}
+
+// Вывод не теряется, даже когда команда оставила после себя живого потомка.
+//
+// Это тот самый случай, ради которого читающий конец вообще закрывается:
+// потомок держит пишущий конец, EOF не приходит, и без закрытия чтение висело
+// бы вечно. Но закрывать надо ПОСЛЕ ожидания, иначе теряется уже прочитанное
+// (гонка 05.09.2026). Здесь проверяется и то и другое сразу: вывод на месте,
+// а управление вернулось быстро, не дожидаясь потомка.
+func TestBashKeepsOutputWhenChildSurvives(t *testing.T) {
+	opts, _ := hangTestOptions(t)
+
+	start := time.Now()
+	out, err := runCommand(context.Background(), "sh -c 'echo раньше потомка; sleep 30 &'",
+		opts, 20*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("команда с выжившим потомком: %v", err)
+	}
+	if !strings.Contains(out, "раньше потомка") {
+		t.Errorf("вывод потерян: %q", out)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("ждали потомка вместо возврата: %s", elapsed.Round(time.Millisecond))
+	}
+}
+
+// Вывод не теряется и на многократном повторе: гонка воспроизводилась на
+// загруженной машине примерно раз на пять запусков, поэтому проверка идёт
+// в цикле и с нагрузкой на все ядра — так она ловит возврат старого порядка.
+func TestBashOutputSurvivesUnderLoad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("нагрузочная проверка: пропускается в коротком прогоне")
+	}
+	opts, _ := hangTestOptions(t)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = fmt.Sprint(time.Now().UnixNano()) // занимаем ядро
+				}
+			}
+		}()
+	}
+	defer func() { close(stop); wg.Wait() }()
+
+	for i := 0; i < 20; i++ {
+		out, err := runCommand(context.Background(), "echo привет", opts, 10*time.Second)
+		if err != nil {
+			t.Fatalf("прогон %d: %v", i, err)
+		}
+		if !strings.Contains(out, "привет") {
+			t.Fatalf("прогон %d: вывод потерян: %q", i, out)
+		}
 	}
 }

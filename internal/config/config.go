@@ -577,6 +577,14 @@ type KB struct {
 // на миллисекунды. Не связался ни с одним понятием — не подмешивается ничего,
 // ни граф, ни выдержки из книг.
 type Mix struct {
+
+	// Chain — добавлять ли в карту понятий цепочку между двумя понятиями
+	// вопроса, когда прямой связи между ними нет (этап 101, D1).
+	//
+	// Указатель, а не bool: нужно отличать «не задано» (умолчание — включено)
+	// от осознанного false. Цепочка стоит десяток токенов и отвечает на вопрос
+	// «как связаны X и Y» прямо, вместо того чтобы модель звала graph_path.
+	Chain *bool `toml:"chain"`
 	// Books — класть выдержки из книг к каждому вопросу (обычный RAG).
 	// По умолчанию выключено: восемь фрагментов это около двух тысяч токенов
 	// на вопрос, а модель с инструментами возьмёт их сама, когда они нужны.
@@ -781,6 +789,11 @@ type Graph struct {
 	// MaxEvidences — сколько кусков-подтверждений показывать у одной связи.
 	// 0 — умолчание (4).
 	MaxEvidences int `toml:"max_evidences"`
+
+	// ChainHubLimit — с какого числа связей понятие считается «хабом», через
+	// который цепочка между двумя понятиями вопроса не идёт (этап 101, D1).
+	// 0 — умолчание (500), отрицательное — не запрещать.
+	ChainHubLimit int `toml:"chain_hub_limit"`
 
 	// Groups — как применять группы понятий в поиске: "union" (объединять
 	// выдачу), "expand" (расширять запрос), "off". Пусто — "off". Ключ
@@ -1555,6 +1568,9 @@ func validateGraphNodes(section string, nodes []GraphNode) error {
 // С этапа 91 (R3) это единственный путь от настроек к поведению графа:
 // пакет graph глобалов не держит, правила передаются в graph.Open и живут
 // в открытом графе. Два графа с разными правилами в одном процессе — норма.
+// ChainOn — класть ли цепочку в карту понятий. Не задано — да.
+func (m Mix) ChainOn() bool { return m.Chain == nil || *m.Chain }
+
 func (g Graph) Rules() graph.Rules {
 	// Режим групп: выключен, если groups_enabled=false, иначе — что задано.
 	mode := g.Groups
@@ -1570,6 +1586,7 @@ func (g Graph) Rules() graph.Rules {
 		SenseMargin:    g.SenseMargin,
 		VectorAliases:  g.VectorAliases,
 		MaxEvidences:   g.MaxEvidences,
+		ChainHubLimit:  g.ChainHubLimit,
 		Groups:         mode,
 		MergesOff:      g.MergesEnabled != nil && !*g.MergesEnabled,
 		Format:         g.Format,
