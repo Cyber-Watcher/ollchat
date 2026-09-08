@@ -2341,3 +2341,61 @@ func markWork(g *graph.Graph, what string) (func(), error) {
 	}
 	return unmark, nil
 }
+
+// EmbedStale — пересчитать векторы понятий, чей текст изменился после счёта.
+//
+// Дешёвая половина лечения устаревших векторов: полный пересчёт нашего графа —
+// полчаса карты на четверть миллиона понятий, а изменившихся за сутки единицы
+// тысяч, то есть секунды. Подробности и замер — в internal/graph/vecstale.go.
+func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules())
+	if err != nil {
+		return err
+	}
+	defer g.Close()
+
+	ids, have := g.StaleEntities()
+	if !have {
+		fmt.Fprintln(stdout, "отпечатков текстов нет: они появляются при счёте векторов этой сборкой.")
+		fmt.Fprintln(stdout, "Один раз пересчитайте всё: ollchat --graph-embed", name, "--graph-embed-recount")
+		fmt.Fprintln(stdout, "— дальше устаревшие будут находиться сами.")
+		return nil
+	}
+	if len(ids) == 0 {
+		fmt.Fprintln(stdout, "устаревших векторов нет: тексты всех понятий совпадают с посчитанными")
+		return nil
+	}
+	fmt.Fprintf(stdout, "устарело векторов: %d\n", len(ids))
+	if dry {
+		fmt.Fprintln(stdout, "сухой прогон: пересчитать —", "ollchat --graph-embed-stale", name)
+		return nil
+	}
+
+	fallback := ""
+	if len(cfg.Servers) > 0 {
+		fallback = cfg.Servers[0].URL
+	}
+	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
+	if emb == nil {
+		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	started := time.Now()
+	fixed, err := g.EmbedStale(ctx, emb, graph.EmbedOpts{}, nil)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "пересчитано векторов: %d за %s\n", fixed, time.Since(started).Round(time.Second))
+	return nil
+}

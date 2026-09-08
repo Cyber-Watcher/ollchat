@@ -128,6 +128,7 @@ type cliFlags struct {
 	graphTuneShow         *int
 	graphTuneBetas        *string
 	graphEmbedFollow      *string
+	graphEmbedStale       *string
 	graphEmbedNode        *string
 	graphEmbedEvery       *string
 	graphEmbedLimit       *int
@@ -396,6 +397,8 @@ func parseFlags() *cliFlags {
 		"с --graph-resolve: выписать все пары в файл TSV")
 	f.graphEmbed = flag.String("graph-embed", "",
 		"посчитать векторы понятий графа — смысловой вход: --graph-embed books")
+	f.graphEmbedStale = flag.String("graph-embed-stale", "",
+		"пересчитать векторы понятий, чей текст изменился после счёта: --graph-embed-stale books (с --kb-dry-run — только сказать сколько)")
 	f.graphEmbedFollow = flag.String("graph-embed-follow", "",
 		"досчитывать векторы новых понятий по мере их появления: --graph-embed-follow books")
 	f.graphEmbedNode = flag.String("graph-embed-node", "",
@@ -576,6 +579,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.graphResolve != "":
 		return true, gmaint.Resolve(os.Stdout, cfg, *f.graphResolve, *f.graphResolveMinCos, *f.graphResolveMinCosMut, *f.graphResolveFull,
 			*f.graphResolveCross, *f.graphResolveShow, *f.graphResolveOut)
+	case *f.graphEmbedStale != "":
+		return true, gmaint.EmbedStale(os.Stdout, cfg, *f.graphEmbedStale, *f.kbDry)
 	case *f.graphEmbed != "":
 		return true, gmaint.Embed(os.Stdout, cfg, *f.graphEmbed, *f.graphEmbedRecount)
 	case *f.graphEmbedFollow != "":

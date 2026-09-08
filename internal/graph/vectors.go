@@ -361,7 +361,21 @@ func (g *Graph) SaveEntityVectors(model, digest string, dim int, data []int8) er
 	if dim <= 0 || len(data) == 0 || len(data)%dim != 0 {
 		return fmt.Errorf("векторы понятий: длина %d не делится на размерность %d", len(data), dim)
 	}
-	return g.vecs.save(model, digest, dim, data)
+	if err := g.vecs.save(model, digest, dim, data); err != nil {
+		return err
+	}
+	// Рядом с векторами — отпечатки текстов, от которых они посчитаны: по ним
+	// потом видно, у каких понятий текст успел измениться (vecstale.go).
+	// Ошибка записи отпечатков не отменяет посчитанного: векторы важнее,
+	// а без отпечатков просто не сработает дешёвый пересчёт.
+	texts, err := g.embedTexts()
+	if err == nil {
+		if len(texts) > len(data)/dim {
+			texts = texts[:len(data)/dim]
+		}
+		_ = saveStamps(g.dir, texts)
+	}
+	return nil
 }
 
 // ── Поиск двойников среди понятий ────────────────────────────────────────────
