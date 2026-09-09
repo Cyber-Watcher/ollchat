@@ -32,9 +32,15 @@ type FlagTOCResult struct {
 	WorstDoc   uint32 // книга, где помеченных больше всего
 	WorstN     int
 	WorstTotal int
+
+	// FlaggedRefs — сколько кусков помечено списком литературы или
+	// выходными данными (входит в общий счёт Flagged не отдельно).
+	FlaggedRefs int
 }
 
-// FlagTOC ставит признак оглавления кускам по LooksLikeTOC и снимает его там,
+// FlagTOC ставит признаки СЛУЖЕБНОГО текста: оглавление (LooksLikeTOC) и
+// список литературы или выходные данные (LooksLikeRefs, LooksLikeColophon,
+// этап 101). Снимает их там,
 // где эвристика больше не срабатывает (она может уточняться). dry — только
 // посчитать, файл не трогать. Повторный проход ничего не меняет.
 func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, total int)) (FlagTOCResult, error) {
@@ -70,15 +76,22 @@ func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, 
 		}
 		for i := from; i < to; i++ {
 			f := recs[i].Flags
-			if f&uint16(FlagTOC) != 0 {
+			if f&uint16(FlagTOC|FlagRefs) != 0 {
 				res.Was++
 			}
-			f &^= uint16(FlagTOC)
+			// Признаки снимаются оба и ставятся заново: проход идёт и после
+			// правки эвристики, и тогда кусок, переставший быть служебным,
+			// обязан вернуться в выдачу.
+			f &^= uint16(FlagTOC | FlagRefs)
 			pd := perDoc[recs[i].Doc]
 			pd[0]++
 			if LooksLikeTOC(texts[i]) {
 				f |= uint16(FlagTOC)
 				res.Flagged++
+				pd[1]++
+			} else if LooksLikeRefs(texts[i]) || LooksLikeColophon(texts[i]) {
+				f |= uint16(FlagRefs)
+				res.FlaggedRefs++
 				pd[1]++
 			}
 			perDoc[recs[i].Doc] = pd

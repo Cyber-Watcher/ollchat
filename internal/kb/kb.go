@@ -548,6 +548,17 @@ func (c *Collection) Name() string { return c.name }
 // Dir — каталог коллекции.
 func (c *Collection) Dir() string { return c.dir }
 
+// VecMeta — паспорт посчитанных векторов: модель, размерность, покрытие и то,
+// считались ли они с шапкой «книга · страница». Пустой, если векторов нет.
+func (c *Collection) VecMeta() VecMeta {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.vectors == nil {
+		return VecMeta{}
+	}
+	return c.vectors.Meta()
+}
+
 // Meta возвращает сведения о коллекции.
 func (c *Collection) Meta() Meta {
 	c.mu.RLock()

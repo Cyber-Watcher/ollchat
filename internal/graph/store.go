@@ -471,6 +471,18 @@ type Neighbor struct {
 	In bool
 }
 
+// toRaw — входящие связи без наложения склеек. Зеркало ofRaw: нужен разбору
+// одиночек, чтобы отличить «модель не назвала ни одной связи» от «связи были,
+// но склейка свела оба конца в одно понятие» (этап 101).
+func (e *Edges) toRaw(dst uint32) []Edge {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if len(e.byDst[dst]) == 0 {
+		return nil
+	}
+	return append([]Edge(nil), e.byDst[dst]...)
+}
+
 // incoming — связи, ведущие К сущности. Зеркало outgoing, включая склейки:
 // поглощённые узлы отдают свои входящие связи выжившему.
 func (e *Edges) incoming(dst uint32) []Edge {

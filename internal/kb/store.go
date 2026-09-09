@@ -392,10 +392,19 @@ func countTokens(text string) int {
 	return len(Tokens(text, nil))
 }
 
-// tocFlag — FlagTOC, если кусок похож на оглавление, иначе ноль.
+// tocFlag — признаки служебного текста: оглавление, список литературы,
+// выходные данные. Ноль, если кусок обычный.
+//
+// Служебный кусок не выбрасывается, а помечается: по прямой ссылке его
+// по-прежнему можно прочитать, и книга остаётся в коллекции целиком.
+// Не участвует он только там, где вредит, — в поиске и в сборке графа.
 func tocFlag(text string) ChunkFlags {
+	var f ChunkFlags
 	if LooksLikeTOC(text) {
-		return FlagTOC
+		f |= FlagTOC
 	}
-	return 0
+	if LooksLikeRefs(text) || LooksLikeColophon(text) {
+		f |= FlagRefs
+	}
+	return f
 }

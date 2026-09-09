@@ -31,6 +31,7 @@ type ChunkInfo struct {
 	Text string  // текст куска
 	Code bool    // кусок похож на листинг
 	TOC  bool    // оглавление или указатель (FlagTOC)
+	Refs bool    // список литературы или выходные данные (FlagRefs)
 }
 
 // ChunkFilter — какие куски нужны.
@@ -156,6 +157,7 @@ type ChunkRef struct {
 	Unit     string
 	Book     BookRec
 	TOC      bool // оглавление или указатель (FlagTOC): сборка графа такой кусок пропускает
+	Refs     bool // список литературы или выходные данные (FlagRefs): пропускается так же
 }
 
 // EachChunkRef обходит куски, не читая их тексты.
@@ -178,7 +180,8 @@ func (c *Collection) EachChunkRef(f ChunkFilter, fn func(ChunkRef) error) error 
 		ref := ChunkRef{
 			Index: i, Doc: rec.Doc, Ord: rec.Ord,
 			UnitFrom: int(rec.UnitFrom), UnitTo: int(rec.UnitTo), Unit: "стр.",
-			TOC: ChunkFlags(rec.Flags)&FlagTOC != 0,
+			TOC:  ChunkFlags(rec.Flags)&FlagTOC != 0,
+			Refs: ChunkFlags(rec.Flags)&FlagRefs != 0,
 		}
 		if b, found := c.book(rec.Doc); found {
 			ref.Book = b
@@ -248,7 +251,8 @@ func (c *Collection) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 		Index: i, Doc: rec.Doc, Ord: rec.Ord,
 		UnitFrom: int(rec.UnitFrom), UnitTo: int(rec.UnitTo), Unit: "стр.",
 		Text: texts[i], Code: ChunkFlags(rec.Flags)&FlagCode != 0,
-		TOC: ChunkFlags(rec.Flags)&FlagTOC != 0,
+		TOC:  ChunkFlags(rec.Flags)&FlagTOC != 0,
+		Refs: ChunkFlags(rec.Flags)&FlagRefs != 0,
 	}
 	if b, found := c.book(rec.Doc); found {
 		info.Book = b
@@ -324,6 +328,7 @@ func (c *Collection) EachChunk(f ChunkFilter, fn func(ChunkInfo) error) error {
 				Text:     texts[i],
 				Code:     ChunkFlags(rec.Flags)&FlagCode != 0,
 				TOC:      ChunkFlags(rec.Flags)&FlagTOC != 0,
+				Refs:     ChunkFlags(rec.Flags)&FlagRefs != 0,
 			}
 			if b, found := c.book(rec.Doc); found {
 				info.Book = b

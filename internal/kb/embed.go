@@ -35,6 +35,15 @@ type EmbedOpts struct {
 	Batch   int  // сколько кусков в одном запросе; 0 — 64
 	Workers int  // сколько пачек слать одновременно; 0 — 2
 	Recount bool // пересчитать всё заново, а не только хвост
+
+	// Header — дописывать ли к куску шапку «название книги · с. N» перед счётом
+	// вектора. Приходит из настройки `kb.embed_header`, умолчание — false.
+	//
+	// Замер 09.09.2026 (этап 101, Г8): с шапкой recall@10 векторов 0.339,
+	// без неё 0.346 — пользы шапка не даёт, а вектор куска без неё устроен так же,
+	// как вектор вопроса. «Machine Learning Production Systems» (2024, стр. 43–44)
+	// называет такое расхождение training–serving skew.
+	Header bool
 }
 
 // norm подставляет значения по умолчанию.
@@ -217,7 +226,7 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 		from = 0
 	}
 
-	w, err := CreateVecWriter(c.dir, emb.Model(), dim, from)
+	w, err := CreateVecWriterWith(c.dir, emb.Model(), dim, from, opt.Header)
 	if err != nil {
 		return res, err
 	}
@@ -310,7 +319,7 @@ func (c *Collection) embedWave(ctx context.Context, emb Embedder, from, to int, 
 	parts := make([]part, len(bounds))
 	var wg sync.WaitGroup
 	for k, b := range bounds {
-		texts, err := c.embedTexts(b[0], b[1])
+		texts, err := c.embedTextsWith(b[0], b[1], !opt.Header)
 		if err != nil {
 			return nil, err
 		}
@@ -343,6 +352,11 @@ func (c *Collection) embedWave(ctx context.Context, emb Embedder, from, to int, 
 // из середины главы часто не содержит самого предмета, и без шапки его смысл
 // беднее, чем на самом деле.
 func (c *Collection) embedTexts(from, to int) ([]string, error) {
+	return c.embedTextsWith(from, to, false)
+}
+
+// embedTextsWith — то же, с выбором: с шапкой или голый текст (замер Г8).
+func (c *Collection) embedTextsWith(from, to int, plain bool) ([]string, error) {
 	ids := make([]int, 0, to-from)
 	for i := from; i < to; i++ {
 		ids = append(ids, i)
@@ -355,7 +369,7 @@ func (c *Collection) embedTexts(from, to int) ([]string, error) {
 	for _, id := range ids {
 		rec := c.store.Rec(id)
 		var b strings.Builder
-		if book, ok := c.bookByID(rec.Doc); ok {
+		if book, ok := c.bookByID(rec.Doc); ok && !plain {
 			b.WriteString(bookTitle(book))
 			if rec.UnitFrom > 0 {
 				fmt.Fprintf(&b, " · с. %d", rec.UnitFrom)

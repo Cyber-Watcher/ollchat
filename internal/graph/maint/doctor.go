@@ -170,6 +170,30 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	}
 
 	comms, cerr := g.LoadCommunities()
+
+	// Строение графа: связность целиком, одиночки, опора связей (этап 101, Г5).
+	// Меры взяты у «Knowledge Graphs and LLMs in Action» (2025, стр. 124).
+	// Связность тем считается тем же обходом — матрица смежности строится один раз.
+	stage.say("меряю строение графа")
+	shape, conn := g.Shape(comms)
+	stage.done()
+	fmt.Fprintf(stdout, "  строение: понятий со связями %d, без связей %d (%d%%)\n",
+		shape.Nodes, shape.Isolated, shape.IsolatedShare())
+	if shape.Isolated > 0 {
+		fmt.Fprintln(stdout, "    понятие без связей не попадёт в тему никогда: разбиение считается по связям")
+		fmt.Fprintln(stdout, "    разбор причин: go run ./privatescripts/graphstats -orphans 25")
+	}
+	if shape.Nodes > 0 {
+		fmt.Fprintf(stdout, "    наибольшая связная часть %d понятий (%d%%), всего частей %d\n",
+			shape.Largest, shape.LargestShare(), shape.Parts)
+		fmt.Fprintf(stdout, "    связей различных %d, из них на одном подтверждении %d (%d%%)\n",
+			shape.Pairs, shape.PairsOnce, shape.OnceShare())
+		if shape.HubLimit > 0 {
+			fmt.Fprintf(stdout, "    хабов (от %d связей): %d (%.3f%% верхушки) — через них не идут цепочки\n",
+				shape.HubLimit, shape.Hubs, shape.HubShare())
+		}
+	}
+
 	switch {
 	case cerr != nil || comms == nil || len(comms.List) == 0:
 		needCommunities = true
@@ -214,9 +238,7 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		}
 		// Связность тем: Louvain не гарантирует, что тема — одно целое, и
 		// описание темы из двух несвязных половин описывает две разные вещи.
-		stage.say("проверяю связность тем")
-		conn := g.CommunityConnectivity(comms)
-		stage.done()
+		// Посчитана выше, вместе со строением графа.
 		if conn.Disconnected > 0 {
 			fmt.Fprintf(stdout, "    несвязных тем: %d из %d (%d%%), частей в них %d, самая рваная — на %d\n",
 				conn.Disconnected, conn.Communities, conn.Share(), conn.Parts, conn.Largest)

@@ -34,6 +34,12 @@ type VecMeta struct {
 	Model string `json:"model"` // какой моделью считали
 	Dim   int    `json:"dim"`
 	Count int    `json:"count"` // сколько кусков покрыто, начиная с нулевого
+
+	// Header — считались ли векторы с шапкой «книга · страница» (kb.embed_header).
+	// Хранится, чтобы расхождение с настройкой было видно, а не проявлялось
+	// молча при первой доливке: часть коллекции посчитана так, часть иначе,
+	// и близости между ними чуть-чуть разного смысла.
+	Header bool `json:"header,omitempty"`
 }
 
 // Compatible сообщает, годятся ли векторы для работы с этой моделью.
@@ -163,6 +169,12 @@ type VecWriter struct {
 // from — с какого куска продолжать. Обычно это Count() из прежних сведений;
 // ноль означает пересчёт с нуля, и тогда прежний файл усекается.
 func CreateVecWriter(dir, model string, dim, from int) (*VecWriter, error) {
+	return CreateVecWriterWith(dir, model, dim, from, false)
+}
+
+// CreateVecWriterWith — то же с записью в паспорт, считались ли векторы
+// с шапкой «книга · страница» (kb.embed_header).
+func CreateVecWriterWith(dir, model string, dim, from int, header bool) (*VecWriter, error) {
 	if dim <= 0 {
 		return nil, errors.New("размерность вектора не может быть нулевой")
 	}
@@ -186,7 +198,7 @@ func CreateVecWriter(dir, model string, dim, from int) (*VecWriter, error) {
 	}
 	return &VecWriter{
 		dir:  dir,
-		meta: VecMeta{Magic: vecMagic, Model: model, Dim: dim, Count: from},
+		meta: VecMeta{Magic: vecMagic, Model: model, Dim: dim, Count: from, Header: header},
 		f:    f,
 	}, nil
 }
@@ -302,7 +314,7 @@ func copyVectors(src *Vectors, dstDir string, keep []int) (VecMeta, error) {
 	if src == nil || len(keep) == 0 {
 		return VecMeta{}, nil
 	}
-	w, err := CreateVecWriter(dstDir, src.meta.Model, src.meta.Dim, 0)
+	w, err := CreateVecWriterWith(dstDir, src.meta.Model, src.meta.Dim, 0, src.meta.Header)
 	if err != nil {
 		return VecMeta{}, err
 	}

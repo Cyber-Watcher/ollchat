@@ -253,6 +253,13 @@ func Refresh(stdout io.Writer, cfg *config.Config, name string, dry bool) error 
 const EstimateTimeout = 60 * time.Second
 
 func Embed(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
+	return EmbedWith(stdout, cfg, name, dry, false)
+}
+
+// EmbedWith — то же с возможностью перебить настройку `kb.embed_header`:
+// plain = true считает векторы БЕЗ шапки, чем бы ни была настройка. Нужен замеру
+// skew (этап 101, Г8), в работе шапкой распоряжается настройка.
+func EmbedWith(stdout io.Writer, cfg *config.Config, name string, dry, plain bool) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -277,7 +284,30 @@ func Embed(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	opt := kb.EmbedOpts{Batch: cfg.KB.EmbedBatch, Workers: cfg.KB.EmbedWorkers}
+	header := cfg.KB.EmbedHeader && !plain
+	opt := kb.EmbedOpts{Batch: cfg.KB.EmbedBatch, Workers: cfg.KB.EmbedWorkers, Header: header}
+
+	// Доливка чужой мерой — тихая порча: часть коллекции посчитана с шапкой,
+	// часть без, и близости между ними чуть-чуть разного смысла. Поэтому
+	// расхождение с паспортом видно до счёта, а не после (этап 101, Г8).
+	if m := coll.VecMeta(); m.Count > 0 && m.Header != header && !opt.Recount {
+		was, now := "без шапки «книга · страница»", "с шапкой «книга · страница»"
+		if m.Header {
+			was, now = now, was
+		}
+		return fmt.Errorf("векторы коллекции %s посчитаны %s, а настройка kb.embed_header требует считать %s.\n"+
+			"Доливка смешала бы две меры в одной коллекции. Выберите одно:\n"+
+			"  вернуть прежнюю настройку kb.embed_header в %s\n"+
+			"  или пересчитать всё заново: ollchat --kb-embed %s --kb-recount",
+			name, was, now, cfg.Path, name)
+	}
+	if plain && cfg.KB.EmbedHeader {
+		// Ключ замера перебивает настройку, и тогда пересчитывается ВСЁ: иначе
+		// половина коллекции осталась бы с шапкой, половина без, и сравнивать
+		// было бы нечего.
+		opt.Recount = true
+		fmt.Fprintln(stdout, "замер: векторы считаются без шапки «книга · страница», всё заново")
+	}
 
 	// Модель могла остаться в оперативной памяти после того, как карту занимала
 	// чужая модель. Молча считать втрое дольше — плохая услуга.
@@ -751,8 +781,9 @@ func FlagTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) error 
 	if dry {
 		what = "было бы помечено"
 	}
-	fmt.Fprintf(stdout, "коллекция %s: кусков %d, оглавлений %s %d (%.1f%%), было с признаком %d, изменилось %d, за %s\n",
+	fmt.Fprintf(stdout, "коллекция %s: кусков %d, оглавлений %s %d (%.1f%%), списков литературы и выходных данных %d (%.2f%%), было со служебным признаком %d, изменилось %d, за %s\n",
 		name, res.Total, what, res.Flagged, 100*float64(res.Flagged)/float64(max(res.Total, 1)),
+		res.FlaggedRefs, 100*float64(res.FlaggedRefs)/float64(max(res.Total, 1)),
 		res.Was, res.Changed, time.Since(started).Round(time.Second))
 	if res.WorstN > 0 {
 		title := fmt.Sprintf("книга %d", res.WorstDoc)

@@ -154,8 +154,8 @@ func (c *Collection) searchVectors(query []int8, limit int, allow map[uint32]boo
 				if allow != nil && !allow[rec.Doc] {
 					continue
 				}
-				if rec.Flags&uint16(FlagTOC) != 0 {
-					continue // оглавление — не ответ (этап 99)
+				if rec.Flags&uint16(FlagTOC|FlagRefs) != 0 {
+					continue // оглавление или список литературы — не ответ
 				}
 				cos := Cosine(c.vectors.At(i), query)
 				if cos < minCos {

@@ -79,6 +79,10 @@ type Community struct {
 type Communities struct {
 	Built time.Time `json:"built"`
 
+	// Split — сколько тем нижнего уровня оказалось несвязными и было разрезано
+	// на части (этап 101, Г1). Ноль — Louvain на этот раз собрал всё связно.
+	Split int `json:"split,omitempty"`
+
 	// Carry — что дал перенос описаний с прежнего разбиения. Пусто, если
 	// переносить было не с чего или пересчёт делался начисто.
 	Carry CarryResult `json:"carry,omitempty"`
@@ -162,6 +166,11 @@ type CommunityOpts struct {
 	// тем, а не их смысловую однородность (замер 06.09.2026, GraphHealth.md).
 	Beta float64
 
+	// KeepDisconnected — не разрезать несвязные темы на части (этап 101, Г1).
+	// Нужен замерам «до и после»: в работе разрез включён всегда, потому что
+	// тема из двух несвязных половин — это две разные вещи под одним именем.
+	KeepDisconnected bool
+
 	// Resolution — множитель штрафа за размер сообщества (γ). 0 — единица,
 	// обычная модулярность. Больше единицы — сообщества мельче сразу.
 	Resolution float64
@@ -233,6 +242,11 @@ func (g *Graph) partition(opt CommunityOpts, save bool) (*Communities, error) {
 		Blend:    blend,
 	}
 	res.List = g.assemble(adj, order, small, big)
+	// Разрез идёт до переноса описаний: carry сверяет составы, и разрезанные
+	// части должны прийти к нему такими, какими лягут на диск.
+	if !opt.KeepDisconnected {
+		res.List, res.Split = splitDisconnected(adj, res.List)
+	}
 	if !save {
 		return res, nil
 	}

@@ -779,3 +779,50 @@ func TestAnswerStyleOverride(t *testing.T) {
 		}
 	}
 }
+
+// Шапка «книга · страница» управляется настройкой (этап 101, Г8): с ней текст
+// куска длиннее ровно на шапку, без неё в эмбеддер уходит голый кусок.
+func TestEmbedTextsPlainDropsHeader(t *testing.T) {
+	_, c, _ := embedFixture(t)
+
+	withHead, err := c.embedTextsWith(0, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := c.embedTextsWith(0, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withHead) != 1 || len(plain) != 1 {
+		t.Fatalf("ожидался один текст, получено %d и %d", len(withHead), len(plain))
+	}
+	if withHead[0] == plain[0] {
+		t.Fatal("шапка не добавляется вовсе: тексты совпали")
+	}
+	if !strings.HasSuffix(withHead[0], plain[0]) {
+		t.Errorf("голый текст не является хвостом текста с шапкой:\n%q\n%q", withHead[0], plain[0])
+	}
+}
+
+// Паспорт векторов помнит, считались ли они с шапкой. Без этого смена
+// настройки испортила бы коллекцию молча: половина векторов одной меры,
+// половина другой.
+func TestVecMetaRemembersHeader(t *testing.T) {
+	_, c, _ := embedFixture(t)
+	emb := newFakeEmbedder(256)
+
+	if _, err := c.Embed(context.Background(), emb, EmbedOpts{Batch: 8, Header: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m := c.VecMeta(); !m.Header {
+		t.Fatalf("паспорт не запомнил шапку: %+v", m)
+	}
+
+	// Пересчёт без шапки переписывает и паспорт.
+	if _, err := c.Embed(context.Background(), emb, EmbedOpts{Batch: 8, Recount: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m := c.VecMeta(); m.Header {
+		t.Fatalf("паспорт остался с шапкой после пересчёта без неё: %+v", m)
+	}
+}

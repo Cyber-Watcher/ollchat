@@ -71,6 +71,7 @@ type cliFlags struct {
 	kbQuick               *bool
 	kbYears               *string
 	kbFlagTOC             *string
+	kbEmbedPlain          *bool
 	graphForgetTOC        *string
 	kbReindex             *string
 	kbRecnt               *bool
@@ -235,11 +236,13 @@ func parseFlags() *cliFlags {
 	f.kbQuick = flag.Bool("kb-quick", false, "с --kb-doctor: без сверки книг по содержимому — быстрее, но повторы не найдутся")
 	f.kbYears = flag.String("kb-years", "", "проставить книгам коллекции год издания")
 	f.graphForgetTOC = flag.String("graph-forget-toc", "",
-		"убрать из графа упоминания и связи, извлечённые из оглавлений (после --kb-flag-toc): --graph-forget-toc books; с --kb-dry-run — только посчитать")
+		"убрать из графа упоминания и связи, извлечённые из служебных кусков — оглавлений, списков литературы, выходных данных (после --kb-flag-toc): --graph-forget-toc books; с --kb-dry-run — только посчитать")
 	f.kbFlagTOC = flag.String("kb-flag-toc", "",
-		"пометить оглавления в индексе коллекции без перенарезки: --kb-flag-toc books (с --kb-dry-run — только посчитать)")
+		"пометить служебные куски в индексе без перенарезки — оглавления, списки литературы, выходные данные: --kb-flag-toc books (с --kb-dry-run — только посчитать)")
 	f.kbReindex = flag.String("kb-reindex", "", "перечитать книги коллекции заново: --kb-reindex books <путь>…")
 	f.kbRecnt = flag.Bool("kb-recount", false, "с --kb-years: перечитать год и там, где он уже стоит")
+	f.kbEmbedPlain = flag.Bool("kb-embed-plain", false,
+		"с --kb-embed: считать векторы БЕЗ шапки «книга · страница» — только для замера skew (этап 101, Г8)")
 
 	f.graphBuild = flag.String("graph-build", "", "собрать граф понятий по коллекции: --graph-build books")
 	f.graphFolder = flag.String("graph-folder", "", "с --graph-build и --graph-status: только книги, чей путь содержит эту строку")
@@ -495,7 +498,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.kbRetitle != "":
 		return true, kmaint.Retitle(os.Stdout, cfg, *f.kbRetitle, *f.kbDry)
 	case *f.kbEmbed != "":
-		return true, kmaint.Embed(os.Stdout, cfg, *f.kbEmbed, *f.kbDry)
+		return true, kmaint.EmbedWith(os.Stdout, cfg, *f.kbEmbed, *f.kbDry, *f.kbEmbedPlain)
 	case *f.graphBuild != "":
 		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, *f.graphFolder, *f.graphBookName,
 			*f.graphLimit, *f.graphWorkers,
