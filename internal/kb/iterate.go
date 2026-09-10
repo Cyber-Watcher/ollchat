@@ -207,6 +207,7 @@ func (c *Collection) EachChunkRef(f ChunkFilter, fn func(ChunkRef) error) error 
 // коллекции стоил бы 268 тысяч сравнений на каждую, поэтому строится
 // отображение — один раз при первом обращении. Память: по шестнадцать байт
 // на кусок, на всю библиотеку это единицы мегабайт.
+//
 // ChunkVectorByRef — вектор куска по устойчивой ссылке «книга, номер».
 //
 // nil, false — куска нет или вектор ему ещё не посчитан: покрытие векторов —
@@ -231,6 +232,8 @@ func (c *Collection) ChunkVectorByRef(doc, ord uint32) ([]int8, bool) {
 	return v, true
 }
 
+// ChunkByRef — кусок по устойчивой ссылке «книга, номер» (см. выше про
+// отображение ссылок).
 func (c *Collection) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

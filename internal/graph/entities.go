@@ -252,6 +252,26 @@ func strongerClaim(aOwn bool, aCount int, aID uint32, bOwn bool, bCount int, bID
 	return aID < bID
 }
 
+// isOtherName — является ли написание norm собственным именем другого понятия
+// (не self). Такой «синоним» — не перевод и не иное написание, а кандидат
+// в двойники, и там, где список синонимов идёт человеку или модели, он
+// отбрасывается. Берёт замок на чтение; изнутри метода, который уже держит
+// его, звать otherNameLocked — повторный RLock под ждущим писателем встаёт.
+func (e *Entities) isOtherName(norm string, self uint32) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.otherNameLocked(norm, self)
+}
+
+// otherNameLocked — то же под уже взятым замком.
+func (e *Entities) otherNameLocked(norm string, self uint32) bool {
+	id, ok := e.byKey[norm]
+	if !ok || id == self {
+		return false
+	}
+	return e.rawAt(id).Norm == norm
+}
+
 // rawAt отдаёт запись по номеру без блокировки и без склеек: зовётся из put,
 // который уже идёт под замком, а во время чтения реестра замок не нужен вовсе.
 func (e *Entities) rawAt(id uint32) Entity {
@@ -600,12 +620,8 @@ func (e *Entities) aliases(ent Entity, dropClashes bool) []string {
 		if k == "" || !usableAlias(ent.Norm, k) {
 			continue
 		}
-		if dropClashes {
-			if id, ok := e.byKey[k]; ok && id != ent.ID {
-				if other := e.rawAt(id); other.Norm == k {
-					continue
-				}
-			}
+		if dropClashes && e.otherNameLocked(k, ent.ID) {
+			continue
 		}
 		if s1, s2 := script(ent.Norm), script(k); s1 != s2 && s2 != 0 {
 			translations = append(translations, a)

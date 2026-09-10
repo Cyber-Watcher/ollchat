@@ -20,7 +20,7 @@ func TestDropAndRestoreBook(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !g.Dropped().Dropped(10) || g.Dropped().Count() != 1 {
-		t.Fatalf("книга 10 не отброшена: %v", g.Dropped().Books())
+		t.Fatalf("книга 10 не отброшена: отброшено %d", g.Dropped().Count())
 	}
 
 	// Переоткрытие графа: решение переживает закрытие — оно в журнале.
@@ -39,7 +39,7 @@ func TestDropAndRestoreBook(t *testing.T) {
 		t.Fatal(err)
 	}
 	if g2.Dropped().Dropped(10) || g2.Dropped().Count() != 0 {
-		t.Fatalf("возврат книги не сработал: %v", g2.Dropped().Books())
+		t.Fatalf("возврат книги не сработал: отброшено %d", g2.Dropped().Count())
 	}
 }
 

@@ -46,13 +46,13 @@ func TestBraceInsideStringKeepsParse(t *testing.T) {
 // Связь, у которой конец не назван среди сущностей, проверить нечем —
 // она отбрасывается.
 func TestDanglingEdgeDropped(t *testing.T) {
-	f := Clean(Facts{
+	f := clean(Facts{
 		Entities: []FactEntity{{Name: "Go", Type: "технология"}},
 		Relations: []FactRelation{
 			{Src: "Go", Dst: "Rust", Type: "противопоставлено"},
 			{Src: "Go", Dst: "Go", Type: "является"},
 		},
-	})
+	}, "")
 	if len(f.Relations) != 0 {
 		t.Errorf("связи оставлены: %+v", f.Relations)
 	}
@@ -71,14 +71,14 @@ func TestNameRejection(t *testing.T) {
 		"имя\nс переводом строки",
 	}
 	for _, name := range badCases {
-		f := Clean(Facts{Entities: []FactEntity{{Name: name, Type: "понятие"}}})
+		f := clean(Facts{Entities: []FactEntity{{Name: name, Type: "понятие"}}}, "")
 		if len(f.Entities) != 0 {
 			t.Errorf("имя %q принято", name)
 		}
 	}
 	goodCases := []string{"Go", "KV-кэш", "RFC 8446", "Kubernetes", "вытеснение контекста"}
 	for _, name := range goodCases {
-		f := Clean(Facts{Entities: []FactEntity{{Name: name, Type: "понятие"}}})
+		f := clean(Facts{Entities: []FactEntity{{Name: name, Type: "понятие"}}}, "")
 		if len(f.Entities) != 1 {
 			t.Errorf("имя %q отброшено", name)
 		}
@@ -87,11 +87,11 @@ func TestNameRejection(t *testing.T) {
 
 // Повторы сущностей схлопываются.
 func TestDuplicateEntitiesCollapse(t *testing.T) {
-	f := Clean(Facts{Entities: []FactEntity{
+	f := clean(Facts{Entities: []FactEntity{
 		{Name: "KV-кэш", Type: "понятие"},
 		{Name: "kv кэш", Type: "понятие"},
 		{Name: "KV-КЭШ", Type: "технология"},
-	}})
+	}}, "")
 	if len(f.Entities) != 1 {
 		t.Errorf("сущностей = %d, ожидалась одна: %+v", len(f.Entities), f.Entities)
 	}
@@ -99,10 +99,10 @@ func TestDuplicateEntitiesCollapse(t *testing.T) {
 
 // Неизвестный тип связи становится связано.
 func TestUnknownRelationBecomesRelated(t *testing.T) {
-	f := Clean(Facts{
+	f := clean(Facts{
 		Entities:  []FactEntity{{Name: "Go", Type: "технология"}, {Name: "GC", Type: "понятие"}},
 		Relations: []FactRelation{{Src: "Go", Dst: "GC", Type: "содержит в себе"}},
-	})
+	}, "")
 	if len(f.Relations) != 1 || RelType(f.Relations[0].Type) != RelRelated {
 		t.Errorf("связь разобрана неверно: %+v", f.Relations)
 	}
@@ -115,7 +115,7 @@ func TestPerChunkLimits(t *testing.T) {
 		many.Entities = append(many.Entities, FactEntity{
 			Name: "понятие" + string(rune('а'+i%30)) + string(rune('0'+i%10)), Type: "понятие"})
 	}
-	f := Clean(many)
+	f := clean(many, "")
 	if len(f.Entities) > maxEntitiesPerChunk {
 		t.Errorf("сущностей = %d, предел %d", len(f.Entities), maxEntitiesPerChunk)
 	}

@@ -2,8 +2,11 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // fakeEmbedder отдаёт вектор, по которому видно, какому тексту он принадлежит.
@@ -178,5 +181,43 @@ func TestEmbedTopUpRefusesForeignWeights(t *testing.T) {
 	}
 	if got := g.VectorsInfo(); got.Digest != "BBB" || got.Count != 5 {
 		t.Errorf("после пересчёта паспорт %+v", got)
+	}
+}
+
+// flakyEmbedder отказывает обрывом связи заданное число раз, потом отвечает.
+type flakyEmbedder struct {
+	fakeEmbedder
+	failsLeft int
+}
+
+func (f *flakyEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if f.failsLeft > 0 {
+		f.failsLeft--
+		return nil, fmt.Errorf("запрос к серверу: %w", syscall.ECONNREFUSED)
+	}
+	return f.fakeEmbedder.Embed(ctx, texts)
+}
+
+// Обрыв связи пережидается, а не роняет счёт: 10.09.2026 полный пересчёт
+// books упал на семисекундном обрыве туннеля через 20 минут карты.
+func TestEmbedEntitiesWaitsOutConnectionLoss(t *testing.T) {
+	g := newGraphWith(t, "горутина", "канал")
+	defer g.Close()
+	prev := embedRetryEvery
+	embedRetryEvery = time.Millisecond
+	defer func() { embedRetryEvery = prev }()
+
+	emb := &flakyEmbedder{fakeEmbedder: fakeEmbedder{model: "проба"}, failsLeft: 2}
+	if err := g.EmbedEntities(context.Background(), emb, EmbedOpts{Workers: 1, NodeWait: time.Second}, nil); err != nil {
+		t.Fatalf("обрыв на две попытки должен пережидаться: %v", err)
+	}
+	if !g.vecs.Ready() {
+		t.Fatal("векторы не записаны")
+	}
+	// Отказ по существу не пережидается.
+	bad := &fakeEmbedder{model: "проба"}
+	_ = bad
+	if transientEmbedErr(fmt.Errorf("модель не найдена")) {
+		t.Fatal("отказ сервера принят за обрыв связи")
 	}
 }

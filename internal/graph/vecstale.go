@@ -21,7 +21,7 @@ import (
 // к «горутине», склейка двойников переносит чужие синонимы — строка меняется,
 // а вектор остаётся посчитанным от прежней.
 //
-// **Замер 06.09.2026** (`docs/eval/vecage-0906.md`, 196 647 понятий): текст
+// **Замер 06.09.2026** (возраст векторов по истории реестра, 196 647 понятий): текст
 // менялся у 13.2%, синонимы приходят сутками (медиана 2.6 ч, 90% в шесть
 // суток), и у 3.5% понятий в старом тексте нет второго языка — того самого
 // моста «горутина → goroutine», ради которого синонимы в вектор и кладутся.
@@ -41,12 +41,38 @@ func textStamp(s string) uint64 {
 }
 
 // saveStamps пишет отпечатки по местам: место N-1 — понятие с номером N.
-func saveStamps(dir string, texts []string) error {
-	raw := make([]byte, 8*len(texts))
-	for i, t := range texts {
-		binary.LittleEndian.PutUint64(raw[i*8:], textStamp(t))
+// Ноль — «отпечатка нет»: вектор посчитан до того, как отпечатки появились.
+func saveStamps(dir string, stamps []uint64) error {
+	raw := make([]byte, 8*len(stamps))
+	for i, st := range stamps {
+		binary.LittleEndian.PutUint64(raw[i*8:], st)
 	}
 	return fsx.WriteFileAtomic(filepath.Join(dir, entVecStampFile), raw, 0o644)
+}
+
+// mergeStamps собирает отпечатки под новую запись векторов: у понятий из
+// fresh — от нынешнего текста, у остальных — прежний отпечаток, а если его
+// не было — ноль, «неизвестно». nil в fresh означает «посчитаны все».
+//
+// Неизвестный отпечаток не подменяется нынешним текстом намеренно: это
+// сказало бы «вектор свеж» о векторе, про который известно только то,
+// что он есть. Такие понятия считает `StaleEntities`, и полный пересчёт
+// их закрывает.
+func mergeStamps(old []uint64, texts []string, fresh []uint32) []uint64 {
+	out := make([]uint64, len(texts))
+	if fresh == nil {
+		for i, t := range texts {
+			out[i] = textStamp(t)
+		}
+		return out
+	}
+	copy(out, old)
+	for _, id := range fresh {
+		if i := int(id) - 1; i >= 0 && i < len(out) {
+			out[i] = textStamp(texts[i])
+		}
+	}
+	return out
 }
 
 // loadStamps читает отпечатки. Файла нет — пусто, и это не ошибка: графы,
@@ -65,27 +91,32 @@ func loadStamps(dir string) []uint64 {
 
 // StaleEntities — номера понятий, чей текст изменился после счёта вектора.
 //
-// Второе значение — есть ли вообще отпечатки: без них сказать нечего, и это
-// надо отличать от «всё в порядке».
-func (g *Graph) StaleEntities() (ids []uint32, haveStamps bool) {
+// unknown — сколько посчитанных векторов без отпечатка: их считали до того,
+// как отпечатки появились, и сказать про них «свеж» или «устарел» нечем;
+// закрывает это только полный пересчёт. haveStamps — есть ли отпечатки
+// вообще: без них сказать нечего, и это надо отличать от «всё в порядке».
+func (g *Graph) StaleEntities() (ids []uint32, unknown int, haveStamps bool) {
 	texts, err := g.embedTexts()
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	stamps := loadStamps(g.dir)
 	if len(stamps) == 0 {
-		return nil, false
+		return nil, 0, false
 	}
 	_, already := g.vecs.Existing(g.vecs.Model(), 0)
 	for i, t := range texts {
-		if i >= len(stamps) || i >= already {
+		if i >= already {
 			break // дальше векторов нет вовсе — это работа обычного досчёта
 		}
-		if stamps[i] != textStamp(t) {
+		switch {
+		case i >= len(stamps) || stamps[i] == 0:
+			unknown++
+		case stamps[i] != textStamp(t):
 			ids = append(ids, uint32(i+1))
 		}
 	}
-	return ids, true
+	return ids, unknown, true
 }
 
 // EmbedStale пересчитывает векторы понятий, чей текст изменился после счёта.
@@ -108,7 +139,7 @@ func (g *Graph) EmbedStale(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	}
 	defer release()
 
-	ids, have := g.StaleEntities()
+	ids, _, have := g.StaleEntities()
 	if !have {
 		return 0, fmt.Errorf("отпечатков текстов нет: они появляются при счёте векторов " +
 			"этой сборкой. Один раз пересчитайте всё (--graph-embed-recount), " +
@@ -149,7 +180,7 @@ func (g *Graph) EmbedStale(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	for k, id := range ids {
 		copy(data[int(id-1)*dim:int(id)*dim], fresh[k*dim:(k+1)*dim])
 	}
-	if err := g.SaveEntityVectors(emb.Model(), digest, dim, data); err != nil {
+	if err := g.saveEntityVectors(emb.Model(), digest, dim, data, ids); err != nil {
 		return 0, err
 	}
 	return len(ids), nil

@@ -785,11 +785,11 @@ func TestAnswerStyleOverride(t *testing.T) {
 func TestEmbedTextsPlainDropsHeader(t *testing.T) {
 	_, c, _ := embedFixture(t)
 
-	withHead, err := c.embedTextsWith(0, 1, false)
+	withHead, err := c.embedTexts(0, 1, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := c.embedTextsWith(0, 1, true)
+	plain, err := c.embedTexts(0, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

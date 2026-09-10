@@ -309,3 +309,64 @@ func TestThrottleReason(t *testing.T) {
 		}
 	}
 }
+
+// nvidia-smi ответил, но карт в ответе не разобралось: процессы на карте
+// всё равно спрашиваются. Это отдельный факт, и без него вызывающий, лишённый
+// замера загрузки, не смог бы применить строгое правило «любой процесс — занято».
+func TestSnapshotProcsWithoutCards(t *testing.T) {
+	f := baseRun()
+	f.out[gpuQuery] = "нет ответа\n"
+	f.out["nvidia-smi --query-compute-apps=pid,process_name,used_memory"] = "999, /usr/bin/python3, 40960\n"
+	rep := Snapshot(context.Background(), Opts{Run: f.run, Want: Sections{GPU: true}})
+
+	if rep.Has("gpu") || len(rep.GPUs) != 0 {
+		t.Fatalf("карты появились из неразбираемого ответа: %+v", rep.GPUs)
+	}
+	if len(rep.GPUProcs) != 1 || rep.GPUProcs[0].PID != 999 {
+		t.Errorf("процессы на карте не собраны без карт: %+v (%+v)", rep.GPUProcs, rep.Missing)
+	}
+	for _, c := range f.calls {
+		if strings.Contains(c, "utilization.gpu,memory.used") || strings.Contains(c, "power.draw") {
+			t.Errorf("без карт спрошены выборки и мощность: %q", c)
+		}
+	}
+}
+
+// Без nvidia-smi процессы не спрашиваются вовсе: спрашивать нечем.
+func TestSnapshotNoProcsWithoutNvidiaSmi(t *testing.T) {
+	f := baseRun()
+	f.fail = map[string]error{gpuQuery: errors.New("exec: nvidia-smi not found")}
+	Snapshot(context.Background(), Opts{Run: f.run, Want: Sections{GPU: true}})
+	for _, c := range f.calls {
+		if strings.Contains(c, "compute-apps") {
+			t.Errorf("процессы спрошены у отсутствующего nvidia-smi: %q", c)
+		}
+	}
+}
+
+// Запросы к службе считаются, а не хранятся: их тысячи, а нужно одно число.
+func TestSnapshotCountsRequests(t *testing.T) {
+	f := baseRun()
+	f.out["journalctl -u"] = "ollama[1]: [GIN] POST /api/chat 200\n" +
+		"ollama[1]: [GIN] GET /api/tags 200\n" +
+		"ollama[1]: [GIN] POST /api/generate 200\n" +
+		"ollama[1]: WARN CUDA error: out of memory\n"
+	rep := Snapshot(context.Background(), Opts{Run: f.run,
+		Want: Sections{Journal: true}, JournalWindow: 15 * time.Minute})
+
+	if rep.Requests != 2 {
+		t.Errorf("запросов %d, ожидалось 2", rep.Requests)
+	}
+	if len(rep.Journal) != 1 || rep.Journal[0].Kind != "cuda" {
+		t.Errorf("строки о запросах попали в журнал бед: %+v", rep.Journal)
+	}
+}
+
+// Под systemd-таймером USER и LOGNAME бывают пусты — имя берётся по uid.
+func TestCurrentUserFallsBackToUID(t *testing.T) {
+	t.Setenv("USER", "")
+	t.Setenv("LOGNAME", "")
+	if got := currentUser(); got == "" {
+		t.Error("без USER и LOGNAME имя пользователя пустое — свои сеансы считались бы чужими")
+	}
+}

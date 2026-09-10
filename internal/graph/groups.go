@@ -123,33 +123,6 @@ func (g *Groups) rebuild() {
 	}
 }
 
-// GroupOf возвращает номер группы понятия и есть ли она. Nil-приёмник — групп нет.
-func (g *Groups) GroupOf(ent uint32) (uint32, bool) {
-	if g == nil {
-		return 0, false
-	}
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	id, ok := g.member[ent]
-	return id, ok
-}
-
-// Members возвращает состав группы (пусто, если такой группы нет).
-func (g *Groups) Members(groupID uint32) []uint32 {
-	if g == nil {
-		return nil
-	}
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	r, ok := g.byID[groupID]
-	if !ok {
-		return nil
-	}
-	out := append([]uint32(nil), r.Members...)
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
-
 // Siblings — остальные понятия группы данного понятия (без него самого).
 // Это и есть то, что объединяется в выдаче: спросили одно — показать группу.
 func (g *Groups) Siblings(ent uint32) []uint32 {
@@ -309,8 +282,8 @@ func (g *Graph) addGroupSiblings(seeds []FoundEntity, have map[uint32]bool, opt 
 		return seeds
 	}
 	room := opt.TopEntities - len(seeds)
-	if max := opt.TopEntities / 2; room > max {
-		room = max
+	if half := opt.TopEntities / 2; room > half {
+		room = half
 	}
 	if room <= 0 {
 		return seeds

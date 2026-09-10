@@ -145,8 +145,8 @@ type Result struct {
 
 	// Evidence — подтверждения графа как их отобрал поиск, до слияния
 	// с выдержками книг: после слияния они обрезаются по TopK вслед за
-	// книгами, и по Excerpts их не пересчитать. Читают замеры
-	// (privatescripts/pairfind), чтобы мерить тот же путь, а не свой.
+	// книгами, и по Excerpts их не пересчитать. Читают замеры, чтобы мерить
+	// тот же путь, а не свой.
 	Evidence []graph.ChunkKey
 
 	// WordsOnly и WordsWhy — смысловой поиск не участвовал и почему именно.
@@ -335,12 +335,13 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 			QueryVector: qv,
 			Neighbors:   o.Rank,
 		})
-		msGraph = time.Since(tGraph).Milliseconds()
 		res.Entities, res.Relations, res.GraphNote = gres.Entities, gres.Relations, gres.Note
 		res.Evidence = gres.Chunks
-		res.Excerpts = fromGraph(d.Coll, gres.Chunks, o)
-
+		// Цепочка — часть работы графа, и в ms_graph она входит: обход в ширину
+		// на три шага стоит заметно, и прятать его от журнала шагов нельзя.
 		res.Chain = Chain(d.Graph, res.Entities, res.Relations, o)
+		msGraph = time.Since(tGraph).Milliseconds()
+		res.Excerpts = fromGraph(d.Coll, gres.Chunks, o)
 
 		// Граф собран не по всей библиотеке — об этом надо сказать прямо,
 		// иначе «ничего не нашлось» прочтётся как «в книгах об этом не пишут».

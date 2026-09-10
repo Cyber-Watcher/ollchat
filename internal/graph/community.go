@@ -79,6 +79,10 @@ type Community struct {
 type Communities struct {
 	Built time.Time `json:"built"`
 
+	// ByOrigins — разбиение считано на весах по источникам (graph.weights_by_origins).
+	// Записывается, чтобы смена настройки была видна доктору, а не молчала.
+	ByOrigins bool `json:"by_origins,omitempty"`
+
 	// Split — сколько тем нижнего уровня оказалось несвязными и было разрезано
 	// на части (этап 101, Г1). Ноль — Louvain на этот раз собрал всё связно.
 	Split int `json:"split,omitempty"`
@@ -242,6 +246,7 @@ func (g *Graph) partition(opt CommunityOpts, save bool) (*Communities, error) {
 		Blend:    blend,
 	}
 	res.List = g.assemble(adj, order, small, big)
+	res.ByOrigins = g.rules.WeightsByOrigins
 	// Разрез идёт до переноса описаний: carry сверяет составы, и разрезанные
 	// части должны прийти к нему такими, какими лягут на диск.
 	if !opt.KeepDisconnected {
@@ -328,14 +333,49 @@ func (g *Graph) undirected() (map[uint32]map[uint32]float64, []uint32) {
 	}
 	// Live, а не All: поглощённое понятие отдало связи выжившему, и обход
 	// по всем записям реестра добавил бы их второй раз.
+	//
+	// По источникам (Rules.WeightsByOrigins): записи одной пары из соседних
+	// кусков одной книги — одна фраза из зоны перекрытия, считается раз.
+	type pk struct{ a, b uint32 }
+	type rec struct {
+		ord uint32
+		w   float64
+	}
+	var byPair map[pk]map[uint32][]rec
+	if g.rules.WeightsByOrigins {
+		byPair = map[pk]map[uint32][]rec{}
+	}
 	for _, ent := range g.Entities().Live() {
 		for _, ed := range g.Edges().Of(ent.ID) {
 			w := float64(ed.Weight)
 			if w <= 0 {
 				w = 1
 			}
-			add(ed.Src, ed.Dst, w)
-			add(ed.Dst, ed.Src, w)
+			if byPair == nil || ed.Evidence.Doc == 0 {
+				add(ed.Src, ed.Dst, w)
+				add(ed.Dst, ed.Src, w)
+				continue
+			}
+			k := pk{ed.Src, ed.Dst}
+			if k.a > k.b {
+				k.a, k.b = k.b, k.a
+			}
+			if byPair[k] == nil {
+				byPair[k] = map[uint32][]rec{}
+			}
+			byPair[k][ed.Evidence.Doc] = append(byPair[k][ed.Evidence.Doc], rec{ed.Evidence.Ord, w})
+		}
+	}
+	for k, docs := range byPair {
+		for _, recs := range docs {
+			sort.Slice(recs, func(i, j int) bool { return recs[i].ord < recs[j].ord })
+			for i, r := range recs {
+				if i > 0 && recs[i].ord == recs[i-1].ord+1 {
+					continue
+				}
+				add(k.a, k.b, r.w)
+				add(k.b, k.a, r.w)
+			}
 		}
 	}
 	order := make([]uint32, 0, len(adj))

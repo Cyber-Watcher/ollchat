@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,17 +38,7 @@ func fakeOllama(t *testing.T, psBody string) *ollama.Client {
 // Guard свободная карта.
 func TestGuardFreeCard(t *testing.T) {
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: testGuardCfg(15 * time.Minute),
-		Run: func(ctx context.Context, name string, args ...string) (string, int, error) {
-			switch name {
-			case "nvidia-smi":
-				return "\n", 0, nil
-			case "sudo":
-				return "-- No entries --\n", 0, nil
-			case "w":
-				return "", 0, nil
-			}
-			return "", 0, nil
-		}}
+		Run: (&fakeRun{gpu: "\n", journal: "-- No entries --\n"}).run}
 	rep := g.Check(context.Background())
 	if !rep.Free {
 		t.Errorf("карта названа занятой: %v", rep.Blocking)
@@ -60,22 +52,15 @@ func TestGuardBusyCard(t *testing.T) {
 		smi string
 		log string
 	}{
-		"процесс на карте": {`{"models":[]}`, "492677, 25138 MiB\n", ""},
+		"процесс на карте": {`{"models":[]}`, "492677, python, 25138\n", ""},
 		"модель в памяти":  {`{"models":[{"name":"qwen3.5:122b","size_vram":80000000000}]}`, "", ""},
 		"свежие запросы":   {`{"models":[]}`, "", "POST /api/chat 200\nPOST /api/chat 200\n"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
+			// Карта не разобрана — замера загрузки нет, правила строгие.
 			g := &Guard{Client: fakeOllama(t, c.ps), Cfg: testGuardCfg(15 * time.Minute),
-				Run: func(ctx context.Context, cmd string, args ...string) (string, int, error) {
-					switch cmd {
-					case "nvidia-smi":
-						return c.smi, 0, nil
-					case "sudo":
-						return c.log, 0, nil
-					}
-					return "", 0, nil
-				}}
+				Run: (&fakeRun{computeApps: c.smi, journal: c.log}).run}
 			rep := g.Check(context.Background())
 			if rep.Free {
 				t.Fatalf("карта названа свободной, хотя %s", name)
@@ -89,13 +74,9 @@ func TestGuardBusyCard(t *testing.T) {
 
 // Чужой сеанс ssh не запрещает ночь: забытое окно mc — это не работа.
 func TestGuardForeignSessionIsInfoOnly(t *testing.T) {
+	t.Setenv("USER", "olleval")
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: testGuardCfg(time.Minute),
-		Run: func(ctx context.Context, cmd string, args ...string) (string, int, error) {
-			if cmd == "w" {
-				return "user1 pts/0    198.51.100.10        Thu03   32:18   0.14s   ?   tmux\n", 0, nil
-			}
-			return "", 0, nil
-		}}
+		Run: (&fakeRun{sessions: "user1 pts/0    198.51.100.10        Thu03   32:18   0.14s   ?   tmux\n"}).run}
 	rep := g.Check(context.Background())
 	if !rep.Free {
 		t.Errorf("чужой сеанс запретил прогон: %v", rep.Blocking)
@@ -114,15 +95,16 @@ func TestWaitFreeNeedsConsecutiveFree(t *testing.T) {
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: testGuardCfg(time.Minute),
 		Run: func(ctx context.Context, cmd string, args ...string) (string, int, error) {
 			// Состояние сменяется по одному вопросу за проверку — по списку
-			// процессов; второй вопрос к nvidia-smi (память и загрузка) идёт
-			// в той же проверке и счётчик двигать не должен.
+			// процессов; другие вопросы к nvidia-smi (карта и загрузка) идут
+			// в той же проверке и счётчик двигать не должны. Карт nvidia-smi
+			// не называет — замера загрузки нет, и процесс на карте запрещает.
 			if cmd != "nvidia-smi" || len(args) == 0 || !strings.Contains(args[0], "compute-apps") {
 				return "", 0, nil
 			}
 			state := states[min(i, len(states)-1)]
 			i++
 			if state == "занято" {
-				return "1234, 25138 MiB\n", 0, nil
+				return "1234, python, 25138\n", 0, nil
 			}
 			return "", 0, nil
 		}}
@@ -144,12 +126,7 @@ func TestWaitFreeNeedsConsecutiveFree(t *testing.T) {
 // Если карта так и не освободилась, ночь пропускается, а не ждёт вечно.
 func TestWaitFreeGivesUpOnTimeout(t *testing.T) {
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: testGuardCfg(time.Minute),
-		Run: func(ctx context.Context, cmd string, args ...string) (string, int, error) {
-			if cmd == "nvidia-smi" {
-				return "1234, 25138 MiB\n", 0, nil
-			}
-			return "", 0, nil
-		}}
+		Run: (&fakeRun{computeApps: "1234, python, 25138\n"}).run}
 	_, ok := g.WaitFree(context.Background(), 3, time.Millisecond, time.Now().Add(5*time.Millisecond), func(string) {})
 	if ok {
 		t.Error("ожидание закончилось стартом, хотя карта всё время занята")
@@ -160,12 +137,7 @@ func TestWaitFreeGivesUpOnTimeout(t *testing.T) {
 // команда без флагов молча висит на занятой карте.
 func TestWaitFreeAnswersAtOnceWithoutWait(t *testing.T) {
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: testGuardCfg(time.Minute),
-		Run: func(ctx context.Context, cmd string, args ...string) (string, int, error) {
-			if cmd == "nvidia-smi" {
-				return "1234, 25138 MiB\n", 0, nil
-			}
-			return "", 0, nil
-		}}
+		Run: (&fakeRun{computeApps: "1234, python, 25138\n"}).run}
 	began := time.Now()
 	_, ok := g.WaitFree(context.Background(), 3, time.Minute, time.Now(), func(string) {})
 	if ok {
@@ -176,27 +148,62 @@ func TestWaitFreeAnswersAtOnceWithoutWait(t *testing.T) {
 	}
 }
 
-// fakeRun разводит команды по назначению: два разных вопроса к nvidia-smi,
-// состояние службы, журнал и сеансы.
-type fakeRun struct {
-	computeApps string // ответ на --query-compute-apps
-	gpuUsage    string // ответ на --query-gpu
-	service     string // ответ systemctl is-active
-	journal     string
+// card — строка карты в ответе nvidia-smi на главный запрос nodeprobe
+// (индекс, имя, всего, занято, свободно, загрузка, температура).
+func card(usedMiB, util int) string {
+	return fmt.Sprintf("0, NVIDIA A100-SXM4-80GB, 81920, %d, %d, %d, 41\n", usedMiB, 81920-usedMiB, util)
 }
 
-func (f fakeRun) run(ctx context.Context, name string, args ...string) (string, int, error) {
-	switch {
-	case name == "nvidia-smi" && len(args) > 0 && strings.Contains(args[0], "compute-apps"):
-		return f.computeApps, 0, nil
-	case name == "nvidia-smi":
-		return f.gpuUsage, 0, nil
-	case name == "systemctl":
-		return f.service, 0, nil
-	case name == "sudo":
-		return f.journal, 0, nil
+// sample — строка повторной выборки загрузки (индекс, загрузка, занято).
+func sample(usedMiB, util int) string {
+	return fmt.Sprintf("0, %d, %d\n", util, usedMiB)
+}
+
+// fakeRun изображает внешние команды так, как их зовёт nodeprobe: ключ —
+// имя программы и первый аргумент. Карта задаётся строкой card(), процессы —
+// в виде «pid, имя, МиБ», служба — состоянием, журнал и сеансы — выводом.
+// Пустая карта означает «nvidia-smi ответил, но карт не назвал»: замера
+// загрузки нет, и guard переходит на строгие правила.
+type fakeRun struct {
+	gpu         string   // ответ на главный запрос --query-gpu (см. card)
+	utilSeq     []string // повторные выборки загрузки (см. sample), по одной за вызов
+	computeApps string   // ответ на --query-compute-apps: "pid, имя, МиБ"
+	gpuErr      error    // nvidia-smi отсутствует
+	service     string   // состояние службы: active, inactive, …
+	journal     string
+	sessions    string // вывод w -h
+}
+
+func (f *fakeRun) run(ctx context.Context, name string, args ...string) (string, int, error) {
+	key := name
+	if len(args) > 0 {
+		key += " " + args[0]
 	}
-	return "", 0, nil
+	switch {
+	case strings.HasPrefix(key, "nvidia-smi --query-gpu=index,name"):
+		if f.gpuErr != nil {
+			return "", 1, f.gpuErr
+		}
+		return f.gpu, 0, nil
+	case strings.HasPrefix(key, "nvidia-smi --query-gpu=index,utilization"):
+		if len(f.utilSeq) == 0 {
+			return "", 1, errors.New("выборка не задана в тесте")
+		}
+		out := f.utilSeq[0]
+		f.utilSeq = f.utilSeq[1:]
+		return out, 0, nil
+	case strings.HasPrefix(key, "nvidia-smi --query-gpu=index,power"):
+		return "0, 71.35, Not Active\n", 0, nil
+	case strings.HasPrefix(key, "nvidia-smi --query-compute-apps"):
+		return f.computeApps, 0, nil
+	case key == "systemctl show":
+		return "ActiveState=" + strings.TrimSpace(f.service) + "\nMainPID=0\n", 0, nil
+	case key == "sudo journalctl":
+		return f.journal, 0, nil
+	case key == "w -h":
+		return f.sessions, 0, nil
+	}
+	return "", 1, errors.New("команда не задана в тесте: " + key)
 }
 
 func fullCheck() GuardCfg {
@@ -216,11 +223,11 @@ func TestGuardTrainingOnCardWithOllamaStopped(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[]}`),
 		Cfg:    fullCheck(),
-		Run: fakeRun{
-			computeApps: "1644843, python, 66780 MiB\n",
-			gpuUsage:    "66791, 87\n",
-			service:     "inactive\n",
-		}.run,
+		Run: (&fakeRun{
+			computeApps: "1644843, python, 66780\n",
+			gpu:         card(66791, 87),
+			service:     "inactive",
+		}).run,
 	}
 	rep := g.Check(context.Background())
 	if rep.Free {
@@ -246,7 +253,7 @@ func TestGuardUsedMemoryWhileIdleDoesNotBlock(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[]}`),
 		Cfg:    fullCheck(),
-		Run:    fakeRun{computeApps: "", gpuUsage: "40000, 5\n", service: "active\n"}.run,
+		Run:    (&fakeRun{computeApps: "", gpu: card(40000, 5), service: "active"}).run,
 	}
 	rep := g.Check(context.Background())
 	if !rep.Free {
@@ -263,7 +270,7 @@ func TestGuardForgottenModelDoesNotBlock(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[{"name":"qwen3.5:122b","size_vram":80000000000}]}`),
 		Cfg:    fullCheck(),
-		Run:    fakeRun{gpuUsage: "76000, 0\n", service: "active\n"}.run,
+		Run:    (&fakeRun{gpu: card(76000, 0), service: "active"}).run,
 	}
 	rep := g.Check(context.Background())
 	if !rep.Free {
@@ -279,7 +286,7 @@ func TestGuardModelUnderLoadBlocks(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[{"name":"qwen3.5:122b","size_vram":80000000000}]}`),
 		Cfg:    fullCheck(),
-		Run:    fakeRun{gpuUsage: "76000, 45\n", service: "active\n"}.run,
+		Run:    (&fakeRun{gpu: card(76000, 45), service: "active"}).run,
 	}
 	rep := g.Check(context.Background())
 	if rep.Free {
@@ -298,7 +305,7 @@ func TestGuardThresholdFromSchedule(t *testing.T) {
 		g := &Guard{
 			Client: fakeOllama(t, `{"models":[]}`),
 			Cfg:    fullCheck(),
-			Run:    fakeRun{gpuUsage: "70000, 4\n", service: "active\n"}.run,
+			Run:    (&fakeRun{gpu: card(70000, 4), service: "active"}).run,
 			Limit:  func(time.Time) int { return limit },
 		}
 		rep := g.Check(context.Background())
@@ -315,22 +322,16 @@ func TestGuardTakesLargestSample(t *testing.T) {
 	cfg := fullCheck()
 	cfg.UtilSamples = 5
 	cfg.UtilSampleGap = Duration(time.Millisecond)
-	samples := []string{"70000, 0\n", "70000, 0\n", "70000, 38\n", "70000, 0\n", "70000, 1\n"}
-	i := 0
+	// Первая выборка приходит с главным запросом о карте, остальные четыре —
+	// повторными запросами загрузки.
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[]}`),
 		Cfg:    cfg,
-		Run: func(ctx context.Context, name string, args ...string) (string, int, error) {
-			if name == "nvidia-smi" && len(args) > 0 && strings.Contains(args[0], "query-gpu") {
-				out := samples[i%len(samples)]
-				i++
-				return out, 0, nil
-			}
-			if name == "systemctl" {
-				return "active\n", 0, nil
-			}
-			return "", 0, nil
-		},
+		Run: (&fakeRun{
+			gpu:     card(70000, 0),
+			utilSeq: []string{sample(70000, 0), sample(70000, 38), sample(70000, 0), sample(70000, 1)},
+			service: "active",
+		}).run,
 	}
 	rep := g.Check(context.Background())
 	if rep.Free {
@@ -347,7 +348,7 @@ func TestGuardStrictWithoutMeasurement(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[{"name":"qwen3.5:122b","size_vram":80000000000}]}`),
 		Cfg:    fullCheck(),
-		Run:    fakeRun{computeApps: "1644843, python, 66780 MiB\n", gpuUsage: "нет ответа\n", service: "active\n"}.run,
+		Run:    (&fakeRun{computeApps: "1644843, python, 66780\n", gpu: "нет ответа\n", service: "active"}).run,
 	}
 	rep := g.Check(context.Background())
 	if rep.Free {
@@ -366,7 +367,7 @@ func TestGuardLoadedCardWithoutMemory(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[]}`),
 		Cfg:    fullCheck(),
-		Run:    fakeRun{gpuUsage: "200, 75\n", service: "active\n"}.run,
+		Run:    (&fakeRun{gpu: card(200, 75), service: "active"}).run,
 	}
 	if rep := g.Check(context.Background()); rep.Free {
 		t.Error("75% загрузки не остановили прогон")
@@ -379,7 +380,7 @@ func TestGuardIdleCardWithRunningService(t *testing.T) {
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[]}`),
 		Cfg:    fullCheck(),
-		Run:    fakeRun{gpuUsage: "300, 0\n", service: "active\n"}.run,
+		Run:    (&fakeRun{gpu: card(300, 0), service: "active"}).run,
 	}
 	rep := g.Check(context.Background())
 	if !rep.Free {
@@ -387,23 +388,23 @@ func TestGuardIdleCardWithRunningService(t *testing.T) {
 	}
 }
 
-func TestParseGPUUsage(t *testing.T) {
-	cases := map[string]struct {
-		used, util int
-		ok         bool
-	}{
-		"66791, 87":       {66791, 87, true},
-		" 0, 0 ":          {0, 0, true},
-		"300, 5\n400, 10": {300, 5, true}, // карт несколько — смотрим первую
-		"[N/A], [N/A]":    {0, 0, false},
-		"мусор":           {0, 0, false},
+// Без nvidia-smi замера нет и процессы не видны: остаются модель в памяти
+// и порог занятой памяти, а причина попадает в заметки.
+func TestGuardWithoutNvidiaSmiIsStrict(t *testing.T) {
+	g := &Guard{
+		Client: fakeOllama(t, `{"models":[{"name":"qwen3.5:122b","size_vram":80000000000}]}`),
+		Cfg:    fullCheck(),
+		Run:    (&fakeRun{gpuErr: errors.New("exec: nvidia-smi not found"), service: "active"}).run,
 	}
-	for in, want := range cases {
-		used, util, ok := parseGPUUsage(in)
-		if used != want.used || util != want.util || ok != want.ok {
-			t.Errorf("parseGPUUsage(%q) = %d, %d, %v; ожидалось %d, %d, %v",
-				in, used, util, ok, want.used, want.util, want.ok)
-		}
+	rep := g.Check(context.Background())
+	if rep.Free {
+		t.Fatal("карта названа свободной без nvidia-smi")
+	}
+	if all := strings.Join(rep.Blocking, " | "); !strings.Contains(all, "загружена модель") {
+		t.Errorf("в причинах нет модели: %s", all)
+	}
+	if notes := strings.Join(rep.Notes, " | "); !strings.Contains(notes, "nvidia-smi") {
+		t.Errorf("отсутствие nvidia-smi не отмечено: %s", notes)
 	}
 }
 
@@ -416,7 +417,7 @@ func TestGuardStoppedServiceWaitsHoldoff(t *testing.T) {
 	cfg.IdleBeforeStart = Duration(20 * time.Minute)
 	g := &Guard{
 		Client: fakeOllama(t, `{"models":[]}`), Cfg: cfg, Root: root,
-		Run: fakeRun{gpuUsage: "300, 0\n", service: "inactive\n"}.run,
+		Run: (&fakeRun{gpu: card(300, 0), service: "inactive"}).run,
 	}
 
 	rep := g.Check(context.Background())
@@ -444,9 +445,9 @@ func TestGuardBusyResetsIdle(t *testing.T) {
 	cfg := fullCheck()
 	cfg.IdleBeforeStart = Duration(20 * time.Minute)
 	free := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: cfg, Root: root,
-		Run: fakeRun{gpuUsage: "300, 0\n", service: "inactive\n"}.run}
+		Run: (&fakeRun{gpu: card(300, 0), service: "inactive"}).run}
 	busy := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: cfg, Root: root,
-		Run: fakeRun{gpuUsage: "66791, 87\n", service: "inactive\n"}.run}
+		Run: (&fakeRun{gpu: card(66791, 87), service: "inactive"}).run}
 
 	free.Check(context.Background())
 	backdateIdle(t, root, 30*time.Minute)
@@ -466,7 +467,7 @@ func TestGuardWatchGapResetsIdle(t *testing.T) {
 	cfg := fullCheck()
 	cfg.IdleBeforeStart = Duration(20 * time.Minute)
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: cfg, Root: root,
-		Run: fakeRun{gpuUsage: "300, 0\n", service: "inactive\n"}.run}
+		Run: (&fakeRun{gpu: card(300, 0), service: "inactive"}).run}
 
 	g.Check(context.Background())
 	// Отметка есть, но последний раз смотрели сутки назад.
@@ -480,7 +481,7 @@ func TestGuardWatchGapResetsIdle(t *testing.T) {
 func TestGuardWritesCheckLog(t *testing.T) {
 	root := t.TempDir()
 	g := &Guard{Client: fakeOllama(t, `{"models":[]}`), Cfg: fullCheck(), Root: root,
-		Run: fakeRun{computeApps: "1644843, python, 66780 MiB\n", gpuUsage: "66791, 87\n", service: "inactive\n"}.run}
+		Run: (&fakeRun{computeApps: "1644843, python, 66780\n", gpu: card(66791, 87), service: "inactive"}).run}
 	g.Check(context.Background())
 
 	b, err := os.ReadFile(filepath.Join(root, "logs", "guard.log"))

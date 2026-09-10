@@ -371,48 +371,41 @@ func (g *Graph) evidence(seeds []FoundEntity, limit int) []ChunkKey {
 	//
 	// До 07.09.2026 ничья решалась ключом «книга, кусок» по возрастанию, и у
 	// частого понятия все места разбирали книги с меньшими номерами: замер
-	// на паре «оригинал — перевод» (docs/eval/pairfind-0906.md) — по 16
+	// на паре «оригинал — перевод» (06.09.2026) — по 16
 	// английским вопросам перевод не попал в подтверждения ни разу, потому что
 	// его файл стоит по алфавиту позже и получил больший номер при индексации.
 	// Ранжирование по вопросу (RankWith) идёт уже среди отобранных и выбрать
 	// то, чего здесь нет, не может. Очередь книг даёт каждой книге место
 	// в пуле, а какая из них ближе к вопросу — решает ранжирование.
+	//
+	// Номер куска в очереди своей книги — по возрастанию ключа внутри
+	// (балл, книга): куски одной книги идут в порядке номеров. Первый проход
+	// даёт этот порядок, второй ставит очереди книг вперемежку.
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].n != list[j].n {
 			return list[i].n > list[j].n
 		}
 		return list[i].key < list[j].key
 	})
-	// Номер куска в очереди своей книги внутри одного балла.
-	pos := make([]int, len(list))
-	seen := map[uint64]int{} // (балл, книга) → сколько уже выдано
-	for i, p := range list {
+	pos := make(map[uint64]int, len(list)) // ключ куска → место в очереди книги
+	seen := map[uint64]int{}               // (балл, книга) → сколько уже выдано
+	for _, p := range list {
 		k := uint64(p.n)<<32 | uint64(UnpackChunk(p.key).Doc)
-		pos[i] = seen[k]
+		pos[p.key] = seen[k]
 		seen[k]++
 	}
-	idx := make([]int, len(list))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool {
-		i, j := idx[a], idx[b]
+	sort.SliceStable(list, func(i, j int) bool {
 		if list[i].n != list[j].n {
 			return list[i].n > list[j].n
 		}
-		if pos[i] != pos[j] {
-			return pos[i] < pos[j]
+		if pos[list[i].key] != pos[list[j].key] {
+			return pos[list[i].key] < pos[list[j].key]
 		}
 		return list[i].key < list[j].key
 	})
-	if len(idx) > limit {
-		idx = idx[:limit]
+	if len(list) > limit {
+		list = list[:limit]
 	}
-	ordered := make([]pair, 0, len(idx))
-	for _, i := range idx {
-		ordered = append(ordered, list[i])
-	}
-	list = ordered
 	out := make([]ChunkKey, 0, len(list))
 	for _, p := range list {
 		out = append(out, UnpackChunk(p.key))

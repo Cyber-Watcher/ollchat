@@ -161,9 +161,9 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	}
 
 	// Связывания при сборке (--graph-link-new): решений и очередь человеку.
-	if l := g.Links(); l != nil && l.Count() > 0 {
-		fmt.Fprintf(stdout, "  связывания: решений %d, из них ждут человека %d (links.jsonl)\n",
-			l.Count(), l.Queued())
+	if l := g.Links(); l != nil && (l.Queued() > 0 || len(l.Judged()) > 0) {
+		fmt.Fprintf(stdout, "  связывания: решений арбитра «ДА» %d, ждут человека %d (links.jsonl)\n",
+			len(l.Judged()), l.Queued())
 		if l.Queued() > 0 {
 			fmt.Fprintln(stdout, "    разобрать глазами: /graph review в чате")
 		}
@@ -181,13 +181,26 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		shape.Nodes, shape.Isolated, shape.IsolatedShare())
 	if shape.Isolated > 0 {
 		fmt.Fprintln(stdout, "    понятие без связей не попадёт в тему никогда: разбиение считается по связям")
-		fmt.Fprintln(stdout, "    разбор причин: go run ./privatescripts/graphstats -orphans 25")
+		// Откуда одиночки: без записей связей (пустое извлечение), связи
+		// выродились в петли при склейке, пустые узлы после чистки (этап 101, Г6).
+		orph := g.Orphans(0)
+		fmt.Fprintf(stdout, "    из них модель не назвала ни одной связи у %d, связи ушли в склейку у %d, пустых узлов %d, с одним упоминанием %d\n",
+			orph.NoRawEdges, orph.LostToMerge, orph.Empty, orph.SingleMention)
 	}
 	if shape.Nodes > 0 {
 		fmt.Fprintf(stdout, "    наибольшая связная часть %d понятий (%d%%), всего частей %d\n",
 			shape.Largest, shape.LargestShare(), shape.Parts)
 		fmt.Fprintf(stdout, "    связей различных %d, из них на одном подтверждении %d (%d%%)\n",
 			shape.Pairs, shape.PairsOnce, shape.OnceShare())
+		// По источникам, а не по кускам (этап 101, Г9): соседние куски одной
+		// книги перекрываются, и фраза из перекрытия подтверждает связь дважды.
+		corr := g.Corroboration()
+		fmt.Fprintf(stdout, "    по источникам: с одним источником %d%% (соседние куски одной книги — один источник), копий из перекрытия среди подтверждений %d%%\n",
+			corr.SingleOriginShare(), corr.InflationShare())
+		if comms != nil && comms.ByOrigins != cfg.Graph.Rules().WeightsByOrigins {
+			fmt.Fprintf(stdout, "    ВНИМАНИЕ: разбиение тем считано на весах %s, а настройка graph.weights_by_origins = %v — пересчитать: ollchat --graph-communities %s\n",
+				weightsWord(comms.ByOrigins), cfg.Graph.Rules().WeightsByOrigins, name)
+		}
 		if shape.HubLimit > 0 {
 			fmt.Fprintf(stdout, "    хабов (от %d связей): %d (%.3f%% верхушки) — через них не идут цепочки\n",
 				shape.HubLimit, shape.Hubs, shape.HubShare())
@@ -513,4 +526,12 @@ func humanSince(t time.Time) string {
 		return fmt.Sprintf("%d с", int(d.Seconds()))
 	}
 	return fmt.Sprintf("%d мин %d с", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// weightsWord — чем считаны веса разбиения, словами.
+func weightsWord(byOrigins bool) string {
+	if byOrigins {
+		return "по источникам"
+	}
+	return "по кускам"
 }

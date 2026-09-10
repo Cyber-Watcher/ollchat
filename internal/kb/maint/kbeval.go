@@ -56,10 +56,7 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 		return err
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -189,7 +186,7 @@ func printRagasNames(stdout io.Writer) {
 	fmt.Fprintln(stdout, "               то есть сколько лишнего модель прочтёт перед ним")
 	fmt.Fprintln(stdout, "  faithfulness и answer relevancy здесь не считаются: они про ОТВЕТ")
 	fmt.Fprintln(stdout, "               модели, а этот замер идёт без генерации вовсе")
-	fmt.Fprintln(stdout, "               (набор для них — docs/eval/kb_answers.toml)")
+	fmt.Fprintln(stdout, "               (для них нужен набор с полем must — что обязано прозвучать в ответе)")
 }
 
 func dashes(n int) string {

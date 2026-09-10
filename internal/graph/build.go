@@ -155,6 +155,19 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 	}
 	defer g.Unlock()
 
+	// Связывание новых имён — только в опытном графе: оно отдаёт упоминания
+	// чужим узлам необратимо (link.go), а рабочий граф — недели карты, которые
+	// одной опечаткой в команде терять нельзя (решение владельца 04.09.2026).
+	// Проверка здесь, а не только в команде: сюда приходит любой вызывающий.
+	if opt.Link != nil && g.Meta().Kind != KindExperimental {
+		kind := g.Meta().Kind
+		if kind == "" {
+			kind = KindProduction
+		}
+		return res, fmt.Errorf("связывание новых имён (--graph-link-new) только для опытного графа "+
+			"(kind=%s), а этот граф — %s", KindExperimental, kind)
+	}
+
 	// Модель извлечения записана в паспорте графа, и менять её на полпути
 	// нельзя: половина графа окажется собрана одной моделью, половина другой,
 	// а видно этого не будет ниоткуда — в graph.meta модель одна. Замер
@@ -190,13 +203,17 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 	// Так известно общее число заранее: без него полоса хода врёт, а по ней
 	// человек решает, ждать ему или идти спать.
 	var jobs []kb.ChunkRef
-	var left, tocSkipped int
+	var left, service int
 	err := coll.EachChunkRef(filter, func(c kb.ChunkRef) error {
 		key := ChunkKey{Doc: c.Doc, Ord: c.Ord}
 		if mark, ok := g.Progress().MarkOf(key); ok {
-			// Пустые берутся заново только по явной просьбе: иначе каждый
-			// заход перечитывал бы одни и те же титульные листы.
-			if !opt.RedoEmpty || mark != MarkEmpty {
+			switch {
+			case mark == MarkService && !c.TOC && !c.Refs:
+				// Признак служебного с куска сняли — он снова в работе.
+			case mark == MarkEmpty && opt.RedoEmpty:
+				// Пустые берутся заново только по явной просьбе: иначе каждый
+				// заход перечитывал бы одни и те же титульные листы.
+			default:
 				return nil
 			}
 		}
@@ -205,12 +222,12 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 		// со всем». Список литературы и выходные данные (FlagRefs, этап 101):
 		// оттуда приходят фамилии авторов и названия шрифтов — понятия, у которых
 		// не может быть связей, потому что это перечень, а не рассказ.
-		// Помечается пропущенным сразу, чтобы не считаться остатком.
+		// Помечается служебным сразу, чтобы не считаться остатком.
 		if c.TOC || c.Refs {
-			if err := g.Progress().Mark(key, MarkSkipped); err != nil {
+			if err := g.Progress().Mark(key, MarkService); err != nil {
 				return err
 			}
-			tocSkipped++
+			service++
 			return nil
 		}
 		left++
@@ -229,15 +246,6 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 	if res.Total == 0 {
 		res.Entities, res.Edges = g.Entities().Count(), g.Edges().Count()
 		return res, nil
-	}
-
-	type job struct {
-		key  ChunkKey
-		book string
-		unit string
-		from int
-		to   int
-		text string
 	}
 
 	started := time.Now()
@@ -274,7 +282,7 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 			if runCtx.Err() != nil {
 				return
 			}
-			facts, err, badAnswer := askModel(runCtx, ex, system, j.book, j.unit, j.from, j.to, j.text, opt.Retry)
+			facts, err, badAnswer := askModel(runCtx, ex, system, j, opt.Retry)
 
 			queued := time.Now()
 			mu.Lock()
@@ -314,7 +322,14 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 			// иначе половина времени уходит на мелкие записи. Потеря
 			// при обрыве — эти полсотни, и они просто разберутся заново.
 			if done%50 == 0 {
-				flushAll(g)
+				if err := flushAll(g); err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					stop()
+					return
+				}
 			}
 			if report != nil {
 				report(BuildProgress{
@@ -370,7 +385,9 @@ send:
 	close(queue)
 	wg.Wait()
 
-	flushAll(g)
+	if err := flushAll(g); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	if err := g.Entities().SaveCounters(); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -380,7 +397,7 @@ send:
 
 	res.LockWait = lockWait
 	res.BuildProgress = BuildProgress{
-		Total: res.Total, Done: done, Empty: empty, Skipped: skipped + tocSkipped,
+		Total: res.Total, Done: done, Empty: empty, Skipped: skipped + service,
 		Entities: g.Entities().Count(), Edges: g.Edges().Count(),
 		Elapsed: time.Since(started), Book: lastBook,
 	}
@@ -425,10 +442,18 @@ var ErrEmptyAnswer = errors.New("модель вернула пустой отв
 //
 // Повтор ровно один и только при неразобранном ответе: модель, не сумевшая
 // дважды выдать JSON, не выдаст его и на третий раз, а куски кончатся нескоро.
-func askModel(ctx context.Context, ex Extractor, system, book, unit string, from, to int,
-	text string, retry bool) (Facts, error, bool) {
+// job — один кусок в работе: ссылка, книга, страницы и текст для промпта.
+type job struct {
+	key  ChunkKey
+	book string
+	unit string
+	from int
+	to   int
+	text string
+}
 
-	user := UserPrompt(book, unit, from, to, text)
+func askModel(ctx context.Context, ex Extractor, system string, j job, retry bool) (Facts, error, bool) {
+	user := UserPrompt(j.book, j.unit, j.from, j.to, j.text)
 	answer, err := ex.Extract(ctx, system, user)
 	if err != nil {
 		// Пустота — отказ на этом куске: пропускаем кусок, заход продолжается.
@@ -442,12 +467,12 @@ func askModel(ctx context.Context, ex Extractor, system, book, unit string, from
 			if err != nil {
 				return Facts{}, err, errors.Is(err, ErrEmptyAnswer)
 			}
-			facts, perr := ParseFacts(answer, text)
+			facts, perr := ParseFacts(answer, j.text)
 			return facts, perr, perr != nil
 		}
 		return Facts{}, err, false
 	}
-	facts, perr := ParseFacts(answer, text)
+	facts, perr := ParseFacts(answer, j.text)
 	if perr == nil {
 		return facts, nil, false
 	}
@@ -459,7 +484,7 @@ func askModel(ctx context.Context, ex Extractor, system, book, unit string, from
 	if err != nil {
 		return Facts{}, err, false
 	}
-	facts, perr = ParseFacts(answer, text)
+	facts, perr = ParseFacts(answer, j.text)
 	return facts, perr, perr != nil
 }
 
@@ -534,12 +559,20 @@ func writeFacts(ctx context.Context, g *Graph, key ChunkKey, f Facts, link *Link
 // Sync, а не только Flush: при отказе питания буферы системы пропадают, и
 // граф, стоящий недель видеокарты, откатывался бы дальше, чем на 50 кусков.
 // Цена — четыре fsync раз в 50 кусков при 0.3 куска/с, то есть незаметная.
-func flushAll(g *Graph) {
-	_ = g.Entities().Sync()
-	_ = g.Mentions().Sync()
-	_ = g.Edges().Sync()
-	_ = g.Aliases().Sync()
-	_ = g.Progress().Sync()
+//
+// Ошибка возвращается, а не глотается: диск, на котором не записалось,
+// это как раз тот случай, ради которого fsync и стоит. Заход, отметивший
+// кусок разобранным при полном диске, потерял бы его данные молча.
+func flushAll(g *Graph) error {
+	for _, sync := range []func() error{
+		g.Entities().Sync, g.Mentions().Sync, g.Edges().Sync,
+		g.Aliases().Sync, g.Progress().Sync,
+	} {
+		if err := sync(); err != nil {
+			return fmt.Errorf("запись графа на диск: %w", err)
+		}
+	}
+	return nil
 }
 
 // bookTitle — как называть книгу в вопросе к модели.

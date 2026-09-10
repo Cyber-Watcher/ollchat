@@ -197,16 +197,21 @@ type PromptStamp struct {
 }
 
 // PromptLine описывает версию промпта графа для отчётов: доктора, статуса.
+//
+// Сравнивается с промптом ТОГО ЖЕ формата, что у графа: у формата 2 свой
+// промпт извлечения (PromptIDV2), и сверка с PromptID формата 1 объявляла бы
+// каждый опытный граф собранным «ДРУГИМ» промптом.
 func (g *Graph) PromptLine() string {
 	m := g.Meta()
+	mine := PromptIDFor(m.Version)
 	switch {
 	case m.PromptID == "":
 		return "промпт извлечения не записан (граф собран до 04.09.2026); запишется при следующей сборке"
-	case m.PromptID == PromptID:
+	case m.PromptID == mine:
 		return "промпт извлечения " + m.PromptID
 	default:
 		return fmt.Sprintf("промпт извлечения %s, а в этом бинаре %s — ДРУГОЙ: сборка этим бинарём "+
-			"смешает две схемы (--graph-allow-prompt-change, если это осознанно)", m.PromptID, PromptID)
+			"смешает две схемы (--graph-allow-prompt-change, если это осознанно)", m.PromptID, mine)
 	}
 }
 
@@ -317,11 +322,19 @@ func (g *Graph) Progress() *Progress { return g.prog }
 // сейчас. Существующий граф не затирается: это ошибка, а не тихая потеря
 // нескольких суток работы модели.
 func Create(collDir, name string, chunks int, rules Rules) (*Graph, error) {
-	return CreateKind(collDir, name, chunks, KindProduction, "", rules)
+	return CreateKind(collDir, name, chunks, rules, CreateOpts{Kind: KindProduction})
 }
 
 // CreateKind заводит граф с заданным назначением и пометкой об отличиях.
-func CreateKind(collDir, name string, chunks int, kind Kind, note string, rules Rules) (*Graph, error) {
+// CreateOpts — паспортные поля нового графа. Структура, а не два string
+// через параметр: имя коллекции и заметку в паспорт компилятор не различит.
+type CreateOpts struct {
+	Kind Kind   // вид графа; пусто — рабочий
+	Note string // заметка в паспорт: зачем заведён
+}
+
+func CreateKind(collDir, name string, chunks int, rules Rules, o CreateOpts) (*Graph, error) {
+	kind, note := o.Kind, o.Note
 	if err := rules.Validate(); err != nil {
 		return nil, err
 	}
@@ -388,16 +401,16 @@ func openCollection(collDir string, chunks int, rules Rules, cb func(OpenProgres
 
 // OpenOrCreate открывает граф, а если его нет — заводит пустой.
 func OpenOrCreate(collDir, name string, chunks int, rules Rules) (*Graph, error) {
-	return OpenOrCreateKind(collDir, name, chunks, KindProduction, "", rules)
+	return OpenOrCreateKind(collDir, name, chunks, rules, CreateOpts{Kind: KindProduction})
 }
 
 // OpenOrCreateKind — то же, но у создаваемого графа проставляются назначение
 // и пометка об отличиях. У существующего графа паспорт не трогается: назначение
 // задаётся один раз, при сборке.
-func OpenOrCreateKind(collDir, name string, chunks int, kind Kind, note string, rules Rules) (*Graph, error) {
+func OpenOrCreateKind(collDir, name string, chunks int, rules Rules, o CreateOpts) (*Graph, error) {
 	g, err := Open(collDir, chunks, rules)
 	if errors.Is(err, ErrNoGraph) {
-		return CreateKind(collDir, name, chunks, kind, note, rules)
+		return CreateKind(collDir, name, chunks, rules, o)
 	}
 	return g, err
 }

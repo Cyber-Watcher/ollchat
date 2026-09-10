@@ -215,7 +215,7 @@ func (t *graphSearchTool) Plan(args map[string]any) (*Plan, error) {
 				QueryVector: queryVector(ctx, t.opts, g, query),
 				Neighbors:   t.opts.rank(),
 			})
-			out := graph.Render(coll, res, graph.RenderOpts{ForModel: true, Collection: name, RelationRunes: t.opts.GraphRelationSnippet})
+			out := graph.Render(coll, res, graph.RenderOpts{Collection: name, RelationRunes: t.opts.GraphRelationSnippet})
 			return out + graphNote(g, coll), nil
 		},
 	}, nil

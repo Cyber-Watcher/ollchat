@@ -595,14 +595,15 @@ type KB struct {
 // на миллисекунды. Не связался ни с одним понятием — не подмешивается ничего,
 // ни граф, ни выдержки из книг.
 type Mix struct {
-
 	// Chain — добавлять ли в карту понятий цепочку между двумя понятиями
 	// вопроса, когда прямой связи между ними нет (этап 101, D1).
 	//
-	// Указатель, а не bool: нужно отличать «не задано» (умолчание — включено)
-	// от осознанного false. Цепочка стоит десяток токенов и отвечает на вопрос
-	// «как связаны X и Y» прямо, вместо того чтобы модель звала graph_path.
-	Chain *bool `toml:"chain"`
+	// **Умолчание — false, по замеру D1б (09.09.2026):** слепое сравнение
+	// ответов с цепочкой и без неё на 26 вопросах о связях дало 6 против 12
+	// при 8 несогласных вердиктах, p = 0.24 — пользы цепочка не показала.
+	// В `/search` цепочка остаётся: там её читает человек, и вопрос «как
+	// связаны X и Y» она закрывает буквально.
+	Chain bool `toml:"chain"`
 	// Books — класть выдержки из книг к каждому вопросу (обычный RAG).
 	// По умолчанию выключено: восемь фрагментов это около двух тысяч токенов
 	// на вопрос, а модель с инструментами возьмёт их сама, когда они нужны.
@@ -812,6 +813,14 @@ type Graph struct {
 	// который цепочка между двумя понятиями вопроса не идёт (этап 101, D1).
 	// 0 — умолчание (500), отрицательное — не запрещать.
 	ChainHubLimit int `toml:"chain_hub_limit"`
+
+	// WeightsByOrigins — веса связей в разбиении тем считать по источникам,
+	// а не по кускам: соседние куски одной книги перекрываются на треть, и
+	// фраза из перекрытия подтверждает связь дважды (этап 101, Г9: 16%
+	// подтверждений графа books — такие копии). Умолчание false: смена
+	// перестраивает темы у пятой части понятий, и после неё нужны
+	// --graph-communities и описания изменившихся тем (карта).
+	WeightsByOrigins bool `toml:"weights_by_origins"`
 
 	// Groups — как применять группы понятий в поиске: "union" (объединять
 	// выдачу), "expand" (расширять запрос), "off". Пусто — "off". Ключ
@@ -1587,8 +1596,15 @@ func validateGraphNodes(section string, nodes []GraphNode) error {
 // С этапа 91 (R3) это единственный путь от настроек к поведению графа:
 // пакет graph глобалов не держит, правила передаются в graph.Open и живут
 // в открытом графе. Два графа с разными правилами в одном процессе — норма.
-// ChainOn — класть ли цепочку в карту понятий. Не задано — да.
-func (m Mix) ChainOn() bool { return m.Chain == nil || *m.Chain }
+// EmbedFallback — сервер для эмбеддера, когда kb.embed_url не задан:
+// первый сервер конфига. Одно место вместо восьми одинаковых блоков
+// в командах обслуживания.
+func (c *Config) EmbedFallback() string {
+	if len(c.Servers) > 0 {
+		return c.Servers[0].URL
+	}
+	return ""
+}
 
 func (g Graph) Rules() graph.Rules {
 	// Режим групп: выключен, если groups_enabled=false, иначе — что задано.
@@ -1597,18 +1613,19 @@ func (g Graph) Rules() graph.Rules {
 		mode = graph.GroupOff
 	}
 	return graph.Rules{
-		Name:           g.Name,
-		StemMinLen:     g.StemMinLen,
-		StemMinBooks:   g.StemMinBooks,
-		EntryStopWords: g.EntryStopWords,
-		SenseTie:       g.SenseTie,
-		SenseMargin:    g.SenseMargin,
-		VectorAliases:  g.VectorAliases,
-		MaxEvidences:   g.MaxEvidences,
-		ChainHubLimit:  g.ChainHubLimit,
-		Groups:         mode,
-		MergesOff:      g.MergesEnabled != nil && !*g.MergesEnabled,
-		Format:         g.Format,
+		Name:             g.Name,
+		StemMinLen:       g.StemMinLen,
+		StemMinBooks:     g.StemMinBooks,
+		EntryStopWords:   g.EntryStopWords,
+		SenseTie:         g.SenseTie,
+		SenseMargin:      g.SenseMargin,
+		VectorAliases:    g.VectorAliases,
+		MaxEvidences:     g.MaxEvidences,
+		ChainHubLimit:    g.ChainHubLimit,
+		WeightsByOrigins: g.WeightsByOrigins,
+		Groups:           mode,
+		MergesOff:        g.MergesEnabled != nil && !*g.MergesEnabled,
+		Format:           g.Format,
 	}
 }
 

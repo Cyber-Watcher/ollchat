@@ -10,7 +10,7 @@ func TestLooksLikeTOC(t *testing.T) {
 		t.Error("оглавление не распознано")
 	}
 	// Абзац по делу: год или версия на конце строки встречаются, но редко —
-	// на настоящих кусках 0–10% строк (замер 07.09.2026, privatescripts/tocprobe),
+	// на настоящих кусках 0–10% строк (замер 07.09.2026 пробником по коллекции),
 	// у оглавлений 59–70%.
 	prose := "CoreDNS is powered by plugins, and you read a CoreDNS configuration\n" +
 		"from the top down. The Corefile lives in a ConfigMap since Kubernetes 1.11\n" +

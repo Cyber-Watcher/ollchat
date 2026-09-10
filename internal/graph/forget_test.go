@@ -69,8 +69,8 @@ func TestForgetChunksRemovesTracesAndKeepsIDs(t *testing.T) {
 	if g2.Edges().Count() != 1 {
 		t.Errorf("связей %d, ожидалась 1", g2.Edges().Count())
 	}
-	if m, ok := g2.Progress().MarkOf(toc); !ok || m != MarkSkipped {
-		t.Errorf("отметка оглавления %v %v, ожидался MarkSkipped", m, ok)
+	if m, ok := g2.Progress().MarkOf(toc); !ok || m != MarkService {
+		t.Errorf("отметка оглавления %v %v, ожидался MarkService", m, ok)
 	}
 	if m, _ := g2.Progress().MarkOf(prose); m != MarkDone {
 		t.Errorf("отметка обычного куска сбита: %v", m)

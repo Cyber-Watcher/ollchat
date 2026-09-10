@@ -349,8 +349,8 @@ func TestBuildSkipsTableOfContents(t *testing.T) {
 	}
 	for _, ord := range []uint32{0, 5} {
 		key := ChunkKey{Doc: src.chunks[ord].Doc, Ord: src.chunks[ord].Ord}
-		if mark, ok := g.Progress().MarkOf(key); !ok || mark != MarkSkipped {
-			t.Errorf("оглавление %v не помечено пропущенным: %v %v", key, mark, ok)
+		if mark, ok := g.Progress().MarkOf(key); !ok || mark != MarkService {
+			t.Errorf("оглавление %v не помечено служебным: %v %v", key, mark, ok)
 		}
 	}
 }
@@ -400,5 +400,21 @@ func TestBuildBooksAndFolderTogether(t *testing.T) {
 	}
 	if res.Done != 3 {
 		t.Fatalf("разобрано %d, ожидалось 3: книга из другого каталога не в счёт", res.Done)
+	}
+}
+
+// Связывание новых имён на рабочем графе — отказ до первого запроса к модели:
+// упоминания уходят чужим узлам необратимо, а рабочий граф — недели карты.
+func TestLinkNewRefusedOnProductionGraph(t *testing.T) {
+	g, _ := graph(t)
+	asked := 0
+	m := &model{answer: func(int) (string, error) { asked++; return goodAnswer, nil }}
+	_, err := Build(context.Background(), chunksFor(2, "/AI/к.pdf"), g, m,
+		BuildOpts{Workers: 1, Link: &LinkOpts{}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "опытного графа") {
+		t.Fatalf("ожидался отказ для рабочего графа, получено %v", err)
+	}
+	if asked != 0 {
+		t.Fatalf("модель спрашивали %d раз до отказа", asked)
 	}
 }

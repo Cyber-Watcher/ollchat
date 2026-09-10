@@ -168,13 +168,9 @@ type VecWriter struct {
 //
 // from — с какого куска продолжать. Обычно это Count() из прежних сведений;
 // ноль означает пересчёт с нуля, и тогда прежний файл усекается.
-func CreateVecWriter(dir, model string, dim, from int) (*VecWriter, error) {
-	return CreateVecWriterWith(dir, model, dim, from, false)
-}
-
-// CreateVecWriterWith — то же с записью в паспорт, считались ли векторы
-// с шапкой «книга · страница» (kb.embed_header).
-func CreateVecWriterWith(dir, model string, dim, from int, header bool) (*VecWriter, error) {
+// header пишется в паспорт: считались ли векторы с шапкой «книга · страница»
+// (kb.embed_header), чтобы доливка другой мерой была видна до счёта.
+func CreateVecWriter(dir, model string, dim, from int, header bool) (*VecWriter, error) {
 	if dim <= 0 {
 		return nil, errors.New("размерность вектора не может быть нулевой")
 	}
@@ -314,7 +310,7 @@ func copyVectors(src *Vectors, dstDir string, keep []int) (VecMeta, error) {
 	if src == nil || len(keep) == 0 {
 		return VecMeta{}, nil
 	}
-	w, err := CreateVecWriterWith(dstDir, src.meta.Model, src.meta.Dim, 0, src.meta.Header)
+	w, err := CreateVecWriter(dstDir, src.meta.Model, src.meta.Dim, 0, src.meta.Header)
 	if err != nil {
 		return VecMeta{}, err
 	}

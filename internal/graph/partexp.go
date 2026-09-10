@@ -23,9 +23,13 @@ type PartitionExperiment struct {
 	Median    int   // медианный размер темы
 	Sizes     []int // размеры по убыванию, первые двадцать
 
-	// Ниже — что отсёк порог веса (0 у опыта без порога).
-	CutPairs int // пар связей, не дотянувших до порога
-	CutNodes int // понятий, оставшихся после отсечения без единой связи
+	// Ниже — что сделали порог и ослабление (0 у опыта без них).
+	CutPairs      int // пар связей, не дотянувших до порога
+	CutNodes      int // понятий, оставшихся после отсечения без единой связи
+	WeakenedPairs int // пар с одним подтверждением, ослабленных OnceFactor
+
+	// Assign — понятие → номер сообщества; только при KeepAssignment.
+	Assign map[uint32]uint32
 }
 
 // PartitionOpts — условия опыта с разбиением.
@@ -35,9 +39,9 @@ type PartitionOpts struct {
 	// Resolution — та же, что у рабочего разбиения; 0 — умолчание.
 	Resolution float64
 
-	// MinWeight — порог веса ПАРЫ понятий: связи с меньшим весом в разбиении
-	// не участвуют. Вес пары — сумма подтверждений, поэтому MinWeight = 2
-	// означает «связь, встреченная только в одном куске, тему не образует».
+	// MinWeight — порог на число подтверждений ПАРЫ понятий: пары с меньшим
+	// числом в разбиении не участвуют. MinWeight = 2 означает «связь,
+	// встреченная только в одном куске, тему не образует».
 	//
 	// **Откуда.** «Neo4j: The Definitive Guide» (2025, стр. 368) перед поиском
 	// сообществ строит отдельный граф со-встречаемости с порогом
@@ -47,6 +51,16 @@ type PartitionOpts struct {
 	// кусками. Порог отсекает шум — и вместе с ним редкие понятия, поэтому
 	// это опыт с замером, а не правка по книге (этап 101, Г2).
 	MinWeight float64
+
+	// ByOrigins — считать вес пары по ИСТОЧНИКАМ, а не по кускам: соседние
+	// куски одной книги (номера подряд) дают одно подтверждение, а не два
+	// (этап 101, Г9: 96% таких пар — копия фразы из зоны перекрытия). Порог
+	// и OnceFactor при этом смотрят на число источников.
+	ByOrigins bool
+
+	// KeepAssignment — вернуть разбиение по узлам (Assign), а не только размеры:
+	// нужно, чтобы сравнить опытное разбиение с рабочим по составу тем.
+	KeepAssignment bool
 
 	// OnceFactor — множитель веса для пар, подтверждённых ровно один раз:
 	// мягкая замена порогу. 0 — не трогать.
@@ -59,31 +73,40 @@ type PartitionOpts struct {
 	OnceFactor float64
 }
 
-// ExperimentPartition считает разбиение с заданными весами видов связей.
+// ExperimentPartition считает разбиение при заданных условиях, ничего не записывая.
 //
-// weights — множитель веса для вида связи: 0 исключает вид вовсе, 0.5 делает
+// Weights — множитель веса для вида связи: 0 исключает вид вовсе, 0.5 делает
 // его вдвое менее важным, отсутствие вида в карте означает «как есть».
 // Промежуточный вариант нужен потому, что исключение — не единственный выбор:
 // связь «связано» слабее прочих, но у 19% понятий она единственная, и выбросив
 // её, мы выбрасываем сами понятия.
 //
-// resolution — та же, что у рабочего разбиения; 0 — умолчание.
-func (g *Graph) ExperimentPartition(weights map[uint8]float64, resolution float64) PartitionExperiment {
-	return g.ExperimentPartitionWith(PartitionOpts{Weights: weights, Resolution: resolution})
-}
-
-// ExperimentPartitionWith — то же с полным набором условий, включая порог веса.
-func (g *Graph) ExperimentPartitionWith(o PartitionOpts) PartitionExperiment {
+// Порог MinWeight и множитель OnceFactor смотрят на ЧИСЛО ПОДТВЕРЖДЕНИЙ пары,
+// а не на её вес после множителей видов: одиночное «связано» при множителе 0.5
+// весит 0.5, а два «связано» — 1.0, и решать по весу, «одиночная ли пара»,
+// значило бы перепутать их местами (ревизия 10.09.2026).
+func (g *Graph) ExperimentPartition(o PartitionOpts) PartitionExperiment {
 	weights, resolution := o.Weights, o.Resolution
 
 	adj := map[uint32]map[uint32]float64{}
+	conf := map[uint32]map[uint32]int{} // подтверждений у пары, зеркально
 	add := func(a, b uint32, w float64) {
 		if adj[a] == nil {
 			adj[a] = map[uint32]float64{}
+			conf[a] = map[uint32]int{}
 		}
 		adj[a][b] += w
+		conf[a][b]++
 	}
 	edges := 0
+	// По источникам: записи одной пары группируются по книге, и соседние куски
+	// схлопываются в один источник; вес источника — вес его первой записи.
+	type pk struct{ a, b uint32 }
+	type rec struct {
+		ord uint32
+		w   float64
+	}
+	byPair := map[pk]map[uint32][]rec{}
 	for _, ent := range g.Entities().Live() {
 		for _, ed := range g.Edges().Of(ent.ID) {
 			w := float64(ed.Weight)
@@ -96,18 +119,42 @@ func (g *Graph) ExperimentPartitionWith(o PartitionOpts) PartitionExperiment {
 				}
 				w *= k
 			}
-			add(ed.Src, ed.Dst, w)
-			add(ed.Dst, ed.Src, w)
+			if !o.ByOrigins {
+				add(ed.Src, ed.Dst, w)
+				add(ed.Dst, ed.Src, w)
+				edges++
+				continue
+			}
+			k := pk{ed.Src, ed.Dst}
+			if k.a > k.b {
+				k.a, k.b = k.b, k.a
+			}
+			if byPair[k] == nil {
+				byPair[k] = map[uint32][]rec{}
+			}
+			byPair[k][ed.Evidence.Doc] = append(byPair[k][ed.Evidence.Doc], rec{ed.Evidence.Ord, w})
 			edges++
 		}
 	}
-	// Порог применяется к сумме подтверждений пары, а не к отдельной записи:
-	// связь, встреченная в трёх кусках, — это три записи весом 1, и отсекать
-	// их поодиночке значило бы отсечь её целиком.
-	if o.OnceFactor > 0 {
-		weakenOnce(adj, o.OnceFactor)
+	for k, docs := range byPair {
+		for _, recs := range docs {
+			sort.Slice(recs, func(i, j int) bool { return recs[i].ord < recs[j].ord })
+			for i, r := range recs {
+				if i > 0 && recs[i].ord == recs[i-1].ord+1 {
+					continue // сосед предыдущего: та же фраза из перекрытия
+				}
+				add(k.a, k.b, r.w)
+				add(k.b, k.a, r.w)
+				// conf считает источники, а не записи: add увеличил его на запись,
+				// и это верно — здесь каждая запись и есть источник.
+			}
+		}
 	}
-	cutPairs, cutNodes := cutWeak(adj, o.MinWeight)
+	out := PartitionExperiment{Edges: edges}
+	if o.OnceFactor > 0 {
+		out.WeakenedPairs = weakenOnce(adj, conf, o.OnceFactor)
+	}
+	out.CutPairs, out.CutNodes = cutWeak(adj, conf, o.MinWeight)
 
 	order := make([]uint32, 0, len(adj))
 	for id := range adj {
@@ -124,8 +171,10 @@ func (g *Graph) ExperimentPartitionWith(o PartitionOpts) PartitionExperiment {
 	for _, c := range comm {
 		sizes[c]++
 	}
-	out := PartitionExperiment{Nodes: len(order), Edges: edges, Themes: len(sizes),
-		CutPairs: cutPairs, CutNodes: cutNodes}
+	out.Nodes, out.Themes = len(order), len(sizes)
+	if o.KeepAssignment {
+		out.Assign = comm
+	}
 	all := make([]int, 0, len(sizes))
 	for _, n := range sizes {
 		all = append(all, n)
@@ -146,19 +195,20 @@ func (g *Graph) ExperimentPartitionWith(o PartitionOpts) PartitionExperiment {
 	return out
 }
 
-// cutWeak убирает из матрицы смежности пары легче порога, а следом — понятия,
-// оставшиеся вовсе без связей. Возвращает, сколько пар и понятий отсечено.
+// cutWeak убирает из матрицы смежности пары с числом подтверждений меньше
+// порога, а следом — понятия, оставшиеся вовсе без связей. Возвращает,
+// сколько пар и понятий отсечено.
 //
-// Порог считается по весу пары (сумме подтверждений), обе стороны удаляются
-// вместе: односторонний остаток сделал бы граф несимметричным, и Louvain
-// посчитал бы по нему разные степени у двух концов одной связи.
-func cutWeak(adj map[uint32]map[uint32]float64, min float64) (pairs, nodes int) {
+// Обе стороны удаляются вместе: односторонний остаток сделал бы граф
+// несимметричным, и Louvain посчитал бы по нему разные степени у двух концов
+// одной связи.
+func cutWeak(adj map[uint32]map[uint32]float64, conf map[uint32]map[uint32]int, min float64) (pairs, nodes int) {
 	if min <= 0 {
 		return 0, 0
 	}
 	for a, nbs := range adj {
-		for b, w := range nbs {
-			if w < min {
+		for b := range nbs {
+			if float64(conf[a][b]) < min {
 				delete(nbs, b)
 				if a < b {
 					pairs++
@@ -176,18 +226,19 @@ func cutWeak(adj map[uint32]map[uint32]float64, min float64) (pairs, nodes int) 
 }
 
 // weakenOnce умножает на k вес пар, подтверждённых ровно один раз.
+// Возвращает, сколько пар ослаблено.
 //
 // Обе стороны правятся вместе — по той же причине, что и в cutWeak: половина
 // правки сделала бы граф несимметричным.
-func weakenOnce(adj map[uint32]map[uint32]float64, k float64) int {
+func weakenOnce(adj map[uint32]map[uint32]float64, conf map[uint32]map[uint32]int, k float64) int {
 	if k <= 0 || k >= 1 {
 		return 0
 	}
 	n := 0
 	for a, nbs := range adj {
 		for b, w := range nbs {
-			if w == 1 {
-				nbs[b] = k
+			if conf[a][b] == 1 {
+				nbs[b] = w * k
 				if a < b {
 					n++
 				}

@@ -33,10 +33,15 @@ type judge struct{ answer string }
 func (j judge) Model() string                                          { return "судья" }
 func (j judge) Extract(_ context.Context, _, _ string) (string, error) { return j.answer, nil }
 
-// linkGraph — граф с понятием «Garbage collection» и его вектором.
+// linkGraph — ОПЫТНЫЙ граф с понятием «Garbage collection» и его вектором:
+// связывание на рабочем графе Build отказывает (TestLinkNewRefusedOnProductionGraph).
 func linkGraph(t *testing.T, emb nameEmbedder) *Graph {
 	t.Helper()
-	g, _ := graph(t)
+	g, err := CreateKind(collection(t), "", 1000, Rules{}, CreateOpts{Kind: KindExperimental})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
 	id, _, err := g.Entities().Add("Garbage collection", TypeConcept)
 	if err != nil || id != 1 {
 		t.Fatalf("Add: %d %v", id, err)
@@ -197,5 +202,41 @@ func TestLinkQueueAndHumanDecisions(t *testing.T) {
 	}
 	if got := LinkQueueSize(g2.Dir()); got != 0 {
 		t.Fatalf("LinkQueueSize = %d", got)
+	}
+}
+
+// Спорные пары ночного разбора двойников встают в очередь человеку из TSV
+// арбитра: берутся только «?», уже разобранная пара второй раз не дописывается.
+func TestQueueDoubtsTSV(t *testing.T) {
+	dir := t.TempDir()
+	tsv := "вердикт\tимя_a\tid_a\tid_b\tимя_b\tcos\tпричина\n" +
+		"?\tСборщик мусора\t2\t1\tGarbage collection\t0.91\tперевод или род и вид\n" +
+		"ДА\tgoroutines\t4\t3\tgoroutine\t0.97\tформы слова\n" +
+		"?\tKV cache\t6\t5\tKV-кэш\t0.88\t" + strings.Repeat("длинная причина ", 20) + "\n"
+	n, err := QueueDoubtsTSV(dir, strings.NewReader(tsv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("в очередь %d пар, ожидалось 2", n)
+	}
+	if again, err := QueueDoubtsTSV(dir, strings.NewReader(tsv)); err != nil || again != 0 {
+		t.Fatalf("повторный вызов: %d, %v — пары уже в журнале", again, err)
+	}
+	if got := LinkQueueSize(dir); got != 2 {
+		t.Fatalf("LinkQueueSize = %d, ожидалось 2", got)
+	}
+	l, err := openLinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := l.Queue()
+	if len(q) != 2 || q[0].Norm != Normalize("Сборщик мусора") || q[0].From != 2 || q[0].Cand != 1 ||
+		q[0].CandName != "Garbage collection" || q[0].Cos != 0.91 || q[0].By != LinkByJudge ||
+		q[0].Source != LinkFromDoubles || q[0].Why != "перевод или род и вид" || q[0].Chunk != (ChunkKey{}) {
+		t.Fatalf("очередь: %+v", q)
+	}
+	if got := len([]rune(q[1].Why)); got != 120 {
+		t.Fatalf("причина не обрезана до 120 знаков: %d", got)
 	}
 }

@@ -201,7 +201,7 @@ func Build(question string, d Deps, s Settings) Result {
 			"чего в них нет — говори от себя и так и помечай.\n\n"
 	}
 	b.WriteString(head)
-	b.WriteString(graph.Render(nil, res, graph.RenderOpts{ForModel: true, Collection: s.Collection}))
+	b.WriteString(graph.Render(nil, res, graph.RenderOpts{Collection: s.Collection}))
 
 	// Цепочка между двумя понятиями вопроса — то же, что показывает `/search`
 	// (этап 101, D1). Модель может добыть её сама вызовом graph_path, но это
@@ -210,11 +210,13 @@ func Build(question string, d Deps, s Settings) Result {
 	// Подтверждения (книга и страница) намеренно не печатаются: в карте понятий
 	// цитат нет вовсе, и строка со страницей провоцировала бы ссылаться на то,
 	// что модель не читала. За цитатами — kb_search, так и написано в шапке.
-	if chain := find.Chain(g, res.Entities, res.Relations, find.Opts{}); s.Chain && len(chain) > 0 {
-		b.WriteString("\n")
-		b.WriteString(graph.RenderPath(nil, chain[0].From, chain[len(chain)-1].To, chain, true,
-			graph.RenderOpts{ForModel: true, Collection: s.Collection}))
-		out.Chain = len(chain)
+	if s.Chain {
+		if chain := find.Chain(g, res.Entities, res.Relations, find.Opts{}); len(chain) > 0 {
+			b.WriteString("\n")
+			b.WriteString(graph.RenderPath(nil, chain[0].From, chain[len(chain)-1].To, chain, true,
+				graph.RenderOpts{Collection: s.Collection}))
+			out.Chain = len(chain)
+		}
 	}
 
 	if want > 0 {

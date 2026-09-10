@@ -100,17 +100,6 @@ func (d *DroppedBooks) Count() int {
 	return len(d.set)
 }
 
-// Books — номера отброшенных книг.
-func (d *DroppedBooks) Books() []uint32 {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	out := make([]uint32, 0, len(d.set))
-	for b := range d.set {
-		out = append(out, b)
-	}
-	return out
-}
-
 // add дозаписывает решение и обновляет множество.
 func (d *DroppedBooks) add(r DropRec) error {
 	d.mu.Lock()

@@ -72,10 +72,7 @@ func EmbedFollow(stdout io.Writer, cfg *config.Config, name string, o EmbedFollo
 	if o.Node != "" {
 		eo.URL = o.Node
 	}
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	emb := kbembed.New(eo, fallback, 5*time.Minute, nil)
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)

@@ -88,7 +88,7 @@ func TestTwoFormatsInOneProcess(t *testing.T) {
 	coll := t.TempDir()
 
 	// Рабочий граф — тем форматом, которым пишутся все нынешние.
-	g1, err := CreateKind(coll, "books", 100, KindProduction, "", Rules{})
+	g1, err := CreateKind(coll, "books", 100, Rules{}, CreateOpts{Kind: KindProduction})
 	if err != nil {
 		t.Fatalf("рабочий граф не создался: %v", err)
 	}

@@ -33,16 +33,16 @@ type FlagTOCResult struct {
 	WorstN     int
 	WorstTotal int
 
-	// FlaggedRefs — сколько кусков помечено списком литературы или
-	// выходными данными (входит в общий счёт Flagged не отдельно).
+	// FlaggedRefs — сколько кусков помечено списком литературы или выходными
+	// данными. В Flagged не входит: тот считает только оглавления.
 	FlaggedRefs int
 }
 
 // FlagTOC ставит признаки СЛУЖЕБНОГО текста: оглавление (LooksLikeTOC) и
 // список литературы или выходные данные (LooksLikeRefs, LooksLikeColophon,
-// этап 101). Снимает их там,
-// где эвристика больше не срабатывает (она может уточняться). dry — только
-// посчитать, файл не трогать. Повторный проход ничего не меняет.
+// этап 101). Снимает их там, где эвристика больше не срабатывает (она может
+// уточняться). dry — только посчитать, файл не трогать. Повторный проход
+// ничего не меняет.
 func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, total int)) (FlagTOCResult, error) {
 	var res FlagTOCResult
 	if c.store == nil {

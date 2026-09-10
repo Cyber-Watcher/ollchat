@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,6 +187,99 @@ func (l *Links) Judged() []LinkRec {
 // Add дописывает решение — из окна разбора или из ночного разбора двойников.
 func (l *Links) Add(r LinkRec) error { return l.add(r) }
 
+// QueueDoubtsTSV кладёт в очередь человеку спорные пары ночного разбора
+// двойников: читает TSV арбитра (заголовок и колонки «вердикт», «имя_a»,
+// «id_a», «id_b», «имя_b», «cos», «причина»; разделитель — табуляция) и
+// дописывает в links.jsonl каталога графа строки с вердиктом «?». Пара,
+// о которой в журнале уже есть решение с любым вердиктом, не дописывается:
+// иначе очередь росла бы на каждый ночной прогон. Возвращает число
+// дописанных пар. Журнал открывается на время вызова и закрывается.
+//
+// Раньше эти строки писал скрипт разбора двойников напрямую, с norm через
+// .lower() вместо Normalize — и Links.Linked такое имя не находил.
+func QueueDoubtsTSV(graphDir string, r io.Reader) (queued int, err error) {
+	l, err := openLinks(graphDir)
+	if err != nil {
+		return 0, err
+	}
+	cr := csv.NewReader(r)
+	cr.Comma = '\t'
+	cr.LazyQuotes = true
+	cr.FieldsPerRecord = -1
+	head, err := cr.Read()
+	if err != nil {
+		return 0, fmt.Errorf("заголовок TSV: %w", err)
+	}
+	col := map[string]int{}
+	for i, h := range head {
+		col[strings.TrimSpace(strings.TrimPrefix(h, "\ufeff"))] = i
+	}
+	for _, need := range []string{"вердикт", "имя_a", "id_a", "id_b", "имя_b", "cos"} {
+		if _, ok := col[need]; !ok {
+			return 0, fmt.Errorf("в TSV нет колонки %q (есть: %s)", need, strings.Join(head, ", "))
+		}
+	}
+	field := func(row []string, name string) string {
+		i, ok := col[name]
+		if !ok || i >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(row[i])
+	}
+	for line := 2; ; line++ {
+		row, err := cr.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return queued, fmt.Errorf("строка %d: %w", line, err)
+		}
+		if field(row, "вердикт") != LinkDoubt {
+			continue
+		}
+		name := field(row, "имя_a")
+		from, err := strconv.ParseUint(field(row, "id_a"), 10, 32)
+		if err != nil {
+			return queued, fmt.Errorf("строка %d: id_a: %w", line, err)
+		}
+		cand, err := strconv.ParseUint(field(row, "id_b"), 10, 32)
+		if err != nil {
+			return queued, fmt.Errorf("строка %d: id_b: %w", line, err)
+		}
+		cos, err := strconv.ParseFloat(field(row, "cos"), 64)
+		if err != nil {
+			return queued, fmt.Errorf("строка %d: cos: %w", line, err)
+		}
+		rec := LinkRec{Norm: Normalize(name), Name: name, From: uint32(from), Cand: uint32(cand),
+			CandName: field(row, "имя_b"), Cos: cos, Verdict: LinkDoubt, By: LinkByJudge,
+			Source: LinkFromDoubles, Why: cutRunes(field(row, "причина"), 120)}
+		// Пара уже разобрана — арбитром, человеком или прошлым прогоном.
+		// Прежние записи скрипта несут norm в нижнем регистре без Normalize,
+		// поэтому сверяются оба написания.
+		lower := LinkRec{Norm: strings.ToLower(name), Cand: rec.Cand}
+		l.mu.RLock()
+		_, seenNorm := l.last[rec.pairKey()]
+		_, seenLower := l.last[lower.pairKey()]
+		l.mu.RUnlock()
+		if seenNorm || seenLower {
+			continue
+		}
+		if err := l.Add(rec); err != nil {
+			return queued, err
+		}
+		queued++
+	}
+	return queued, nil
+}
+
+// cutRunes обрезает строку до n знаков, не разрубая многобайтную букву.
+func cutRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
 // LinkQueueSize — сколько пар ждёт человека, по файлу журнала, без открытия
 // графа: для подсказки при запуске.
 func LinkQueueSize(graphDir string) int {
@@ -311,8 +407,11 @@ func (g *Graph) linkNew(ctx context.Context, name, typ string, chunk ChunkKey, o
 		return 0, false, nil
 	}
 	vecs, err := o.Embedder.Embed(ctx, []string{name})
-	if err != nil || len(vecs) != 1 {
+	if err != nil {
 		return 0, false, err
+	}
+	if len(vecs) != 1 {
+		return 0, false, fmt.Errorf("эмбеддер вернул %d векторов на одно имя, ожидался один", len(vecs))
 	}
 	query := kb.Quantize(vecs[0])
 	var cands []senseHit

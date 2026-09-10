@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -197,7 +198,7 @@ type Disk struct {
 
 // JournalLine — строка журнала, попавшая под известную беду.
 type JournalLine struct {
-	Kind string `json:"kind"` // parallel, cuda, oom, unload, request
+	Kind string `json:"kind"` // parallel, cuda, oom, unload
 	Text string `json:"text"`
 }
 
@@ -223,7 +224,11 @@ type Report struct {
 	Ollama   *Proc         `json:"ollama_proc,omitempty"`
 	Disk     *Disk         `json:"disk,omitempty"`
 	Journal  []JournalLine `json:"journal,omitempty"`
-	Sessions []string      `json:"sessions,omitempty"`
+	// Requests — сколько запросов `POST /api/` пришло к службе за окно
+	// журнала. Сами строки о запросах в Journal не идут: их тысячи, а нужно
+	// от них одно число — была ли у службы чужая работа только что.
+	Requests int      `json:"requests,omitempty"`
+	Sessions []string `json:"sessions,omitempty"`
 
 	// Missing — что не удалось собрать. Пустой раздел без причины —
 	// это утверждение «там ничего нет», и оно должно быть правдой.
@@ -388,6 +393,9 @@ func (r *Report) collectJournal(ctx context.Context, o Opts) {
 		if line = strings.TrimSpace(line); line == "" {
 			continue
 		}
+		if strings.Contains(line, "POST /api/") {
+			r.Requests++
+		}
 		if kind := journalKind(line); kind != "" {
 			r.Journal = append(r.Journal, JournalLine{Kind: kind, Text: line})
 		}
@@ -437,9 +445,18 @@ func (r *Report) collectSessions(ctx context.Context, o Opts) {
 	}
 }
 
+// currentUser — под кем идёт процесс. Сначала окружение, затем учётная
+// запись по uid: под systemd-таймером и cron переменные USER и LOGNAME
+// бывают не заданы, и без запасного пути свои сеансы считались бы чужими.
 func currentUser() string {
 	if u := os.Getenv("USER"); u != "" {
 		return u
 	}
-	return os.Getenv("LOGNAME")
+	if u := os.Getenv("LOGNAME"); u != "" {
+		return u
+	}
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return ""
 }

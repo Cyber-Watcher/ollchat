@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -246,32 +245,13 @@ type senseHit struct {
 // не работает — у чужой пары близость бывает выше, чем у своей.
 // margin — насколько выше середины верхушки должно быть понятие (Rules.SenseMargin).
 func (v *EntityVectors) linkBySense(query []int8, limit int, margin float64) []senseHit {
-	if !v.Ready() || len(query) != v.Dim() || limit <= 0 {
+	if limit <= 0 {
 		return nil
 	}
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-
 	// Верхушка вчетверо шире запрошенного: середина нужна для сравнения,
-	// а по короткому списку её не посчитать.
-	wide := limit * 4
-	all := make([]senseHit, 0, v.meta.Count)
-	for id := 1; id <= v.meta.Count; id++ {
-		vec := v.at(uint32(id))
-		if len(vec) == 0 {
-			continue
-		}
-		all = append(all, senseHit{ID: uint32(id), Score: kb.Cosine(vec, query)})
-	}
-	sort.Slice(all, func(a, b int) bool {
-		if all[a].Score != all[b].Score {
-			return all[a].Score > all[b].Score
-		}
-		return all[a].ID < all[b].ID
-	})
-	if len(all) > wide {
-		all = all[:wide]
-	}
+	// а по короткому списку её не посчитать. Перебор и порядок (score, id) —
+	// общие с nearest (link.go), здесь только относительный отбор.
+	all := v.nearest(query, limit*4)
 	if len(all) == 0 {
 		return nil
 	}
@@ -361,19 +341,35 @@ func (g *Graph) SaveEntityVectors(model, digest string, dim int, data []int8) er
 	if dim <= 0 || len(data) == 0 || len(data)%dim != 0 {
 		return fmt.Errorf("векторы понятий: длина %d не делится на размерность %d", len(data), dim)
 	}
+	return g.saveEntityVectors(model, digest, dim, data, nil)
+}
+
+// saveEntityVectors — та же запись с указанием, какие векторы посчитаны
+// именно сейчас: fresh — номера понятий, nil — все.
+//
+// Отпечатки текстов (vecstale.go) обновляются ТОЛЬКО у посчитанных. Досчёт
+// хвостом кладёт рядом со старыми векторами новые, и если бы отпечатки
+// переписывались по всем понятиям, вектор, посчитанный неделю назад от одного
+// слова, получил бы отпечаток сегодняшнего текста с тремя синонимами —
+// и «устаревшим» не считался бы никогда. Ровно так и было до 10.09.2026:
+// ночная докатка звала --graph-embed перед --graph-embed-stale, и второй
+// шаг каждую ночь находил ноль.
+//
+// Ошибка записи отпечатков не отменяет посчитанного: векторы важнее,
+// а без отпечатков просто не сработает дешёвый пересчёт.
+func (g *Graph) saveEntityVectors(model, digest string, dim int, data []int8, fresh []uint32) error {
+	if dim <= 0 || len(data) == 0 || len(data)%dim != 0 {
+		return fmt.Errorf("векторы понятий: длина %d не делится на размерность %d", len(data), dim)
+	}
 	if err := g.vecs.save(model, digest, dim, data); err != nil {
 		return err
 	}
-	// Рядом с векторами — отпечатки текстов, от которых они посчитаны: по ним
-	// потом видно, у каких понятий текст успел измениться (vecstale.go).
-	// Ошибка записи отпечатков не отменяет посчитанного: векторы важнее,
-	// а без отпечатков просто не сработает дешёвый пересчёт.
 	texts, err := g.embedTexts()
 	if err == nil {
 		if len(texts) > len(data)/dim {
 			texts = texts[:len(data)/dim]
 		}
-		_ = saveStamps(g.dir, texts)
+		_ = saveStamps(g.dir, mergeStamps(loadStamps(g.dir), texts, fresh))
 	}
 	return nil
 }

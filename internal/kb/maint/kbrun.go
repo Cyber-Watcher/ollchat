@@ -243,7 +243,7 @@ func Refresh(stdout io.Writer, cfg *config.Config, name string, dry bool) error 
 		return nil
 	}
 	fmt.Fprintln(stdout)
-	return Embed(stdout, cfg, name, dry)
+	return Embed(stdout, cfg, name, EmbedRun{Dry: dry})
 }
 
 // EstimateTimeout — сколько ждать замер скорости при сухом прогоне.
@@ -252,14 +252,20 @@ func Refresh(stdout io.Writer, cfg *config.Config, name string, dry bool) error 
 // и вправе получить ответ быстрее, чем за минуту.
 const EstimateTimeout = 60 * time.Second
 
-func Embed(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
-	return EmbedWith(stdout, cfg, name, dry, false)
+// EmbedRun — ключи команды --kb-embed.
+type EmbedRun struct {
+	Dry bool // только оценить объём, не считать
+	// Recount — пересчитать все векторы заново (--kb-recount). Единственный
+	// способ сменить kb.embed_header у коллекции с посчитанными векторами.
+	Recount bool
+	// Plain — считать БЕЗ шапки «книга · страница», чем бы ни была настройка
+	// (--kb-embed-plain). Нужен замеру skew (этап 101, Г8); в работе шапкой
+	// распоряжается настройка.
+	Plain bool
 }
 
-// EmbedWith — то же с возможностью перебить настройку `kb.embed_header`:
-// plain = true считает векторы БЕЗ шапки, чем бы ни была настройка. Нужен замеру
-// skew (этап 101, Г8), в работе шапкой распоряжается настройка.
-func EmbedWith(stdout io.Writer, cfg *config.Config, name string, dry, plain bool) error {
+func Embed(stdout io.Writer, cfg *config.Config, name string, run EmbedRun) error {
+	dry, plain := run.Dry, run.Plain
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -271,10 +277,7 @@ func EmbedWith(stdout io.Writer, cfg *config.Config, name string, dry, plain boo
 		return err
 	}
 	// Сервер эмбеддингов: свой из настроек, иначе первый сервер конфига.
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	timeout := 5 * time.Minute
 	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, timeout, nil)
 	if emb == nil {
@@ -285,7 +288,7 @@ func EmbedWith(stdout io.Writer, cfg *config.Config, name string, dry, plain boo
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	header := cfg.KB.EmbedHeader && !plain
-	opt := kb.EmbedOpts{Batch: cfg.KB.EmbedBatch, Workers: cfg.KB.EmbedWorkers, Header: header}
+	opt := kb.EmbedOpts{Batch: cfg.KB.EmbedBatch, Workers: cfg.KB.EmbedWorkers, Header: header, Recount: run.Recount}
 
 	// Доливка чужой мерой — тихая порча: часть коллекции посчитана с шапкой,
 	// часть без, и близости между ними чуть-чуть разного смысла. Поэтому

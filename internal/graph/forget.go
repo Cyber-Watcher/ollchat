@@ -96,15 +96,15 @@ func ForgetChunks(dir string, drop func(ChunkKey) bool, dry bool) (ForgetStats, 
 		st.Backups = append(st.Backups, edges.backup)
 	}
 
-	// Отметки: не убираем, а переводим в «пропущен» — иначе новая сборка
-	// разобрала бы кусок заново.
+	// Отметки: не убираем, а переводим в «служебный» — иначе новая сборка
+	// разобрала бы кусок заново. А снимут с него признак — возьмёт снова.
 	marks, err := rewriteBinaryMap(filepath.Join(dir, progressFile), 12, stamp, dry, func(b []byte) bool {
 		k := ChunkKey{Doc: binary.LittleEndian.Uint32(b[0:]), Ord: binary.LittleEndian.Uint32(b[4:])}
-		if !drop(k) || binary.LittleEndian.Uint32(b[8:]) == MarkSkipped {
+		if !drop(k) || binary.LittleEndian.Uint32(b[8:]) == MarkService {
 			return false
 		}
 		touched[k.Pack()] = true
-		binary.LittleEndian.PutUint32(b[8:], MarkSkipped)
+		binary.LittleEndian.PutUint32(b[8:], MarkService)
 		return true
 	})
 	if err != nil {

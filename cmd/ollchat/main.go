@@ -130,6 +130,8 @@ type cliFlags struct {
 	graphTuneBetas        *string
 	graphEmbedFollow      *string
 	graphEmbedStale       *string
+	graphQueueDoubts      *string
+	graphVerdicts         *string
 	graphEmbedNode        *string
 	graphEmbedEvery       *string
 	graphEmbedLimit       *int
@@ -240,7 +242,7 @@ func parseFlags() *cliFlags {
 	f.kbFlagTOC = flag.String("kb-flag-toc", "",
 		"пометить служебные куски в индексе без перенарезки — оглавления, списки литературы, выходные данные: --kb-flag-toc books (с --kb-dry-run — только посчитать)")
 	f.kbReindex = flag.String("kb-reindex", "", "перечитать книги коллекции заново: --kb-reindex books <путь>…")
-	f.kbRecnt = flag.Bool("kb-recount", false, "с --kb-years: перечитать год и там, где он уже стоит")
+	f.kbRecnt = flag.Bool("kb-recount", false, "с --kb-years: перечитать год и там, где он уже стоит; с --kb-embed: пересчитать все векторы заново (нужно после смены kb.embed_header)")
 	f.kbEmbedPlain = flag.Bool("kb-embed-plain", false,
 		"с --kb-embed: считать векторы БЕЗ шапки «книга · страница» — только для замера skew (этап 101, Г8)")
 
@@ -400,6 +402,9 @@ func parseFlags() *cliFlags {
 		"с --graph-resolve: выписать все пары в файл TSV")
 	f.graphEmbed = flag.String("graph-embed", "",
 		"посчитать векторы понятий графа — смысловой вход: --graph-embed books")
+	f.graphQueueDoubts = flag.String("graph-queue-doubts", "",
+		"положить спорные вердикты разбора двойников в очередь человеку: --graph-queue-doubts books --graph-verdicts verdicts.tsv")
+	f.graphVerdicts = flag.String("graph-verdicts", "", "с --graph-queue-doubts: файл вердиктов арбитра (TSV)")
 	f.graphEmbedStale = flag.String("graph-embed-stale", "",
 		"пересчитать векторы понятий, чей текст изменился после счёта: --graph-embed-stale books (с --kb-dry-run — только сказать сколько)")
 	f.graphEmbedFollow = flag.String("graph-embed-follow", "",
@@ -498,12 +503,15 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.kbRetitle != "":
 		return true, kmaint.Retitle(os.Stdout, cfg, *f.kbRetitle, *f.kbDry)
 	case *f.kbEmbed != "":
-		return true, kmaint.EmbedWith(os.Stdout, cfg, *f.kbEmbed, *f.kbDry, *f.kbEmbedPlain)
+		return true, kmaint.Embed(os.Stdout, cfg, *f.kbEmbed, kmaint.EmbedRun{Dry: *f.kbDry, Recount: *f.kbRecnt, Plain: *f.kbEmbedPlain})
 	case *f.graphBuild != "":
-		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, *f.graphFolder, *f.graphBookName,
-			*f.graphLimit, *f.graphWorkers,
-			*f.graphNewModel, *f.graphNewPrompt, *f.graphRedoEmpty, *f.graphLinkNew, *f.graphIgnoreBusy,
-			*f.graphLog, *f.graphKind, *f.graphNote)
+		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, gmaint.BuildRun{
+			Folder: *f.graphFolder, Book: *f.graphBookName,
+			Limit: *f.graphLimit, Workers: *f.graphWorkers,
+			AllowModelChange: *f.graphNewModel, AllowPromptChange: *f.graphNewPrompt,
+			RedoEmpty: *f.graphRedoEmpty, LinkNew: *f.graphLinkNew, IgnoreBusy: *f.graphIgnoreBusy,
+			LogPath: *f.graphLog, Kind: *f.graphKind, Note: *f.graphNote,
+		})
 	case *f.nodes:
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
@@ -571,7 +579,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			*f.graphGroupsMinCos, *f.graphGroupsMutual)
 
 	case *f.graphDropBook != "":
-		return true, gmaint.DropBook(os.Stdout, cfg, *f.graphDropBook, *f.graphBookName, *f.graphRestoreBook, *f.graphDropApply)
+		return true, gmaint.DropBook(os.Stdout, cfg, *f.graphDropBook, *f.graphBookName, gmaint.DropRun{Restore: *f.graphRestoreBook, Apply: *f.graphDropApply})
 
 	case *f.graphCompact != "":
 		return true, gmaint.Compact(os.Stdout, cfg, *f.graphCompact, *f.graphCompactCheck, *f.graphCompactForce)
@@ -582,6 +590,11 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.graphResolve != "":
 		return true, gmaint.Resolve(os.Stdout, cfg, *f.graphResolve, *f.graphResolveMinCos, *f.graphResolveMinCosMut, *f.graphResolveFull,
 			*f.graphResolveCross, *f.graphResolveShow, *f.graphResolveOut)
+	case *f.graphQueueDoubts != "":
+		if *f.graphVerdicts == "" {
+			return true, fmt.Errorf("--graph-queue-doubts требует --graph-verdicts <файл.tsv>")
+		}
+		return true, gmaint.QueueDoubts(os.Stdout, cfg, *f.graphQueueDoubts, *f.graphVerdicts)
 	case *f.graphEmbedStale != "":
 		return true, gmaint.EmbedStale(os.Stdout, cfg, *f.graphEmbedStale, *f.kbDry)
 	case *f.graphEmbed != "":

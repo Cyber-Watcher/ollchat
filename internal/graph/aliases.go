@@ -158,57 +158,6 @@ func (a *Aliases) Add(entity uint32, chunk ChunkKey, alias string) (uint32, erro
 	return a.index(AliasRec{Entity: entity, Chunk: chunk, Norm: norm}), nil
 }
 
-// Of — вхождения синонимов понятия, в порядке записи.
-func (a *Aliases) Of(entity uint32) []AliasRec {
-	if a == nil {
-		return nil
-	}
-	entity = a.merges.Resolve(entity)
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	ids := append([]uint32(nil), a.byEntity[entity]...)
-	for _, gone := range a.merges.Absorbed(entity) {
-		ids = append(ids, a.byEntity[gone]...)
-	}
-	return a.pick(ids)
-}
-
-// Where — вхождения данного написания (уже нормализованного или нет):
-// у каких понятий и в каких кусках оно встречено как синоним.
-func (a *Aliases) Where(alias string) []AliasRec {
-	if a == nil {
-		return nil
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.pick(a.byNorm[Normalize(alias)])
-}
-
-// Get — запись по стабильному номеру; ok=false, если такой нет.
-func (a *Aliases) Get(id uint32) (AliasRec, bool) {
-	if a == nil {
-		return AliasRec{}, false
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if id == 0 || int(id) > len(a.list) {
-		return AliasRec{}, false
-	}
-	return a.list[id-1], true
-}
-
-func (a *Aliases) pick(ids []uint32) []AliasRec {
-	if len(ids) == 0 {
-		return nil
-	}
-	out := make([]AliasRec, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, a.list[id-1])
-	}
-	return out
-}
-
-// Count — сколько вхождений записано.
 // All — копия всех записей журнала по порядку номеров. Для отчётов; журнал
 // на живом графе — сотни тысяч записей, копия дешевле удержания замка
 // на время чужого разбора.
@@ -220,6 +169,7 @@ func (a *Aliases) All() []AliasRec {
 	return out
 }
 
+// Count — сколько вхождений записано.
 func (a *Aliases) Count() int {
 	if a == nil {
 		return 0
@@ -266,6 +216,8 @@ func (a *Aliases) Close() error {
 	if err := a.Flush(); err != nil {
 		return err
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.f == nil {
 		return nil
 	}

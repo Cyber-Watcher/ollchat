@@ -26,7 +26,7 @@ func TestServiceIsReadOnly(t *testing.T) {
 // TestToolsListEqualsReadOnlyNames — поверхность службы РАВНА списку
 // tools.ReadOnlyNames() плюс её собственный kb_status: ни больше, ни меньше.
 // «Служба поднялась» и «служба отдаёт то, что должна» — разные утверждения;
-// второе проверяется только перечислением (memory/my-mistakes.md, №12).
+// второе проверяется только перечислением.
 func TestToolsListEqualsReadOnlyNames(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

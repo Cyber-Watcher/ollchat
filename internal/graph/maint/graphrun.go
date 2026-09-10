@@ -39,18 +39,39 @@ type buildExtractor interface {
 	Check(ctx context.Context) error
 }
 
+// BuildRun — ключи команды --graph-build. Структура, а не пятнадцать
+// позиционных параметров: пять bool подряд в вызове не читаются, и перестановка
+// двух из них компилятором не ловится.
+type BuildRun struct {
+	Folder string // часть пути каталога книг; пусто — вся коллекция
+	// Book — часть имени или пути книги: собрать граф только по ней.
+	//
+	// Зачем отдельно от Folder. Каталог — единица очереди («гони /AI»), и это
+	// правильно, пока разбирают всё подряд. Но иногда десяток нужных книг лежит
+	// в каталоге, где остаток на тридцать часов карты: 08.09.2026 девять книг
+	// про графы приехали в /AI, где оставалось 33 594 куска. Отбор по имени
+	// разбирает их за час, а не за полторы недели ночей (этап 101, часть C).
+	Book    string
+	Limit   int // сколько кусков взять в этот заход; 0 — все
+	Workers int // параллельных запросов к модели; 0 — из настроек
+
+	AllowModelChange  bool // сборка другой моделью извлечения
+	AllowPromptChange bool // сборка другим промптом
+	RedoEmpty         bool // перечитать куски, где раньше ничего не нашлось
+	LinkNew           bool // связывать новые имена с узлами (только опытный граф)
+	IgnoreBusy        bool // не ждать свободной карты
+
+	LogPath string // журнал хода; пусто — stderr
+	Kind    string // вид графа при создании: production / experimental
+	Note    string // заметка в паспорт при создании
+}
+
 // Build собирает или доливает граф коллекции.
-// bookQuery — часть имени или пути книги: собрать граф только по ней.
-//
-// Зачем отдельно от folder. Каталог — единица очереди («гони /AI»), и это
-// правильно, пока разбирают всё подряд. Но иногда десяток нужных книг лежит
-// в каталоге, где остаток на тридцать часов карты: 08.09.2026 девять книг
-// про графы приехали в /AI, где оставалось 33 594 куска. Отбор по имени
-// разбирает их за час, а не за полторы недели ночей (этап 101, часть C).
-func Build(stdout io.Writer, cfg *config.Config, name, folder, bookQuery string,
-	limit, workers int,
-	allowModelChange, allowPromptChange, redoEmpty, linkNew, ignoreBusy bool,
-	logPath, kind, note string) error {
+func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) error {
+	folder, bookQuery, limit, workers := run.Folder, run.Book, run.Limit, run.Workers
+	allowModelChange, allowPromptChange := run.AllowModelChange, run.AllowPromptChange
+	redoEmpty, linkNew, ignoreBusy := run.RedoEmpty, run.LinkNew, run.IgnoreBusy
+	logPath, kind, note := run.LogPath, run.Kind, run.Note
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -62,10 +83,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder, bookQuery string,
 		return err
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 
 	// Извлекатель: пул узлов, если в настройках заведены [[graph.nodes]]
 	// (этап 95), иначе один сервер, как было. Оба удовлетворяют одному
@@ -116,7 +134,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder, bookQuery string,
 	// Назначение и пометка проставляются только при создании: у графа, который
 	// уже собран, паспорт менять нельзя — иначе рабочий однажды станет опытным
 	// по опечатке в ключе, и доктор о нём замолчит.
-	g, err := graph.OpenOrCreateKind(coll.Dir(), name, chunks, graph.Kind(kind), note, cfg.Graph.Rules())
+	g, err := graph.OpenOrCreateKind(coll.Dir(), name, chunks, cfg.Graph.Rules(), graph.CreateOpts{Kind: graph.Kind(kind), Note: note})
 	if err != nil {
 		return err
 	}
@@ -224,6 +242,7 @@ func Build(stdout io.Writer, cfg *config.Config, name, folder, bookQuery string,
 	// векторы понятий графа; арбитр — модель извлечения.
 	var link *graph.LinkOpts
 	if linkNew {
+		// Вид графа проверяет сам graph.Build: только опытный.
 		emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
 		if emb == nil {
 			return fmt.Errorf("--graph-link-new требует модели эмбеддингов: задайте kb.embed_model")
@@ -376,10 +395,7 @@ func Find(stdout io.Writer, cfg *config.Config, name, query string, asJSON bool)
 		printOpen(stdout, g, cfg) // при --graph-json вывод обязан оставаться разбираемым
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	deps := find.Deps{
 		Coll:     coll,
 		Graph:    g,
@@ -459,10 +475,7 @@ func NeighborRank(cfg *config.Config) graph.NeighborRank {
 }
 
 func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 30*time.Second, nil)
 	if emb == nil {
 		return nil
@@ -797,10 +810,7 @@ func Recheck(stdout io.Writer, cfg *config.Config, name string, count, minMember
 		return nil
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	// Нарочно без WithModel: проверяет именно модель извлечения, та самая,
 	// ради честности которой всё и затевается.
 	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
@@ -903,10 +913,7 @@ func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int
 		return fmt.Errorf("сообщества не размечены: сперва ollchat --graph-communities %s", name)
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
 	if ex == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
@@ -991,10 +998,7 @@ func Embed(stdout io.Writer, cfg *config.Config, name string, recount bool) erro
 	}
 	defer unmark()
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
@@ -1086,10 +1090,7 @@ func Findings(stdout io.Writer, cfg *config.Config, name string, minRating, minM
 		return nil
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
 	if ex == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
@@ -1520,10 +1521,7 @@ func Bench(stdout io.Writer, cfg *config.Config, name, models, folder string,
 		return err
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	proto := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
 	if proto == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
@@ -1600,8 +1598,6 @@ func Bench(stdout io.Writer, cfg *config.Config, name, models, folder string,
 	return nil
 }
 
-// orAll подставляет «вся коллекция», когда каталог не задан: пустая строка
-// в отчёте читается как потерянное значение.
 // folderNote — приписка про каталог, чтобы отказ и отчёт называли оба условия.
 func folderNote(folder string) string {
 	if strings.TrimSpace(folder) == "" {
@@ -1610,6 +1606,8 @@ func folderNote(folder string) string {
 	return fmt.Sprintf(" в каталоге %s", folder)
 }
 
+// orAll подставляет «вся коллекция», когда каталог не задан: пустая строка
+// в отчёте читается как потерянное значение.
 func orAll(folder string) string {
 	if strings.TrimSpace(folder) == "" {
 		return "вся коллекция"
@@ -2111,7 +2109,7 @@ func Compact(stdout io.Writer, cfg *config.Config, name string, check, force boo
 //
 // Это выборка по номеру книги (Doc записан у каждого упоминания и связи),
 // а не новое хранение. Основа для будущего «выбросить вклад книги и переизвлечь
-// её» без пересборки всего графа — см. GraphSchemaV2.md и todo-clean-ai-books.
+// её» без пересборки всего графа — см. GraphSchemaV2.md.
 func Book(stdout io.Writer, cfg *config.Config, name, bookQuery string) error {
 	if bookQuery == "" {
 		return fmt.Errorf("нужна часть имени книги: --graph-book-name <строка>")
@@ -2169,8 +2167,15 @@ func Book(stdout io.Writer, cfg *config.Config, name, bookQuery string) error {
 // Это представление, а не удаление: вклад книги перестаёт показываться в выдаче,
 // но реестр понятий и журналы целы, а решение лежит отдельной строкой в
 // dropped-books.jsonl и снимается обратно. Задумано под чистку испорченной
-// книги без пересборки всего графа — см. GraphSchemaV2.md, todo-clean-ai-books.
-func DropBook(stdout io.Writer, cfg *config.Config, name, bookQuery string, restore, apply bool) error {
+// книги без пересборки всего графа — см. GraphSchemaV2.md.
+// DropRun — ключи команды --graph-drop-book.
+type DropRun struct {
+	Restore bool // вернуть вклад книги, снятый прежде
+	Apply   bool // сделать, а не только показать
+}
+
+func DropBook(stdout io.Writer, cfg *config.Config, name, bookQuery string, run DropRun) error {
+	restore, apply := run.Restore, run.Apply
 	if bookQuery == "" {
 		return fmt.Errorf("нужна часть имени книги: --graph-book-name <строка>")
 	}
@@ -2363,12 +2368,16 @@ func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 	}
 	defer g.Close()
 
-	ids, have := g.StaleEntities()
+	ids, unknown, have := g.StaleEntities()
 	if !have {
 		fmt.Fprintln(stdout, "отпечатков текстов нет: они появляются при счёте векторов этой сборкой.")
 		fmt.Fprintln(stdout, "Один раз пересчитайте всё: ollchat --graph-embed", name, "--graph-embed-recount")
 		fmt.Fprintln(stdout, "— дальше устаревшие будут находиться сами.")
 		return nil
+	}
+	if unknown > 0 {
+		fmt.Fprintf(stdout, "без отпечатка %d векторов: посчитаны до появления отпечатков, свежи ли они — неизвестно;\n"+
+			"  закрывает это только полный пересчёт: ollchat --graph-embed %s --graph-embed-recount\n", unknown, name)
 	}
 	if len(ids) == 0 {
 		fmt.Fprintln(stdout, "устаревших векторов нет: тексты всех понятий совпадают с посчитанными")
@@ -2380,10 +2389,7 @@ func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 		return nil
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
@@ -2397,5 +2403,36 @@ func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 		return err
 	}
 	fmt.Fprintf(stdout, "пересчитано векторов: %d за %s\n", fixed, time.Since(started).Round(time.Second))
+	return nil
+}
+
+// QueueDoubts кладёт спорные вердикты арбитра из TSV разбора двойников
+// в очередь человеку (links.jsonl) через сам пакет graph.
+//
+// Раньше скрипт graphdoubles.sh писал в links.jsonl напрямую, своим
+// написанием ключа (lower вместо graph.Normalize) — и Go не узнавал эти пары
+// как уже виденные, а очередь росла на каждый ночной прогон. Единственный
+// писатель журнала — Links.Add (ревизия 10.09.2026).
+func QueueDoubts(stdout io.Writer, cfg *config.Config, name, tsvPath string) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(tsvPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	dir := cfg.Graph.Rules().Dir(coll.Dir())
+	n, err := graph.QueueDoubtsTSV(dir, f)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "в очередь человеку: %d пар (ollchat: /graph review)\n", n)
 	return nil
 }

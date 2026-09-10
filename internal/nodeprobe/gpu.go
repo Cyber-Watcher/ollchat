@@ -25,6 +25,12 @@ func (r *Report) collectGPU(ctx context.Context, o Opts) {
 		r.miss("gpu", "nvidia-smi недоступен: %v", err)
 		return
 	}
+	// Процессы на карте спрашиваются и тогда, когда nvidia-smi ответил,
+	// но карт в ответе не разобралось: это отдельный факт, и без него
+	// вызывающий, оставшийся без замера загрузки, не сможет применить
+	// строгое правило «любой процесс на карте — занято».
+	defer r.collectGPUProcs(ctx, o)
+
 	gpus := parseGPUs(out)
 	if len(gpus) == 0 {
 		r.miss("gpu", "nvidia-smi не назвал ни одной карты")
@@ -87,7 +93,10 @@ func (r *Report) collectGPU(ctx context.Context, o Opts) {
 		}
 	}
 	r.GPUs = gpus
+}
 
+// collectGPUProcs снимает процессы, держащие память на карте.
+func (r *Report) collectGPUProcs(ctx context.Context, o Opts) {
 	if out, _, err := o.Run(ctx, "nvidia-smi",
 		"--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"); err == nil {
 		r.GPUProcs = parseGPUProcs(out)

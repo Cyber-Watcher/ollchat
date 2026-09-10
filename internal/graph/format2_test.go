@@ -56,7 +56,7 @@ func TestFormat2RequiresName(t *testing.T) {
 // после переоткрытия, а рабочий граф формата 1 рядом его не получает.
 func TestFormat2WritesAliasesWithSource(t *testing.T) {
 	dir := collection(t)
-	lab, err := CreateKind(dir, "books", 100, KindExperimental, "схема 2", Rules{Name: "lab", Format: FormatV2})
+	lab, err := CreateKind(dir, "books", 100, Rules{Name: "lab", Format: FormatV2}, CreateOpts{Kind: KindExperimental, Note: "схема 2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,12 +79,12 @@ func TestFormat2WritesAliasesWithSource(t *testing.T) {
 		t.Fatal("понятие не заведено")
 	}
 	id := ent.ID
-	recs := lab.Aliases().Of(id)
+	recs := lab.Aliases().All()
 	if len(recs) != 2 || recs[0].Norm != Normalize("goroutine") || recs[0].Chunk != key || recs[0].ID != 1 {
 		t.Fatalf("вхождения синонима: %+v", recs)
 	}
-	if w := lab.Aliases().Where("GOROUTINE"); len(w) != 2 || w[1].Entity != id {
-		t.Fatalf("поиск по написанию: %+v", w)
+	if recs[1].Entity != id || recs[1].Norm != Normalize("GOROUTINE") {
+		t.Fatalf("второе вхождение: %+v", recs[1])
 	}
 	if err := lab.Close(); err != nil {
 		t.Fatal(err)
@@ -99,8 +99,8 @@ func TestFormat2WritesAliasesWithSource(t *testing.T) {
 	if got := lab.Aliases().Count(); got != 2 {
 		t.Fatalf("после переоткрытия %d вхождений, ожидалось 2", got)
 	}
-	if rec, ok := lab.Aliases().Get(2); !ok || rec.Entity != id || rec.Chunk != key {
-		t.Fatalf("запись 2: %+v, %v", rec, ok)
+	if rec := lab.Aliases().All()[1]; rec.ID != 2 || rec.Entity != id || rec.Chunk != key {
+		t.Fatalf("запись 2: %+v", rec)
 	}
 
 	// Рабочий граф рядом — формата 1, без журнала и без файла.
@@ -150,8 +150,8 @@ func TestAliasesTruncatedTailTolerated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	if b.Count() != 1 || b.Of(5)[0].Norm != Normalize("Tool Call") {
-		t.Fatalf("после обрыва: %d записей, %+v", b.Count(), b.Of(5))
+	if b.Count() != 1 || b.All()[0].Entity != 5 || b.All()[0].Norm != Normalize("Tool Call") {
+		t.Fatalf("после обрыва: %d записей, %+v", b.Count(), b.All())
 	}
 }
 
@@ -159,7 +159,7 @@ func TestAliasesTruncatedTailTolerated(t *testing.T) {
 // помечает; у графа формата 1 отчёта нет.
 func TestAliasReportCountsKindsAndClashes(t *testing.T) {
 	dir := t.TempDir()
-	g, err := CreateKind(dir, "books", 100, KindExperimental, "проба", Rules{Name: "lab", Format: FormatV2})
+	g, err := CreateKind(dir, "books", 100, Rules{Name: "lab", Format: FormatV2}, CreateOpts{Kind: KindExperimental, Note: "проба"})
 	if err != nil {
 		t.Fatal(err)
 	}

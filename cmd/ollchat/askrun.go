@@ -310,7 +310,7 @@ func askThink(srv *config.Server, o askOpts) *bool {
 // askSettings — числа отбора: конфиг, поверх — ключи.
 func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 	s := mixer.Settings{
-		Chain:      cfg.Mix.ChainOn(),
+		Chain:      cfg.Mix.Chain,
 		TableBoost: cfg.KB.TableBoost,
 		Entities:   cfg.Mix.Entities,
 		Neighbors:  cfg.Mix.Neighbors,

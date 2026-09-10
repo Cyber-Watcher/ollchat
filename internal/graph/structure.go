@@ -9,7 +9,7 @@ package graph
 // одним куском, было не видно.
 //
 // Второе число — доля связей, стоящих на одном подтверждении. Замер 08.09.2026
-// (`privatescripts/graphstats`) дал 63.5% из 803 тысяч различных связей, и это
+// по готовому графу дал 63.5% из 803 тысяч различных связей, и это
 // прямо влияет на разбиение: в Louvain такая связь весит столько же, сколько
 // подтверждённая десятью кусками. Чтобы решать, ставить ли порог (этап 101, Г2),
 // число надо видеть в докторе, а не запускать отдельный инструмент.
@@ -49,7 +49,8 @@ type Structure struct {
 	Hubs     int
 }
 
-// HubShare — какую долю понятий со связями занимают хабы, в сотых процента.
+// HubShare — какую долю понятий со связями занимают хабы, в процентах
+// (дробных: хабов сотни на сотни тысяч понятий).
 func (s Structure) HubShare() float64 {
 	if s.Nodes == 0 {
 		return 0
@@ -85,10 +86,7 @@ func (s Structure) IsolatedShare() int {
 
 // Structure меряет строение графа: связность целиком, одиночек и опору связей.
 func (g *Graph) Structure() Structure {
-	adj, order := g.undirected()
-	live := len(g.Entities().Live())
-	st := structure(adj, order, live, g.rules.ChainHubLimit)
-	st.Hubs = countHubs(adj, order, st.HubLimit, g.neighborCount)
+	st, _ := g.Shape(nil)
 	return st
 }
 

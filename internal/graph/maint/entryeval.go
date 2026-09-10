@@ -147,10 +147,7 @@ func EntryEval(stdout io.Writer, cfg *config.Config, setPath string, o EntryEval
 		entities = o.Entities
 	}
 
-	fallback := ""
-	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
-	}
+	fallback := cfg.EmbedFallback()
 	deps := find.Deps{
 		Coll:     coll,
 		Graph:    g,

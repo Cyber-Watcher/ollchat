@@ -226,7 +226,7 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 		from = 0
 	}
 
-	w, err := CreateVecWriterWith(c.dir, emb.Model(), dim, from, opt.Header)
+	w, err := CreateVecWriter(c.dir, emb.Model(), dim, from, opt.Header)
 	if err != nil {
 		return res, err
 	}
@@ -319,7 +319,7 @@ func (c *Collection) embedWave(ctx context.Context, emb Embedder, from, to int, 
 	parts := make([]part, len(bounds))
 	var wg sync.WaitGroup
 	for k, b := range bounds {
-		texts, err := c.embedTextsWith(b[0], b[1], !opt.Header)
+		texts, err := c.embedTexts(b[0], b[1], opt.Header)
 		if err != nil {
 			return nil, err
 		}
@@ -351,12 +351,10 @@ func (c *Collection) embedWave(ctx context.Context, emb Embedder, from, to int, 
 // Векторизуется не голый кусок, а кусок с шапкой «книга · страница»: фрагмент
 // из середины главы часто не содержит самого предмета, и без шапки его смысл
 // беднее, чем на самом деле.
-func (c *Collection) embedTexts(from, to int) ([]string, error) {
-	return c.embedTextsWith(from, to, false)
-}
-
-// embedTextsWith — то же, с выбором: с шапкой или голый текст (замер Г8).
-func (c *Collection) embedTextsWith(from, to int, plain bool) ([]string, error) {
+//
+// header — дописывать ли шапку (kb.embed_header; замер Г8 этапа 101 показал,
+// что пользы она не даёт, и умолчание теперь — без неё).
+func (c *Collection) embedTexts(from, to int, header bool) ([]string, error) {
 	ids := make([]int, 0, to-from)
 	for i := from; i < to; i++ {
 		ids = append(ids, i)
@@ -369,7 +367,7 @@ func (c *Collection) embedTextsWith(from, to int, plain bool) ([]string, error) 
 	for _, id := range ids {
 		rec := c.store.Rec(id)
 		var b strings.Builder
-		if book, ok := c.bookByID(rec.Doc); ok && !plain {
+		if book, ok := c.bookByID(rec.Doc); ok && header {
 			b.WriteString(bookTitle(book))
 			if rec.UnitFrom > 0 {
 				fmt.Fprintf(&b, " · с. %d", rec.UnitFrom)

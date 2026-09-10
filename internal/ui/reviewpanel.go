@@ -55,6 +55,12 @@ type reviewItem struct {
 	// (r.Chunk пуст) выдержек не было вовсе — а это основной поток разбора.
 	fromEv evidence
 	toEv   evidence
+	// toNode и evLoaded — для ленивой загрузки выдержек: читаются куски
+	// только у выделенной пары, когда до неё дошёл курсор. Список бывает
+	// в сотни пар, а чтение куска — обращение к диску; грузить все сразу
+	// значило бы держать окно закрытым секунды ради двух строк на экране.
+	toNode   uint32
+	evLoaded bool
 }
 
 // evidence — одна выдержка: откуда и что там написано.
@@ -70,6 +76,7 @@ type reviewPanel struct {
 	judge  bool
 	coll   string
 	g      *graph.Graph
+	kbc    *kb.Collection // для выдержек по сторонам пары; nil — без них
 	items  []reviewItem
 	done   int    // решено за это открытие
 	last   string // последнее решение — для строки заголовка
@@ -112,7 +119,21 @@ func (p *reviewPanel) current() *reviewItem {
 	return nil
 }
 
+// loadEvidence читает выдержки по сторонам выделенной пары, один раз.
+func (p *reviewPanel) loadEvidence() {
+	it := p.current()
+	if it == nil || it.evLoaded {
+		return
+	}
+	it.evLoaded = true
+	if it.fromEv.snippet == "" {
+		it.fromEv, _ = firstEvidence(p.g, p.kbc, it.fromNode)
+	}
+	it.toEv, _ = firstEvidence(p.g, p.kbc, it.toNode)
+}
+
 func (p *reviewPanel) view(width int) string {
+	p.loadEvidence()
 	title := "разбор пар"
 	if p.judge {
 		title = "проверка решений арбитра"
@@ -222,7 +243,7 @@ func (m *Model) graphReviewCmd(arg string) tea.Cmd {
 		if err != nil {
 			return reviewReadyMsg{err: fmt.Errorf("/graph review: граф коллекции %s: %w", name, err)}
 		}
-		p := &reviewPanel{judge: judge, coll: name, g: g, rows: m.cfg.Input.FindRows}
+		p := &reviewPanel{judge: judge, coll: name, g: g, kbc: coll, rows: m.cfg.Input.FindRows}
 		p.items = reviewItems(g, coll, judge)
 		return reviewReadyMsg{panel: p}
 	}
@@ -262,20 +283,15 @@ func reviewItems(g *graph.Graph, coll *kb.Collection, judge bool) []reviewItem {
 		if r.To != 0 {
 			other, otherName = r.To, r.ToName
 		}
-		var toNode uint32
-		it.to, toNode = weight(other, otherName)
+		it.to, it.toNode = weight(other, otherName)
 		if r.Chunk.Doc != 0 && coll != nil {
 			if ev, ok := evidenceOf(coll, r.Chunk); ok {
 				it.source, it.snippet, it.chunkID = ev.source, ev.snippet, ev.chunkID
 				it.fromEv = ev
 			}
 		}
-		// Выдержка по каждой стороне: у пары двойников куска-источника нет
-		// вовсе, а решать по одним именам — гадание (этап 101, A2).
-		if it.fromEv.snippet == "" {
-			it.fromEv, _ = firstEvidence(g, coll, it.fromNode)
-		}
-		it.toEv, _ = firstEvidence(g, coll, toNode)
+		// Выдержка по каждой стороне (этап 101, A2) читается лениво,
+		// когда пара выделена: reviewPanel.loadEvidence.
 		out = append(out, it)
 	}
 	return out

@@ -29,6 +29,11 @@ const (
 	MarkDone    uint32 = 1 // разобран, сущности записаны
 	MarkEmpty   uint32 = 2 // разобран, ничего не нашлось — это тоже результат
 	MarkSkipped uint32 = 3 // пропущен: модель не дала разбираемого ответа
+	// MarkService — служебный кусок (оглавление, список литературы, выходные
+	// данные): модели не показывался. Отдельно от MarkSkipped, чтобы был
+	// обратный ход: если признак с куска снят (эвристику смягчили), сборка
+	// берёт его в работу, а «пропущенный» ответом модели так и остаётся.
+	MarkService uint32 = 4
 )
 
 // Progress — отметки о разобранных кусках.
@@ -132,7 +137,7 @@ func (p *Progress) Counts() (done, empty, skipped int) {
 			done++
 		case MarkEmpty:
 			empty++
-		case MarkSkipped:
+		case MarkSkipped, MarkService:
 			skipped++
 		}
 	}

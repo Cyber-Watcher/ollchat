@@ -4,7 +4,7 @@ import "testing"
 
 // Подтверждения при равном числе понятий берутся по очереди книг, а не по
 // номеру книги: книга, проиндексированная позже, иначе не попадала в пул
-// вовсе (замер 06.09.2026, docs/eval/pairfind-0906.md).
+// вовсе (замер на паре «оригинал — перевод», 06.09.2026).
 func TestEvidenceInterleavesBooksOnTie(t *testing.T) {
 	g, _ := graph(t)
 	id, _, err := g.Entities().Add("CoreDNS", TypeTech)

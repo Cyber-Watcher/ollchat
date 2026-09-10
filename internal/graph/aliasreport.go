@@ -76,12 +76,7 @@ func (g *Graph) AliasReportOf(top int) (AliasReport, bool) {
 		if ok {
 			name = ent.Name
 		}
-		clash := false
-		if id, found := g.ents.byKey[k.norm]; found && id != k.entity {
-			if other := g.ents.rawAt(id); other.Norm == k.norm {
-				clash = true
-			}
-		}
+		clash := g.ents.isOtherName(k.norm, k.entity)
 		// Чужое имя — свой вид: это не перевод и не иное написание, а кандидат
 		// в двойники (либо род и вид), и в остальные счётчики оно не входит.
 		switch {

@@ -5,18 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/nodeprobe"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // Guard — правило номер один: прогон не начинается, пока видеокарта занята.
 // На стенде работают люди, и ночной замер не имеет права ни отобрать у них
 // память, ни перезапустить службу под чужим запросом.
+//
+// Факты о машине снимает `internal/nodeprobe` — тот же код, что у службы
+// `ollnode` и у сборки графа. Здесь остаются только пороги и вердикты:
+// два сборщика об одном однажды разошлись бы, как разошлись 01.09.2026
+// два предиката «повторяемая ли ошибка».
 type Guard struct {
 	Client *ollama.Client
 	// Root — корень данных прогонов: там лежат state/gpu_idle.json
@@ -25,7 +29,8 @@ type Guard struct {
 	// Cfg — какие проверки делать и за какое время смотреть журнал.
 	// Живёт в конфиге, а не в коде: это правится чаще всего остального.
 	Cfg GuardCfg
-	// Run — запуск внешней команды; подменяется в тестах.
+	// Run — запуск внешней команды; подменяется в тестах. Уходит в nodeprobe
+	// как есть: команды зовёт он, а не guard.
 	Run func(ctx context.Context, name string, args ...string) (string, int, error)
 
 	// Limit — какая загрузка карты в этот момент ещё считается простоем.
@@ -57,6 +62,77 @@ func NewGuard(c *ollama.Client, cfg GuardCfg, root string) *Guard {
 	return &Guard{Client: c, Cfg: cfg, Root: root, Run: runCommand}
 }
 
+// serviceName — имя юнита systemd, за которым следим.
+func (g *Guard) serviceName() string {
+	if g.Cfg.Service == "" {
+		return "ollama"
+	}
+	return g.Cfg.Service
+}
+
+// probeOpts переводит настройки проверки в заказ на снимок машины.
+//
+// Снимаются только те разделы, что включены в конфиге: снимок стоит секунд,
+// а серия выборок загрузки — ещё и секунд ожидания между ними.
+func (g *Guard) probeOpts() nodeprobe.Opts {
+	window := time.Duration(g.Cfg.JournalWindow)
+	o := nodeprobe.Opts{
+		Run:     g.Run,
+		Service: g.serviceName(),
+		Want: nodeprobe.Sections{
+			GPU:      g.Cfg.CheckGPU,
+			Service:  g.Cfg.CheckService,
+			Models:   g.Cfg.CheckPS && g.Client != nil,
+			Journal:  g.Cfg.CheckJournal && window > 0,
+			Sessions: g.Cfg.CheckSessions,
+		},
+		UtilSamples:   g.Cfg.UtilSamples,
+		UtilSampleGap: time.Duration(g.Cfg.UtilSampleGap),
+		JournalWindow: window,
+		// Журнал службы на стенде читается через sudo: учётка прогона
+		// не состоит в systemd-journal.
+		JournalCmd: []string{"sudo", "journalctl"},
+	}
+	if o.Want.Models {
+		client := g.Client
+		o.PS = func(ctx context.Context) ([]nodeprobe.RunningModel, error) {
+			running, err := client.PS(ctx)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]nodeprobe.RunningModel, 0, len(running))
+			for _, m := range running {
+				out = append(out, nodeprobe.RunningModel{Name: m.Name, Size: m.Size,
+					SizeVRAM: m.SizeVRAM, ContextLength: m.ContextLength, ExpiresAt: m.ExpiresAt})
+			}
+			return out, nil
+		}
+	}
+	return o
+}
+
+// missing возвращает причину, по которой раздел снимка не собрался.
+func missing(snap *nodeprobe.Report, section string) (string, bool) {
+	for _, m := range snap.Missing {
+		if m.Section == section {
+			return m.Reason, true
+		}
+	}
+	return "", false
+}
+
+// procLine описывает процесс на карте для человека: имя, номер, память.
+func procLine(p nodeprobe.GPUProc) string {
+	name := p.Name
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "" {
+		return fmt.Sprintf("pid %d, %d МиБ", p.PID, p.UsedMiB)
+	}
+	return fmt.Sprintf("%s (pid %d, %d МиБ)", name, p.PID, p.UsedMiB)
+}
+
 // Check выполняет все проверки разом и говорит, свободна ли карта.
 //
 // Решает **загрузка** видеокарты, а не занятая на ней память. Модель остаётся
@@ -77,33 +153,28 @@ func NewGuard(c *ollama.Client, cfg GuardCfg, root string) *Guard {
 func (g *Guard) Check(ctx context.Context) GuardReport {
 	var rep GuardReport
 	rep.UtilLimit = g.utilLimit()
+	serviceName := g.serviceName()
 
-	var procs []string
-	if g.Cfg.CheckGPU {
-		if out, _, err := g.Run(ctx, "nvidia-smi",
-			"--query-compute-apps=pid,used_memory", "--format=csv,noheader"); err == nil {
-			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-				if line = strings.TrimSpace(line); line != "" {
-					procs = append(procs, line)
-				}
-			}
-		} else {
-			rep.Notes = append(rep.Notes, "nvidia-smi недоступен: "+err.Error())
-		}
-	}
+	snap := nodeprobe.Snapshot(ctx, g.probeOpts())
 
 	// Загрузка карты серией выборок: обучение модели питоновским скриптом
 	// видно именно здесь, а вовсе не через Ollama — её на время такого
 	// обучения обычно вообще останавливают.
 	utilKnown := false
 	if g.Cfg.CheckGPU {
-		used, util, samples, ok := g.sampleGPU(ctx)
-		if ok {
+		if reason, ok := missing(&snap, "gpu"); ok {
+			rep.Notes = append(rep.Notes, reason)
+		}
+		if reason, ok := missing(&snap, "gpu_procs"); ok {
+			rep.Notes = append(rep.Notes, reason)
+		}
+		if len(snap.GPUs) > 0 {
 			utilKnown = true
-			rep.GPUUsedMiB, rep.GPUUtil, rep.GPUSamples = used, util, samples
-			if util > rep.UtilLimit {
+			rep.GPUUsedMiB, rep.GPUUtil = snap.GPUUsedMiB(), snap.GPUUtil()
+			rep.GPUSamples = busiestSamples(snap.GPUs)
+			if rep.GPUUtil > rep.UtilLimit {
 				rep.Blocking = append(rep.Blocking,
-					fmt.Sprintf("карта загружена на %d%% (порог %d%%)", util, rep.UtilLimit))
+					fmt.Sprintf("карта загружена на %d%% (порог %d%%)", rep.GPUUtil, rep.UtilLimit))
 			}
 		} else {
 			rep.Notes = append(rep.Notes, "загрузку карты измерить не удалось — правила строгие")
@@ -112,43 +183,39 @@ func (g *Guard) Check(ctx context.Context) GuardReport {
 
 	switch {
 	case !utilKnown:
-		for _, p := range procs {
-			rep.Blocking = append(rep.Blocking, "на видеокарте работает процесс: "+p)
+		for _, p := range snap.GPUProcs {
+			rep.Blocking = append(rep.Blocking, "на видеокарте работает процесс: "+procLine(p))
 		}
 		if g.Cfg.BusyVRAMMiB > 0 && rep.GPUUsedMiB >= g.Cfg.BusyVRAMMiB {
 			rep.Blocking = append(rep.Blocking,
 				fmt.Sprintf("на карте занято %d МиБ видеопамяти (порог %d)", rep.GPUUsedMiB, g.Cfg.BusyVRAMMiB))
 		}
 	default:
-		for _, p := range procs {
-			rep.Notes = append(rep.Notes, "на карте держит память процесс: "+p)
+		for _, p := range snap.GPUProcs {
+			rep.Notes = append(rep.Notes, "на карте держит память процесс: "+procLine(p))
 		}
 	}
 
 	// Состояние службы нужно раньше вердикта: по нему решается, стоит ли
 	// жаловаться на молчащий /api/ps.
-	serviceName := g.Cfg.Service
-	if serviceName == "" {
-		serviceName = "ollama"
-	}
 	if g.Cfg.CheckService {
-		if out, _, err := g.Run(ctx, "systemctl", "is-active", serviceName); err == nil {
-			rep.ServiceState = strings.TrimSpace(out)
+		if reason, ok := missing(&snap, "service"); ok {
+			rep.Notes = append(rep.Notes, reason)
 		} else {
-			rep.Notes = append(rep.Notes, "не удалось спросить состояние службы "+serviceName+": "+err.Error())
+			rep.ServiceState = strings.TrimSpace(snap.Service.State)
 		}
 	}
 
 	if g.Cfg.CheckPS {
-		if running, err := g.Client.PS(ctx); err != nil {
+		if reason, ok := missing(&snap, "models"); ok {
 			// Погашенная служба и так уже названа причиной — повторять,
 			// что её API не отвечает, значит удлинять каждую строку журнала
 			// одним и тем же.
 			if rep.ServiceState == "" || rep.ServiceState == "active" {
-				rep.Notes = append(rep.Notes, "не удалось спросить /api/ps: "+err.Error())
+				rep.Notes = append(rep.Notes, reason)
 			}
 		} else {
-			for _, m := range running {
+			for _, m := range snap.Models {
 				msg := fmt.Sprintf("в память сервера загружена модель %s (%.1f ГиБ)",
 					m.Name, float64(m.SizeVRAM)/(1<<30))
 				if utilKnown && rep.GPUUtil <= rep.UtilLimit {
@@ -163,14 +230,11 @@ func (g *Guard) Check(ctx context.Context) GuardReport {
 	}
 
 	if window := time.Duration(g.Cfg.JournalWindow); g.Cfg.CheckJournal && window > 0 {
-		since := "-" + strconv.Itoa(int(window.Minutes())) + " min"
-		if out, _, err := g.Run(ctx, "sudo", "journalctl", "-u", "ollama", "--since", since, "--no-pager", "-q"); err == nil {
-			if n := strings.Count(out, "POST /api/"); n > 0 {
-				rep.Blocking = append(rep.Blocking,
-					fmt.Sprintf("за последние %.0f мин к Ollama пришло %d запросов", window.Minutes(), n))
-			}
-		} else {
-			rep.Notes = append(rep.Notes, "журнал Ollama недоступен: "+err.Error())
+		if reason, ok := missing(&snap, "journal"); ok {
+			rep.Notes = append(rep.Notes, reason)
+		} else if n := snap.Requests; n > 0 {
+			rep.Blocking = append(rep.Blocking,
+				fmt.Sprintf("за последние %.0f мин к Ollama пришло %d запросов", window.Minutes(), n))
 		}
 	}
 
@@ -207,15 +271,9 @@ func (g *Guard) Check(ctx context.Context) GuardReport {
 		}
 	}
 
-	if out, _, err := g.Run(ctx, "w", "-h"); g.Cfg.CheckSessions && err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			if line == "" {
-				continue
-			}
-			user := strings.Fields(line)[0]
-			if user != currentUser() {
-				rep.Notes = append(rep.Notes, "в системе чужой сеанс: "+strings.TrimSpace(line))
-			}
+	if g.Cfg.CheckSessions {
+		for _, line := range snap.Sessions {
+			rep.Notes = append(rep.Notes, "в системе чужой сеанс: "+strings.TrimSpace(line))
 		}
 	}
 
@@ -224,56 +282,28 @@ func (g *Guard) Check(ctx context.Context) GuardReport {
 	return rep
 }
 
+// busiestSamples — серия выборок той карты, что была загружена сильнее всех.
+// Карта на стенде одна; если их станет несколько, в отчёт идёт самая занятая —
+// вердикт и так строится по наибольшей загрузке среди всех.
+func busiestSamples(gpus []nodeprobe.GPU) []int {
+	var best *nodeprobe.GPU
+	for i := range gpus {
+		if best == nil || gpus[i].Util > best.Util {
+			best = &gpus[i]
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return best.Samples
+}
+
 // utilLimit — порог загрузки, действующий сейчас.
 func (g *Guard) utilLimit() int {
 	if g.Limit == nil {
 		return g.Cfg.BusyUtilPercent
 	}
 	return g.Limit(time.Now())
-}
-
-// sampleGPU меряет загрузку карты серией выборок и возвращает наибольшую.
-//
-// Одна выборка nvidia-smi — мгновенный снимок. Между двумя токенами чужого
-// ответа загрузка падает в ноль, и единственный замер сказал бы «свободно»
-// посреди чужой работы. Занятая память берётся тоже наибольшая: она нужна
-// только для журнала и для строгого правила при неудачном замере.
-func (g *Guard) sampleGPU(ctx context.Context) (usedMiB, utilPercent int, samples []int, ok bool) {
-	n := g.Cfg.UtilSamples
-	if n < 1 {
-		n = 1
-	}
-	gap := time.Duration(g.Cfg.UtilSampleGap)
-	if gap <= 0 {
-		gap = time.Second
-	}
-	for i := 0; i < n; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return usedMiB, utilPercent, samples, ok
-			case <-time.After(gap):
-			}
-		}
-		out, _, err := g.Run(ctx, "nvidia-smi",
-			"--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits")
-		if err != nil {
-			continue
-		}
-		used, util, good := parseGPUUsage(out)
-		if !good {
-			continue
-		}
-		ok = true
-		samples = append(samples, util)
-		if used > usedMiB {
-			usedMiB = used
-		}
-		if util > utilPercent {
-			utilPercent = util
-		}
-	}
-	return usedMiB, utilPercent, samples, ok
 }
 
 // round округляет длительность до секунд — в журнале наносекунды не нужны.
@@ -332,34 +362,6 @@ func (g *Guard) WaitFree(ctx context.Context, need int, poll time.Duration, give
 		case <-time.After(poll):
 		}
 	}
-}
-
-// currentUser возвращает имя пользователя, под которым идёт прогон.
-func currentUser() string {
-	out, err := exec.Command("id", "-un").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// parseGPUUsage разбирает ответ nvidia-smi вида "66791, 87": занятая
-// видеопамять в МиБ и загрузка в процентах.
-func parseGPUUsage(out string) (usedMiB, utilPercent int, ok bool) {
-	line := strings.TrimSpace(out)
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i] // карта одна; если их станет несколько, смотрим первую
-	}
-	parts := strings.Split(line, ",")
-	if len(parts) < 2 {
-		return 0, 0, false
-	}
-	used, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-	util, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err1 != nil || err2 != nil {
-		return 0, 0, false
-	}
-	return used, util, true
 }
 
 // ── Наблюдённый простой карты ────────────────────────────────────────────────

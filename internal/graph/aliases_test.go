@@ -90,21 +90,22 @@ func TestRenderShowsClashesAsNearNotSame(t *testing.T) {
 	}
 	res := SearchResult{Entities: []FoundEntity{e}}
 
-	for _, opt := range []RenderOpts{{Collection: "books"}, {Collection: "books", ForModel: true}} {
-		out := Render(nil, res, opt)
-		for _, line := range strings.Split(out, "\n") {
-			if strings.Contains(line, "он же") && strings.Contains(line, "ChatGPT") {
-				t.Fatalf("чужое имя ушло как «он же» (ForModel=%v): %q", opt.ForModel, line)
-			}
-		}
-		if !strings.Contains(out, "он же: Искусственный интеллект") {
-			t.Fatalf("верный синоним пропал (ForModel=%v): %q", opt.ForModel, out)
-		}
-		if !strings.Contains(out, "близкие понятия графа (не то же самое): ChatGPT") {
-			t.Fatalf("близкое понятие не показано с оговоркой (ForModel=%v): %q", opt.ForModel, out)
+	// Читатель один: и модели, и человеку карточка печатается одинаково
+	// (поле ForModel убрано 10.09.2026 — его никто не читал).
+	opt := RenderOpts{Collection: "books"}
+	out := Render(nil, res, opt)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "он же") && strings.Contains(line, "ChatGPT") {
+			t.Fatalf("чужое имя ушло как «он же»: %q", line)
 		}
 	}
-	card := RenderEntity(nil, e, nil, RenderOpts{Collection: "books", ForModel: true})
+	if !strings.Contains(out, "он же: Искусственный интеллект") {
+		t.Fatalf("верный синоним пропал: %q", out)
+	}
+	if !strings.Contains(out, "близкие понятия графа (не то же самое): ChatGPT") {
+		t.Fatalf("близкое понятие не показано с оговоркой: %q", out)
+	}
+	card := RenderEntity(nil, e, nil, opt)
 	if !strings.Contains(card, "близкие понятия графа (не то же самое): ChatGPT") ||
 		!strings.Contains(card, "он же: Искусственный интеллект") {
 		t.Fatalf("карточка понятия: %q", card)

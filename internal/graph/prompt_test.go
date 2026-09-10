@@ -61,3 +61,25 @@ func TestPromptStamp(t *testing.T) {
 		t.Fatalf("после записи задним числом: %+v", g.Meta())
 	}
 }
+
+// Строка о промпте сверяет паспорт с промптом того же формата: граф формата 2
+// собран PromptIDV2, и сравнение с PromptID формата 1 объявляло бы его чужим.
+func TestPromptLineUsesFormatPrompt(t *testing.T) {
+	dir := collection(t)
+	lab, err := Create(dir, "books", 100, Rules{Name: "lab", Format: FormatV2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lab.Close()
+	if line := lab.PromptLine(); strings.Contains(line, "ДРУГОЙ") || !strings.Contains(line, PromptIDV2) {
+		t.Fatalf("строка о промпте графа формата 2: %q", line)
+	}
+	prod, err := Create(dir, "books", 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	if line := prod.PromptLine(); strings.Contains(line, "ДРУГОЙ") || !strings.Contains(line, PromptID) {
+		t.Fatalf("строка о промпте графа формата 1: %q", line)
+	}
+}

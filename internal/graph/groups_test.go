@@ -20,9 +20,6 @@ func TestGroupsAddAndRead(t *testing.T) {
 	if id == 0 {
 		t.Fatal("группе не выдан номер")
 	}
-	if gid, ok := g.Groups().GroupOf(1); !ok || gid != id {
-		t.Fatalf("понятие 1 не в группе: %d %v", gid, ok)
-	}
 	sib := g.Groups().Siblings(1)
 	if len(sib) != 1 || sib[0] != 2 {
 		t.Fatalf("соседи понятия 1: %v, ожидалось [2]", sib)
@@ -38,13 +35,8 @@ func TestGroupsAddAndRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer g2.Close()
-	if gid, ok := g2.Groups().GroupOf(2); !ok || gid != id {
-		t.Fatal("группа не пережила переоткрытие")
-	}
-	// Проверка сохранённых метаданных — того, чего склейка не несла.
-	m := g2.Groups().Members(id)
-	if len(m) != 2 {
-		t.Fatalf("состав группы: %v", m)
+	if sib := g2.Groups().Siblings(2); len(sib) != 1 || sib[0] != 1 {
+		t.Fatalf("группа не пережила переоткрытие: соседи понятия 2 = %v", sib)
 	}
 }
 
@@ -57,22 +49,19 @@ func TestGroupsUndo(t *testing.T) {
 	if _, err := g.Groups().Add(GroupRec{ID: id, Undo: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := g.Groups().GroupOf(1); ok {
-		t.Fatal("понятие 1 осталось в снятой группе")
+	if sib := g.Groups().Siblings(1); len(sib) != 0 {
+		t.Fatalf("понятие 1 осталось в снятой группе: %v", sib)
 	}
 	if g.Groups().Count() != 0 {
 		t.Fatalf("групп после отмены %d, ожидалось 0", g.Groups().Count())
 	}
 }
 
-// Нет групп — Siblings и GroupOf молчат, а не паникуют.
+// Нет групп — Siblings молчит, а не паникует.
 func TestGroupsEmpty(t *testing.T) {
 	coll := t.TempDir()
 	g, _ := Create(coll, "t", 100, Rules{})
 	defer g.Close()
-	if _, ok := g.Groups().GroupOf(5); ok {
-		t.Fatal("в пустых группах что-то нашлось")
-	}
 	if len(g.Groups().Siblings(5)) != 0 {
 		t.Fatal("соседи в пустых группах не пусты")
 	}
@@ -92,19 +81,12 @@ func TestGroupsFromPairs(t *testing.T) {
 	if groups != 2 || members != 5 {
 		t.Fatalf("групп %d, понятий %d — ожидалось 2 и 5", groups, members)
 	}
-	// 1, 2, 3 — в одной группе.
-	g1, _ := g.Groups().GroupOf(1)
-	g3, _ := g.Groups().GroupOf(3)
-	if g1 == 0 || g1 != g3 {
-		t.Fatalf("1 и 3 должны быть в одной группе: %d vs %d", g1, g3)
+	// 1, 2, 3 — в одной группе, 5 — в другой.
+	if sib := g.Groups().Siblings(1); len(sib) != 2 || sib[0] != 2 || sib[1] != 3 {
+		t.Fatalf("соседи понятия 1: %v, ожидалось [2 3]", sib)
 	}
-	// 5 — в другой.
-	g5, _ := g.Groups().GroupOf(5)
-	if g5 == g1 {
-		t.Fatal("5 не должна быть в группе с 1")
-	}
-	if len(g.Groups().Members(g1)) != 3 {
-		t.Fatalf("в группе 1-2-3 должно быть 3 члена")
+	if sib := g.Groups().Siblings(5); len(sib) != 1 || sib[0] != 6 {
+		t.Fatalf("соседи понятия 5: %v, ожидалось [6]", sib)
 	}
 }
 

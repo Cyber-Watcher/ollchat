@@ -24,16 +24,16 @@ func ForgetTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) erro
 	if err != nil {
 		return err
 	}
-	toc := map[uint64]bool{}
+	service := map[uint64]bool{}
 	if err := coll.EachChunkRef(kb.ChunkFilter{}, func(c kb.ChunkRef) error {
 		if c.TOC || c.Refs {
-			toc[graph.ChunkKey{Doc: c.Doc, Ord: c.Ord}.Pack()] = true
+			service[graph.ChunkKey{Doc: c.Doc, Ord: c.Ord}.Pack()] = true
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	if len(toc) == 0 {
+	if len(service) == 0 {
 		return fmt.Errorf("в коллекции %s нет кусков со служебным признаком — сначала ollchat --kb-flag-toc %s", name, name)
 	}
 	dir := cfg.Graph.Rules().Dir(coll.Dir())
@@ -43,14 +43,14 @@ func ForgetTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) erro
 	if err := kb.WaitArchive(coll.Dir(), kb.ArchiveWait); err != nil {
 		return err
 	}
-	unmark, err := graph.MarkWork(dir, "чистка графа от оглавлений")
+	unmark, err := graph.MarkWork(dir, "чистка графа от служебных кусков")
 	if err != nil {
 		return err
 	}
 	defer unmark()
 
 	started := time.Now()
-	st, err := graph.ForgetChunks(dir, func(k graph.ChunkKey) bool { return toc[k.Pack()] }, dry)
+	st, err := graph.ForgetChunks(dir, func(k graph.ChunkKey) bool { return service[k.Pack()] }, dry)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,7 @@ func ForgetTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) erro
 		what = "было бы убрано"
 	}
 	fmt.Fprintf(stdout, "%s (%s): помеченных кусков в индексе %d; %s; за %s\n",
-		what, name, len(toc), st, time.Since(started).Round(time.Second))
+		what, name, len(service), st, time.Since(started).Round(time.Second))
 	for _, b := range st.Backups {
 		fmt.Fprintf(stdout, "  прежний журнал: %s\n", b)
 	}

@@ -2,9 +2,14 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
@@ -28,7 +33,21 @@ type EmbedOpts struct {
 	// растёт заходами, и пересчитывать при каждом все 63 тысячи — двадцать
 	// минут карты на две минуты новой работы.
 	Recount bool
+
+	// NodeWait — сколько ждать возвращения сервера при обрыве связи, прежде
+	// чем остановить счёт; 0 — 15 минут, как у сборки графа.
+	//
+	// **Почему нужно.** 10.09.2026 в 17:59 полный пересчёт векторов books
+	// (46 минут карты) упал на 115 тысячах понятий из 244: ssh-туннель к стенду
+	// оборвался на семь секунд, сторож поднял его сам, а пересчёт уже вышел
+	// с «connection refused». Обрыв дороги — не отказ сервера; ждать его
+	// возвращения дешевле, чем считать заново.
+	NodeWait time.Duration
 }
+
+// embedRetryEvery — как часто пробовать снова после обрыва. Переменная,
+// а не постоянная, чтобы тест не ждал секунды.
+var embedRetryEvery = 30 * time.Second
 
 func (o EmbedOpts) norm() EmbedOpts {
 	if o.Batch <= 0 {
@@ -37,7 +56,46 @@ func (o EmbedOpts) norm() EmbedOpts {
 	if o.Workers <= 0 {
 		o.Workers = 4
 	}
+	if o.NodeWait <= 0 {
+		o.NodeWait = 15 * time.Minute
+	}
 	return o
+}
+
+// transientEmbedErr — обрыв дороги до сервера, а не отказ по существу:
+// соединение отклонено, оборвано, истёк срок запроса.
+func transientEmbedErr(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection refused") || strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") || strings.Contains(s, "no such host")
+}
+
+// embedWithWait считает пачку, пережидая обрыв связи до o.NodeWait.
+func embedWithWait(ctx context.Context, emb kb.Embedder, texts []string, wait time.Duration) ([][]float32, error) {
+	started := time.Now()
+	for {
+		vecs, err := emb.Embed(ctx, texts)
+		if err == nil || !transientEmbedErr(err) || time.Since(started) >= wait {
+			return vecs, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(embedRetryEvery):
+		}
+	}
 }
 
 // EmbedProgress — ход счёта.
@@ -154,15 +212,21 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	if err != nil {
 		return err
 	}
-	if already > 0 {
-		if len(kept) != already*dim {
-			// Размерность прежних векторов не та — склеивать нельзя.
-			return fmt.Errorf("прежние векторы не той размерности: %d на %d понятий",
-				len(kept), already)
-		}
-		data = append(kept, data...)
+	if already == 0 {
+		return g.SaveEntityVectors(emb.Model(), digest, dim, data)
 	}
-	return g.SaveEntityVectors(emb.Model(), digest, dim, data)
+	if len(kept) != already*dim {
+		// Размерность прежних векторов не та — склеивать нельзя.
+		return fmt.Errorf("прежние векторы не той размерности: %d на %d понятий",
+			len(kept), already)
+	}
+	// Свежие — только хвост: отпечатки головы остаются прежними, иначе
+	// устаревшие векторы перестали бы находиться (saveEntityVectors).
+	fresh := make([]uint32, 0, len(texts))
+	for i := range texts {
+		fresh = append(fresh, uint32(already+i+1))
+	}
+	return g.saveEntityVectors(emb.Model(), digest, dim, append(kept, data...), fresh)
 }
 
 // embedTexts собирает тексты понятий по местам: место N-1 — понятие с номером N.
@@ -253,7 +317,7 @@ func embedBatches(ctx context.Context, emb kb.Embedder, texts []string, o EmbedO
 					return
 				}
 				j := jobs[i]
-				vecs, err := emb.Embed(ctx, texts[j.from:j.to])
+				vecs, err := embedWithWait(ctx, emb, texts[j.from:j.to], o.NodeWait)
 				mu.Lock()
 				switch {
 				case err != nil:
