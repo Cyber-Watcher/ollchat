@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
@@ -62,5 +64,71 @@ func TestToolsListEqualsReadOnlyNames(t *testing.T) {
 		if !want[n] {
 			t.Errorf("служба отдаёт лишнее: %s", n)
 		}
+	}
+}
+
+// kb_status берёт граф из общего кеша службы и сверяет его актуальность.
+//
+// Без изменений на диске второй вызов отдаёт тот же экземпляр: до 11.09.2026
+// kb_status открывал граф на каждый вызов, и на redos8dev это стоило 77 с —
+// клиент MCP не дожидался. После записи в файлы графа (так пишет сборка) кеш
+// обязан открыть граф заново, иначе kb_status врал бы числами вчерашнего графа.
+// Без кеша (graph.cache = false) граф открывается на каждый вызов, как прежде.
+func TestStatusGraphUsesCacheAndNoticesChanges(t *testing.T) {
+	collDir := filepath.Join(t.TempDir(), "books")
+	if err := os.MkdirAll(collDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g, err := graph.Create(collDir, "books", 100, graph.Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := graph.NewCache(0, graph.Rules{})
+	defer cache.Close()
+	get := func(c *graph.Cache) *graph.Graph {
+		t.Helper()
+		g, release, err := statusGraph(c, collDir, 100, graph.Rules{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		return g
+	}
+
+	g1 := get(cache)
+	if g2 := get(cache); g2 != g1 {
+		t.Error("файлы графа не менялись, а kb_status открыл граф заново — кеш не используется")
+	}
+
+	// Сдвинуть время правки одного файла графа — то, что видит кеш после дозаписи сборкой.
+	graphDir := filepath.Join(collDir, graph.DirFor(""))
+	ents, err := os.ReadDir(graphDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	touched := false
+	later := time.Now().Add(time.Minute)
+	for _, e := range ents {
+		if !e.IsDir() {
+			if err := os.Chtimes(filepath.Join(graphDir, e.Name()), later, later); err != nil {
+				t.Fatal(err)
+			}
+			touched = true
+			break
+		}
+	}
+	if !touched {
+		t.Fatalf("в каталоге графа %s нет файлов", graphDir)
+	}
+	if g3 := get(cache); g3 == g1 {
+		t.Error("файлы графа изменились, а kb_status получил прежний граф из кеша")
+	}
+
+	if a, b := get(nil), get(nil); a == b {
+		t.Error("без кеша kb_status обязан открывать граф на каждый вызов")
 	}
 }

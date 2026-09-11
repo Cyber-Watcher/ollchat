@@ -63,6 +63,14 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 	// открытым между вызовами: открытие графа коллекции books стоит 11.7 с
 	// и гигабайт памяти (замер 28.08.2026). Срок простоя здесь длиннее, чем
 	// в диалоге, — служба для того и заведена, чтобы отвечать быстро.
+	//
+	// Кеш один на всю службу: его берут и инструменты графа, и kb_status.
+	// До 11.09.2026 kb_status открывал граф сам на каждый вызов — на redos8dev
+	// это 77 с, и клиент MCP не дожидался ответа.
+	var graphCache *graph.Cache
+	if cfg.Graph.Cache {
+		graphCache = graph.NewCache(serviceGraphTTL, cfg.Graph.Rules())
+	} // иначе graph.cache = false: открывать на каждый вызов
 	registry, err := tools.NewRegistry(enabled, tools.Options{
 		GraphRules:     cfg.Graph.Rules(),
 		KBTableBoost:   cfg.KB.TableBoost,
@@ -73,12 +81,7 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 		KB:             base,
 		KBDir:          cfg.KB.Dir,
 		KBDefault:      cfg.KB.Default,
-		GraphCache: func() *graph.Cache {
-			if !cfg.Graph.Cache {
-				return nil // graph.cache = false: открывать на каждый вызов
-			}
-			return graph.NewCache(serviceGraphTTL, cfg.Graph.Rules())
-		}(),
+		GraphCache:     graphCache,
 		GraphNeighbors: graph.NeighborRank{
 			SenseWeight: cfg.Graph.NeighborSenseWeight,
 			Pool:        cfg.Graph.NeighborPool,
@@ -104,7 +107,7 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 	if err != nil {
 		return nil, kbserve.Opts{}, err
 	}
-	return mcp.NewServer(registry, statusTool(base, cfg.Graph.Rules())),
+	return mcp.NewServer(registry, statusTool(base, cfg.Graph.Rules(), graphCache)),
 		kbserve.Opts{
 			TableBoost: cfg.KB.TableBoost,
 			Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
@@ -116,11 +119,6 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 		}, nil
 }
 
-// statusTool — справка о том, на что клиент вообще может опираться.
-//
-// Без неё клиент не отличает «в книгах об этом не написано» от «книги по этой
-// теме не проиндексированы», а это разные ответы. Заодно видно, посчитаны ли
-// смыслы и разобран ли граф: и то и другое меняет качество поиска.
 // serviceGraphTTL — сколько служба держит граф открытым без обращений.
 //
 // Час: у ассистента вопросы идут пачками с перерывами на чтение и правку кода,
@@ -128,7 +126,14 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 // пачке. Гигабайт памяти на этот час — цена, ради которой служба и заведена.
 const serviceGraphTTL = time.Hour
 
-func statusTool(base *kb.Base, rules graph.Rules) mcp.Tool {
+// statusTool — справка о том, на что клиент вообще может опираться.
+//
+// Без неё клиент не отличает «в книгах об этом не написано» от «книги по этой
+// теме не проиндексированы», а это разные ответы. Заодно видно, посчитаны ли
+// смыслы и разобран ли граф: и то и другое меняет качество поиска.
+//
+// Граф берётся из общего кеша службы (cache; nil — открыть на вызов): см. statusGraph.
+func statusTool(base *kb.Base, rules graph.Rules, cache *graph.Cache) mcp.Tool {
 	return mcp.Tool{
 		Spec: ollama.ToolSpec{
 			Name: "kb_status",
@@ -163,17 +168,39 @@ func statusTool(base *kb.Base, rules graph.Rules) mcp.Tool {
 				}
 				b.WriteString("\n")
 
-				g, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules)
+				g, release, err := statusGraph(cache, coll.Dir(), coll.ChunkCount(), rules)
 				if err != nil {
 					fmt.Fprintf(&b, "  граф понятий: %v\n", err)
 					continue
 				}
 				gs := g.Stats(coll.ChunkCount())
+				release()
 				fmt.Fprintf(&b, "  граф понятий: сущностей %d, связей %d, разобрано фрагментов %d из %d\n",
 					gs.Entities, gs.Edges, gs.Covered, coll.ChunkCount())
-				g.Close()
 			}
 			return b.String(), nil
 		},
 	}
+}
+
+// statusGraph отдаёт граф коллекции для kb_status и возврат, который вызывать
+// обязательно.
+//
+// С кешем — тот же экземпляр, что у инструментов графа. Актуальность сверяет
+// сам кеш: на каждое обращение он снимает отпечаток файлов каталога графа
+// (имена, размеры, времена правки) и, если сборка что-то дописала, открывает
+// граф заново, а прежний закрывает, когда его отпустят. Сборке это не мешает:
+// замок сборки берёт и снимает только тот, кто его взял (Graph.Unlock при
+// g.lock == nil ничего не делает), а в файлы графа служба ничего не дописывает.
+//
+// Без кеша (graph.cache = false) — открыть и закрыть, как до 11.09.2026.
+func statusGraph(cache *graph.Cache, collDir string, chunks int, rules graph.Rules) (*graph.Graph, func(), error) {
+	if cache != nil {
+		return cache.Get(collDir, chunks)
+	}
+	g, err := graph.Open(collDir, chunks, rules)
+	if err != nil {
+		return nil, nil, err
+	}
+	return g, func() { g.Close() }, nil
 }
