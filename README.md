@@ -85,6 +85,7 @@ TUI-клиент и агент для серверов Ollama на Go. Один 
 ```bash
 export PATH=$HOME/sdk/go1.26.5/bin:$PATH
 go build -o ollchat ./cmd/ollchat
+cp ollchat ~/bin/           # если ~/bin в PATH — запускается из любого каталога
 go test ./... && go vet ./... && gofmt -l .
 ```
 
