@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,6 +30,17 @@ import (
 // служба неделями отвечала бы по графу недельной давности. Отпечаток — имена,
 // размеры и времена правки файлов каталога графа; изменился — открываем заново.
 //
+// **Обновление в фоне (RefreshInBackground, служба ollmcp, 11.09.2026).** Пока
+// идёт сборка, отпечаток меняется между любыми двумя вызовами, и кэш, честно
+// открывая граф заново на каждый, не помогал вовсе: на redos8dev открытие графа
+// books — 77 с, три подряд kb_status заняли 78/77/77 с, клиент MCP не дождался
+// ни одного. В фоновом режиме устаревший граф отдаётся сразу, а свежий
+// открывается в фоне — не больше одного открытия на коллекцию — и подменяет
+// прежний, когда готов. Ответ отстаёт от диска на одно открытие; экземпляр
+// графа об этом знает (Graph.Freshness), и служба пишет это в ответе. Без
+// фонового режима кэш ведёт себя как прежде: интерфейсу ollchat отставание
+// ни к чему, там граф спрашивают редко.
+//
 // Читать открытый граф можно из нескольких горутин: всё лежит в памяти под
 // `sync.RWMutex`, файлы открыты только на дозапись.
 
@@ -37,8 +49,12 @@ type Cache struct {
 	rules Rules         // по каким правилам открывать графы
 	ttl   time.Duration // сколько граф живёт без обращений; 0 — вечно
 
-	mu   sync.Mutex
-	open map[string]*cachedGraph
+	mu         sync.Mutex
+	open       map[string]*cachedGraph
+	background bool                  // устаревший отдаётся сразу, свежий — в фоне
+	loading    map[string]*cacheLoad // идущие фоновые открытия, по одному на коллекцию
+	closed     bool                  // Close позван: фоновые открытия свой граф закрывают
+	loads      sync.WaitGroup        // Close дожидается фоновых открытий
 }
 
 type cachedGraph struct {
@@ -49,9 +65,29 @@ type cachedGraph struct {
 	timer *time.Timer
 }
 
+// cacheLoad — одно фоновое открытие графа; done закрывается по его окончании.
+type cacheLoad struct {
+	done chan struct{}
+	err  error
+}
+
+// errCacheClosed — кэш закрыли, пока ждали открытия графа.
+var errCacheClosed = errors.New("кэш графа закрыт")
+
 // NewCache заводит кэш. ttl — срок простоя, 0 — держать, пока не закроют.
 func NewCache(ttl time.Duration, rules Rules) *Cache {
-	return &Cache{ttl: ttl, rules: rules, open: map[string]*cachedGraph{}}
+	return &Cache{ttl: ttl, rules: rules,
+		open: map[string]*cachedGraph{}, loading: map[string]*cacheLoad{}}
+}
+
+// RefreshInBackground включает фоновое обновление: граф, чьи файлы изменились,
+// отдаётся сразу, а свежий открывается в фоне и подменяет его, когда готов.
+// Звать до первого Get. Возвращает тот же кэш — для записи в одну строку.
+func (c *Cache) RefreshInBackground() *Cache {
+	c.mu.Lock()
+	c.background = true
+	c.mu.Unlock()
+	return c
 }
 
 // Get отдаёт открытый граф и возврат: **вызывать возврат обязательно**,
@@ -59,7 +95,22 @@ func NewCache(ttl time.Duration, rules Rules) *Cache {
 //
 // Пока граф кем-то занят, он не закрывается — даже если файлы изменились
 // и открыт уже новый. Иначе долгий поиск читал бы закрытые под ним файлы.
+//
+// В фоновом режиме (RefreshInBackground) граф с изменившимися файлами отдаётся
+// сразу, с пометкой в Graph.Freshness; ждать приходится, только если отдать
+// нечего — тогда ждут одного общего открытия, а не открывают каждый своё.
 func (c *Cache) Get(collDir string, chunks int) (*Graph, func(), error) {
+	c.mu.Lock()
+	background := c.background
+	c.mu.Unlock()
+	if background {
+		return c.getBackground(collDir, chunks)
+	}
+	return c.getSync(collDir, chunks)
+}
+
+// getSync — прежний порядок: изменились файлы — открыть заново и дождаться.
+func (c *Cache) getSync(collDir string, chunks int) (*Graph, func(), error) {
 	dir := filepath.Join(collDir, DirFor(c.rules.Name))
 	stamp := dirStamp(dir)
 
@@ -101,11 +152,105 @@ func (c *Cache) Get(collDir string, chunks int) (*Graph, func(), error) {
 	return g, func() { c.release(collDir, e) }, nil
 }
 
-// Close закрывает всё, что держит кэш. Занятые графы закроются, когда их
-// отпустят: закрывать файлы из-под работающего поиска нельзя.
-func (c *Cache) Close() error {
+// getBackground — фоновый режим: есть что отдать — отдаём сразу.
+func (c *Cache) getBackground(collDir string, chunks int) (*Graph, func(), error) {
+	dir := filepath.Join(collDir, DirFor(c.rules.Name))
+	stamp := dirStamp(dir)
+
+	c.mu.Lock()
+	for {
+		if c.closed {
+			c.mu.Unlock()
+			return nil, nil, errCacheClosed
+		}
+		if e, ok := c.open[collDir]; ok {
+			if e.stamp != stamp {
+				// Сборка дописала файлы: отдаём то, что открыто, и открываем свежий.
+				e.g.refreshing.Store(true)
+				c.startLoad(collDir, chunks)
+			}
+			c.hold(e)
+			c.mu.Unlock()
+			return e.g, func() { c.release(collDir, e) }, nil
+		}
+		// Отдать нечего: ждём открытия — своего или уже идущего.
+		l := c.startLoad(collDir, chunks)
+		c.mu.Unlock()
+		<-l.done
+		if l.err != nil {
+			return nil, nil, l.err
+		}
+		// Сверяем с диском заново: пока ждали, сборка могла дописать ещё.
+		stamp = dirStamp(dir)
+		c.mu.Lock()
+	}
+}
+
+// Warm открывает граф коллекции в фоне, если он ещё не открыт и не открывается:
+// чтобы первый вопрос после запуска службы не ждал открытия графа.
+func (c *Cache) Warm(collDir string, chunks int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	if _, ok := c.open[collDir]; ok {
+		return
+	}
+	c.startLoad(collDir, chunks)
+}
+
+// startLoad заводит фоновое открытие графа коллекции или отдаёт уже идущее.
+// Звать под c.mu.
+func (c *Cache) startLoad(collDir string, chunks int) *cacheLoad {
+	if l := c.loading[collDir]; l != nil {
+		return l
+	}
+	l := &cacheLoad{done: make(chan struct{})}
+	c.loading[collDir] = l
+	c.loads.Add(1)
+	go func() {
+		defer c.loads.Done()
+		// Отпечаток снимается ДО открытия: правка, пришедшая во время открытия,
+		// даст расхождение и следующее обновление, а не потеряется.
+		stamp := dirStamp(filepath.Join(collDir, DirFor(c.rules.Name)))
+		g, err := Open(collDir, chunks, c.rules)
+
+		c.mu.Lock()
+		delete(c.loading, collDir)
+		l.err = err
+		switch {
+		case err != nil:
+			// Свежий не открылся — прежний остаётся, и следующий вызов попробует снова.
+			if old, ok := c.open[collDir]; ok {
+				old.g.refreshing.Store(false)
+			}
+		case c.closed:
+			g.Close()
+		default:
+			if old, ok := c.open[collDir]; ok {
+				old.stale = true
+				c.stopTimer(old)
+				if old.refs == 0 {
+					old.g.Close()
+				}
+			}
+			e := &cachedGraph{g: g, stamp: stamp}
+			c.open[collDir] = e
+			c.arm(collDir, e) // его ещё никто не взял — пошёл срок простоя
+		}
+		c.mu.Unlock()
+		close(l.done)
+	}()
+	return l
+}
+
+// Close закрывает всё, что держит кэш. Занятые графы закроются, когда их
+// отпустят: закрывать файлы из-под работающего поиска нельзя. Идущие фоновые
+// открытия Close дожидается — они закрывают свой граф сами.
+func (c *Cache) Close() error {
+	c.mu.Lock()
+	c.closed = true
 	var first error
 	for dir, e := range c.open {
 		e.stale = true
@@ -117,6 +262,8 @@ func (c *Cache) Close() error {
 		}
 		delete(c.open, dir)
 	}
+	c.mu.Unlock()
+	c.loads.Wait()
 	return first
 }
 
@@ -143,6 +290,12 @@ func (c *Cache) release(collDir string, e *cachedGraph) {
 		e.g.Close()
 		return
 	}
+	c.arm(collDir, e)
+}
+
+// arm заводит срок простоя графа, которым сейчас никто не пользуется.
+// Звать под c.mu.
+func (c *Cache) arm(collDir string, e *cachedGraph) {
 	if c.ttl <= 0 {
 		return // держим, пока не позовут Close
 	}

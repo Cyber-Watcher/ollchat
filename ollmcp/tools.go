@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -67,9 +69,17 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 	// Кеш один на всю службу: его берут и инструменты графа, и kb_status.
 	// До 11.09.2026 kb_status открывал граф сам на каждый вызов — на redos8dev
 	// это 77 с, и клиент MCP не дожидался ответа.
+	//
+	// Обновление в фоне (решение владельца 11.09.2026): пока идёт сборка, файлы
+	// графа меняются каждые несколько секунд, и кеш со сверкой открывал граф
+	// заново на каждый вызов — три kb_status подряд 78/77/77 с. Теперь служба
+	// отвечает по уже открытому графу сразу, с пометкой о его времени, а свежий
+	// открывает в фоне. Прогрев при старте — чтобы и первый вопрос после
+	// перезапуска службы не ждал открытия графа.
 	var graphCache *graph.Cache
 	if cfg.Graph.Cache {
-		graphCache = graph.NewCache(serviceGraphTTL, cfg.Graph.Rules())
+		graphCache = graph.NewCache(serviceGraphTTL, cfg.Graph.Rules()).RefreshInBackground()
+		go warmGraphs(base, graphCache, cfg.Graph.Rules())
 	} // иначе graph.cache = false: открывать на каждый вызов
 	registry, err := tools.NewRegistry(enabled, tools.Options{
 		GraphRules:     cfg.Graph.Rules(),
@@ -174,12 +184,39 @@ func statusTool(base *kb.Base, rules graph.Rules, cache *graph.Cache) mcp.Tool {
 					continue
 				}
 				gs := g.Stats(coll.ChunkCount())
+				opened, refreshing := g.Freshness()
 				release()
 				fmt.Fprintf(&b, "  граф понятий: сущностей %d, связей %d, разобрано фрагментов %d из %d\n",
 					gs.Entities, gs.Edges, gs.Covered, coll.ChunkCount())
+				if refreshing {
+					fmt.Fprintf(&b, "  (числа графа на %s: сборка с тех пор дописала файлы, свежий граф "+
+						"открывается в фоне — следующий вызов получит его)\n", opened.Format("15:04:05"))
+				}
 			}
 			return b.String(), nil
 		},
+	}
+}
+
+// warmGraphs открывает в фоне графы всех коллекций, у которых граф есть.
+//
+// Без прогрева первый вопрос после запуска службы ждал бы открытия графа —
+// на redos8dev 77 с, дольше, чем ждёт клиент MCP, — а перезапускают службу
+// сторож и ассистент (privatescripts/bin/ollmcp-keeper.sh), то есть не редко.
+func warmGraphs(base *kb.Base, cache *graph.Cache, rules graph.Rules) {
+	names, err := base.Names()
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		coll, err := base.Open(n)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(coll.Dir(), graph.DirFor(rules.Name))); err != nil {
+			continue // графа у коллекции нет — греть нечего
+		}
+		cache.Warm(coll.Dir(), coll.ChunkCount())
 	}
 }
 

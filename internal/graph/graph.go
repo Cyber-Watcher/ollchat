@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -288,6 +289,12 @@ type Graph struct {
 	// в HowGraphBuildRuns.md; чтобы его заметить, надо видеть числа.
 	opened OpenStats
 
+	// openedAt и refreshing — насколько этот экземпляр свеж, см. Freshness:
+	// когда открыт, и заметил ли кэш с фоновым обновлением, что файлы графа
+	// с тех пор изменились и свежий экземпляр уже открывается.
+	openedAt   time.Time
+	refreshing atomic.Bool
+
 	lock *os.File
 
 	// staleLock — что было написано в признаке сборки, снятом с неживого
@@ -300,6 +307,15 @@ func (g *Graph) Dir() string { return g.dir }
 
 // Meta возвращает паспорт графа.
 func (g *Graph) Meta() Meta { return g.meta }
+
+// Freshness — когда открыт этот экземпляр графа и открывается ли уже свежий.
+//
+// refreshing ставит только кэш в фоновом режиме (Cache.RefreshInBackground):
+// файлы графа с момента открытия изменились, ответ по этому экземпляру отстаёт
+// от диска, а свежий экземпляр уже открывается. Служба пишет это в ответе.
+func (g *Graph) Freshness() (opened time.Time, refreshing bool) {
+	return g.openedAt, g.refreshing.Load()
+}
 
 // Entities отдаёт реестр сущностей.
 func (g *Graph) Entities() *Entities { return g.ents }
@@ -465,7 +481,7 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 	runtime.ReadMemStats(&before)
 	started := time.Now()
 
-	g := &Graph{dir: dir, meta: m, rules: rules.norm()}
+	g := &Graph{dir: dir, meta: m, rules: rules.norm(), openedAt: time.Now()}
 	var err error
 	// Шаги названы так, как их стоит показать человеку. Первый — самый долгий:
 	// реестр понятий это сотни мегабайт JSONL, остальные вместе занимают

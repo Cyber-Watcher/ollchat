@@ -134,20 +134,28 @@ func (o Options) queryTimeout() time.Duration {
 	return kb.DefaultQueryTimeout
 }
 
-// graphNote приписывает к ответу честную оговорку о неполноте графа.
+// graphNote приписывает к ответу честные оговорки: о неполноте графа и о том,
+// что ответ дан по графу, который уже отстал от диска.
 //
-// Без неё «ничего не нашлось» читается как «в книгах об этом не пишут», а это
+// Без первой «ничего не нашлось» читается как «в книгах об этом не пишут», а это
 // разные утверждения: граф собирается каталогами и покрывает пока не всю
-// библиотеку.
+// библиотеку. Вторая бывает только у службы с фоновым обновлением кэша
+// (graph.Cache.RefreshInBackground): пока идёт сборка, служба отвечает по уже
+// открытому графу, а свежий открывает в фоне, — и говорит об этом, а не молчит.
 func graphNote(g *graph.Graph, coll *kb.Collection) string {
-	st := g.Stats(coll.ChunkCount())
-	if st.Pending <= 0 || coll.ChunkCount() == 0 {
-		return ""
+	var b strings.Builder
+	if opened, refreshing := g.Freshness(); refreshing {
+		fmt.Fprintf(&b, "\nОтвет по графу на %s: сборка с тех пор дописала файлы, "+
+			"свежий граф открывается в фоне — следующий вызов получит его.", opened.Format("15:04:05"))
 	}
-	percent := 100 * st.Covered / coll.ChunkCount()
-	return fmt.Sprintf("\nГраф собран по %d%% библиотеки (%d фрагментов из %d): "+
-		"если понятия здесь нет, оно может быть в неразобранных книгах — поищи kb_search.",
-		percent, st.Covered, coll.ChunkCount())
+	st := g.Stats(coll.ChunkCount())
+	if st.Pending > 0 && coll.ChunkCount() > 0 {
+		percent := 100 * st.Covered / coll.ChunkCount()
+		fmt.Fprintf(&b, "\nГраф собран по %d%% библиотеки (%d фрагментов из %d): "+
+			"если понятия здесь нет, оно может быть в неразобранных книгах — поищи kb_search.",
+			percent, st.Covered, coll.ChunkCount())
+	}
+	return b.String()
 }
 
 // graphReq — что проверять правилами доступа. Граф лежит внутри каталога базы
