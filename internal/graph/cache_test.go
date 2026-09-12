@@ -200,7 +200,7 @@ func waitNewGraph(t *testing.T, c *Cache, dir string, old *Graph) *Graph {
 // свежий открывается в фоне и подменяет прежний.
 //
 // Ради этого режим и заведён: пока идёт сборка, файлы меняются каждые
-// несколько секунд, и открытие на каждый вызов (77 с на redos8dev) не давало
+// несколько секунд, и открытие на каждый вызов (77 с на рабочей машине) не давало
 // службе ответить ни разу.
 func TestCacheBackgroundServesOpenGraphAndRefreshes(t *testing.T) {
 	dir := cacheFixture(t)
