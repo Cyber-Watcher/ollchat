@@ -268,7 +268,8 @@ func parseFlags() *cliFlags {
 	f.graphRedoEmpty = flag.Bool("graph-redo-empty", false,
 		"с --graph-build: перепройти куски, помеченные пустыми")
 	f.graphIgnoreBusy = flag.Bool("graph-ignore-busy", false,
-		"с --graph-build: идти, даже если наблюдатели говорят, что карты заняты чужой работой")
+		"оставлен для совместимости и ни на что не влияет: с 12.09.2026 наблюдатели\n"+
+			"только показывают состояние карт и сборку не отменяют")
 	f.nodes = flag.Bool("nodes", false,
 		"состояние серверов сборки по данным ollnode: карта, память, слоты, беды из журнала")
 	f.graphLog = flag.String("graph-log", "",

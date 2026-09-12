@@ -59,7 +59,10 @@ type BuildRun struct {
 	AllowPromptChange bool // сборка другим промптом
 	RedoEmpty         bool // перечитать куски, где раньше ничего не нашлось
 	LinkNew           bool // связывать новые имена с узлами (только опытный граф)
-	IgnoreBusy        bool // не ждать свободной карты
+	// IgnoreBusy принимается ради совместимости со старыми командами и ничего
+	// не меняет: с 12.09.2026 наблюдатели только показывают состояние карт
+	// и сборку не отменяют (слово владельца).
+	IgnoreBusy bool
 
 	LogPath string // журнал хода; пусто — stderr
 	Kind    string // вид графа при создании: production / experimental
@@ -70,7 +73,7 @@ type BuildRun struct {
 func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) error {
 	folder, bookQuery, limit, workers := run.Folder, run.Book, run.Limit, run.Workers
 	allowModelChange, allowPromptChange := run.AllowModelChange, run.AllowPromptChange
-	redoEmpty, linkNew, ignoreBusy := run.RedoEmpty, run.LinkNew, run.IgnoreBusy
+	redoEmpty, linkNew := run.RedoEmpty, run.LinkNew
 	logPath, kind, note := run.LogPath, run.Kind, run.Note
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
@@ -187,36 +190,34 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 		fmt.Fprintf(stdout, "обрыв связи: ждать возвращения узла до %s, потом остановка\n", w)
 	}
 
-	// Наблюдатели (этап 96): что происходит на картах прямо сейчас. Запускать
-	// сборку поверх чужого обучения — значит встать с ним в очередь на часы
-	// и получить числа, которым нельзя верить.
+	// Наблюдатели (этап 96): что происходит на картах прямо сейчас.
+	//
+	// **Только показ, решений не принимают** (слово владельца 12.09.2026:
+	// «ollnode только выдаёт информацию и никак не должен влиять на сборку»).
+	// До этого дня занятая, по мнению наблюдателя, карта отменяла заход — и
+	// 12.09 отменила на пустом месте: наблюдатель считал чужими собственные
+	// счётчики моделей Ollama, книга упала с кодом 1, не разобрав ни куска.
+	// Сборка запускается и снимается словом человека, а не показаниями
+	// градусника.
 	if pool != nil && pool.HasProbes() {
 		pool.Poll(context.Background(), false)
-		busy, free := 0, 0
+		busy := 0
 		for _, st := range pool.Stats() {
 			if st.Probe == nil {
 				continue
 			}
 			fmt.Fprintf(stdout, "  %s: %s\n", st.Name, st.Probe.Line())
 			if reason := st.Probe.Busy(0); reason != "" {
-				fmt.Fprintf(stdout, "    занято — %s\n", reason)
+				fmt.Fprintf(stdout, "    на карте посторонняя работа — %s\n", reason)
 				busy++
-			} else {
-				free++
 			}
 			for _, j := range st.Probe.Journal {
 				fmt.Fprintf(stdout, "    журнал (%s): %s\n", j.Kind, j.Text)
 			}
 		}
-		if busy > 0 && free == 0 && !ignoreBusy {
-			return fmt.Errorf(
-				"на всех узлах карта занята чужой работой или модель вытеснена в ОЗУ.\n" +
-					"Сборка встанет с чужим счётом в очередь и пойдёт в разы медленнее.\n" +
-					"Дождитесь освобождения или запустите с ключом --graph-ignore-busy")
-		}
 		if busy > 0 {
-			fmt.Fprintf(stdout, "занятых узлов %d из %d — работа пойдёт на свободные\n",
-				busy, busy+free)
+			fmt.Fprintf(stdout, "узлов с посторонней работой на карте: %d — "+
+				"сборка всё равно идёт, это только сведения\n", busy)
 		}
 	}
 	switch {

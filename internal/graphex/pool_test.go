@@ -530,9 +530,13 @@ func TestPollKeepsOffNodeOut(t *testing.T) {
 	}
 }
 
-// Возвращённый узел с занятой картой слотов не получает: их вернёт опрос
-// наблюдателя, когда занятость снимется.
-func TestReviveKeepsBusyNodeOut(t *testing.T) {
+// Вернувшийся узел получает слоты сразу, что бы ни показывал наблюдатель.
+//
+// Правило владельца 12.09.2026: «ollnode только выдаёт информацию и никак
+// не должен влиять на сборку». Работу отменяет молчащий сервер (off), а не
+// посторонний процесс на карте: до этой правки такой узел оставался без слотов,
+// и на единственной карте это означало отменённый заход.
+func TestReviveGivesSlotsBackDespiteProbe(t *testing.T) {
 	body := probeForeign
 	a, b := newFakeNode(t, 0), newFakeNode(t, 0)
 	p := pool(t,
@@ -540,7 +544,7 @@ func TestReviveKeepsBusyNodeOut(t *testing.T) {
 		Node{Name: "b", URL: b.srv.URL, Workers: 1})
 	na := p.nodes[0]
 	killNode(t, p, na)
-	p.Poll(context.Background(), true) // занят чужим
+	p.Poll(context.Background(), true) // на карте посторонняя работа
 
 	p.mu.Lock()
 	na.nextTry = time.Time{} // откат не ждём
@@ -549,21 +553,16 @@ func TestReviveKeepsBusyNodeOut(t *testing.T) {
 
 	p.mu.Lock()
 	off, out, left := na.off, na.out, p.left
+	note := na.note
 	p.mu.Unlock()
 	if off {
 		t.Fatal("узел не вернулся, хотя сервер отвечает")
 	}
-	if out != 1 || left != 1 {
-		t.Fatalf("занятому узлу вернули слоты: изъято %d, в обороте %d", out, left)
-	}
-
-	body = probeClean
-	p.Poll(context.Background(), true)
-	p.mu.Lock()
-	out, left = na.out, p.left
-	p.mu.Unlock()
 	if out != 0 || left != 2 {
-		t.Fatalf("после снятия занятости слоты не вернулись: изъято %d, в обороте %d", out, left)
+		t.Fatalf("слоты не вернулись из-за показаний наблюдателя: изъято %d, в обороте %d", out, left)
+	}
+	if note == "" {
+		t.Error("посторонняя работа на карте не запомнена для показа")
 	}
 }
 
@@ -604,9 +603,15 @@ const probeClean = `{"gpus":[{"index":0,"name":"A100","mem_used_mib":100,"util_p
 const probeForeign = `{"gpus":[{"index":0,"name":"RTX 3090","mem_used_mib":20000,"util_pct":97}],
 	"gpu_procs":[{"pid":999,"name":"/usr/bin/python3","used_mib":20000,"ours":false}]}`
 
-// Узел, чью карту занял чужой процесс, выводится из раздачи заранее —
-// не дожидаясь трёх неудач и девяти запросов в очередь за чужой моделью.
-func TestPoolParksBusyNode(t *testing.T) {
+// Узел с посторонней работой на карте продолжает брать куски: наблюдатель
+// сообщает, а не распоряжается.
+//
+// Слово владельца 12.09.2026: «ollnode только выдаёт информацию и никак
+// не должен влиять на сборку». До этой правки такой узел выводился из раздачи,
+// и в тот день сборка отменилась на пустом месте — наблюдатель посчитал чужими
+// собственные счётчики моделей Ollama. Причина занятости остаётся видна
+// в Stats, чтобы человек решал сам.
+func TestPoolShowsBusyButKeepsWorking(t *testing.T) {
 	a, b := newFakeNode(t, 0), newFakeNode(t, 0)
 	clean, busy := probeClean, probeForeign
 	p := pool(t,
@@ -615,91 +620,91 @@ func TestPoolParksBusyNode(t *testing.T) {
 
 	p.pollProbes(context.Background())
 
-	var parked, working int
+	var noted, quiet int
 	for _, s := range p.Stats() {
 		switch s.Name {
 		case "rtx3090":
 			if s.Busy == "" {
-				t.Error("узел с чужим процессом на карте продолжает брать работу")
+				t.Error("посторонняя работа на карте не показана человеку")
 			} else if !strings.Contains(s.Busy, "python3") {
 				t.Errorf("причина невнятная: %q", s.Busy)
 			}
-			parked++
+			noted++
 		case "a100":
 			if s.Busy != "" {
-				t.Errorf("чистый узел выведен: %q", s.Busy)
+				t.Errorf("чистому узлу приписана посторонняя работа: %q", s.Busy)
 			}
-			working++
+			quiet++
 		}
 	}
-	if parked != 1 || working != 1 {
-		t.Fatalf("выведено %d, работает %d", parked, working)
+	if noted != 1 || quiet != 1 {
+		t.Fatalf("с отметкой %d, без отметки %d", noted, quiet)
 	}
 
-	// Вся работа уходит на чистый узел.
+	// Работа идёт на оба узла: слоты у «занятого» не отбирались.
 	for i := 0; i < 6; i++ {
 		if _, err := p.Extract(context.Background(), "с", "в"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := atomic.LoadInt32(&b.calls); got != 0 {
-		t.Errorf("выведенный узел получил %d кусков", got)
+	if got := atomic.LoadInt32(&b.calls); got == 0 {
+		t.Error("узел с отметкой о занятой карте не получил ни одного куска")
 	}
-	if got := atomic.LoadInt32(&a.calls); got != 6 {
-		t.Errorf("чистый узел разобрал %d кусков из 6", got)
+	if got := atomic.LoadInt32(&a.calls); got == 0 {
+		t.Error("чистый узел не получил ни одного куска")
+	}
+	if got := atomic.LoadInt32(&a.calls) + atomic.LoadInt32(&b.calls); got != 6 {
+		t.Errorf("разобрано %d кусков из 6", got)
 	}
 
-	// Карта освободилась — узел возвращается сам.
+	// Карта освободилась — отметка снимается сама.
 	busy = probeClean
 	p.pollProbes(context.Background())
 	for _, s := range p.Stats() {
 		if s.Name == "rtx3090" && s.Busy != "" {
-			t.Fatalf("узел не вернулся по чистому снимку: %q", s.Busy)
+			t.Fatalf("отметка не снялась по чистому снимку: %q", s.Busy)
 		}
-	}
-	for i := 0; i < 8; i++ {
-		if _, err := p.Extract(context.Background(), "с", "в"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if atomic.LoadInt32(&b.calls) == 0 {
-		t.Error("вернувшийся узел не получил ни одного куска")
 	}
 }
 
-// Последний работающий узел по занятости не выводится: на единственной карте
-// «занято» означает «медленнее», а не «нельзя». Иначе наблюдатель
-// останавливал бы сборку вместо того, чтобы её беречь.
-func TestPoolKeepsLastNodeDespiteBusy(t *testing.T) {
+// Занятая, по мнению наблюдателя, карта работу не отменяет — ни на одном узле,
+// ни на всех сразу.
+//
+// Прежде последний узел спасало отдельное правило («на единственной карте
+// занято значит медленнее, а не нельзя»). Теперь правило общее и простое:
+// наблюдатель не распоряжается работой вовсе, а отметка остаётся для показа.
+func TestPoolWorksWhenAllNodesLookBusy(t *testing.T) {
 	a := newFakeNode(t, 0)
 	busy := probeForeign
 	p := pool(t, Node{Name: "один", URL: a.srv.URL, Workers: 1, Probe: fakeProbe(t, &busy)})
 
 	p.pollProbes(context.Background())
 	for _, s := range p.Stats() {
-		if s.Busy != "" {
-			t.Fatalf("единственный узел выведен из-за занятости: %q", s.Busy)
+		if s.Busy == "" {
+			t.Error("посторонняя работа на карте не показана человеку")
 		}
 	}
 	if _, err := p.Extract(context.Background(), "с", "в"); err != nil {
 		t.Fatalf("работа встала на единственном узле: %v", err)
 	}
+	if atomic.LoadInt32(&a.calls) == 0 {
+		t.Error("единственный узел не получил ни одного куска")
+	}
 
-	// И то же самое, когда заняты все узлы разом: кто-то обязан работать.
+	// И то же самое, когда «заняты» все узлы разом.
 	b := newFakeNode(t, 0)
 	busy2 := probeForeign
 	p2 := pool(t,
 		Node{Name: "a", URL: a.srv.URL, Workers: 1, Probe: fakeProbe(t, &busy)},
 		Node{Name: "b", URL: b.srv.URL, Workers: 1, Probe: fakeProbe(t, &busy2)})
 	p2.pollProbes(context.Background())
-	free := 0
-	for _, s := range p2.Stats() {
-		if s.Busy == "" {
-			free++
+	for i := 0; i < 4; i++ {
+		if _, err := p2.Extract(context.Background(), "с", "в"); err != nil {
+			t.Fatalf("заняты все узлы — и работа встала: %v", err)
 		}
 	}
-	if free == 0 {
-		t.Error("заняты все узлы — и работать стало некому")
+	if atomic.LoadInt32(&b.calls) == 0 {
+		t.Error("второй узел не получил ни одного куска")
 	}
 }
 
@@ -720,9 +725,10 @@ func TestPoolSurvivesDeadProbe(t *testing.T) {
 	}
 }
 
-// Вытеснение модели в оперативную память — тоже повод не давать узлу работу:
-// он исправен, но втрое медленнее.
-func TestPoolParksEvictedNode(t *testing.T) {
+// Вытеснение модели в оперативную память наблюдатель тоже показывает: узел
+// исправен, но считает втрое медленнее, и человеку это надо видеть.
+// Работу у него при этом не отбирают — решает человек (12.09.2026).
+func TestPoolShowsEvictedModel(t *testing.T) {
 	a, b := newFakeNode(t, 0), newFakeNode(t, 0)
 	clean := probeClean
 	evicted := `{"gpus":[{"index":0,"name":"RTX 3090","mem_used_mib":20000,"util_pct":30}],
