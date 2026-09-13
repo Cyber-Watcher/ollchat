@@ -137,3 +137,65 @@ func TestCommunityIDsDoNotCollideAcrossLevels(t *testing.T) {
 		}
 	}
 }
+
+// Связь «связано» весит вполсилы: она самая частая (29.7% связей графа books)
+// и самая слабая — модель не назвала отношение. Замер Ф1 (08.09 и повтор
+// 12.09.2026): при весе 0.5 тем на 11% меньше и **ни одно понятие не теряется**,
+// тогда как выбрасывание вида уносит 19.7% понятий.
+func TestRelatedEdgesWeighHalf(t *testing.T) {
+	// 0 в правилах — «не задано», то есть умолчание 0.5; явная 1 — прежнее
+	// поведение. Оба случая проверяем на одном и том же графе.
+	for _, c := range []struct {
+		name    string
+		rules   Rules
+		related float64 // ожидаемый вес пары, связанной «связано»
+	}{
+		{"умолчание", Rules{}, 0.5},
+		{"явные 0.5", Rules{RelatedWeight: 0.5}, 0.5},
+		{"прежнее поведение", Rules{RelatedWeight: 1}, 1},
+		{"усиление", Rules{RelatedWeight: 2}, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g, err := Create(collection(t), "books", 100, c.rules)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer g.Close()
+			for _, n := range []string{"горутина", "канал", "рантайм"} {
+				if _, _, err := g.Entities().Add(n, TypeConcept); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// 1–2 связаны без названного отношения, 1–3 — названным.
+			if err := g.Edges().Add(Edge{Src: 1, Dst: 2, Type: RelRelated, Weight: 1,
+				Evidence: ChunkKey{Doc: 7, Ord: 10}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Edges().Add(Edge{Src: 1, Dst: 3, Type: RelUses, Weight: 1,
+				Evidence: ChunkKey{Doc: 7, Ord: 20}}); err != nil {
+				t.Fatal(err)
+			}
+
+			adj, _ := g.undirected()
+			if adj[1][2] != c.related || adj[2][1] != c.related {
+				t.Errorf("вес «связано» = %v / %v, ожидалось %v", adj[1][2], adj[2][1], c.related)
+			}
+			// Названное отношение множитель не трогает — иначе мы бы просто
+			// уменьшили все веса разом, а это разбиению безразлично.
+			if adj[1][3] != 1 || adj[3][1] != 1 {
+				t.Errorf("вес названного отношения = %v / %v, ожидалась 1", adj[1][3], adj[3][1])
+			}
+		})
+	}
+}
+
+// Отрицательный множитель не принимается: соблазн «выбросить шум совсем»
+// стоит 19.7% понятий, и молча такое делать нельзя.
+func TestRelatedWeightDefaultInRules(t *testing.T) {
+	if got := (Rules{}).RelatedWeightOr(); got != 0.5 {
+		t.Errorf("умолчание множителя = %v, ожидалось 0.5", got)
+	}
+	if got := (Rules{RelatedWeight: 1}).RelatedWeightOr(); got != 1 {
+		t.Errorf("явная единица = %v", got)
+	}
+}

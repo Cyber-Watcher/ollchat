@@ -822,6 +822,19 @@ type Graph struct {
 	// --graph-communities и описания изменившихся тем (карта).
 	WeightsByOrigins bool `toml:"weights_by_origins"`
 
+	// RelatedWeight — множитель веса нетипизированной связи «связано»
+	// в разбиении тем. Пусто (0) — умолчание **0.5**, поставленное
+	// 13.09.2026 по замеру Ф1: «связано» — 29.7% связей и самый слабый вид
+	// (модель не назвала отношение), при весе 0.5 тем 24 694 против 27 779
+	// (−11.1%), медиана размера темы 3 вместо 2, **потерь понятий нет**;
+	// при весе 0 (выбросить вид вовсе) теряется 48 988 понятий — 19.7%,
+	// у них других связей нет. 1 — прежнее поведение. Отрицательное —
+	// ошибка запуска: вид связи не выбрасывают молча.
+	//
+	// Правка числа сама по себе граф не меняет: разбиение пересчитывает
+	// --graph-communities, и после него нужны описания изменившихся тем.
+	RelatedWeight float64 `toml:"related_weight"`
+
 	// Groups — как применять группы понятий в поиске: "union" (объединять
 	// выдачу), "expand" (расширять запрос), "off". Пусто — "off". Ключ
 	// --graph-groups перекрывает на один запуск.
@@ -1623,6 +1636,7 @@ func (g Graph) Rules() graph.Rules {
 		MaxEvidences:     g.MaxEvidences,
 		ChainHubLimit:    g.ChainHubLimit,
 		WeightsByOrigins: g.WeightsByOrigins,
+		RelatedWeight:    g.RelatedWeight,
 		Groups:           mode,
 		MergesOff:        g.MergesEnabled != nil && !*g.MergesEnabled,
 		Format:           g.Format,
@@ -1864,6 +1878,14 @@ func (c *Config) finalize() error {
 	}
 	if c.Graph.ArchiveKeep < 0 {
 		return fmt.Errorf("graph.archive_keep = %d: допустимо 0 (хранить все) и больше", c.Graph.ArchiveKeep)
+	}
+	// Отрицательный множитель «связано» отклоняем с объяснением: соблазн
+	// «выбросить шум совсем» стоит 19.7% понятий (замер Ф1), и молча такое
+	// не делается.
+	if c.Graph.RelatedWeight < 0 {
+		return fmt.Errorf("graph.related_weight = %v: допустимо 0 (умолчание 0.5) и больше; "+
+			"вес 0 выбросил бы связь «связано» вовсе, а у 19.7%% понятий других связей нет",
+			c.Graph.RelatedWeight)
 	}
 
 	if c.Sandbox.Root == "" {

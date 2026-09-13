@@ -345,11 +345,17 @@ func (g *Graph) undirected() (map[uint32]map[uint32]float64, []uint32) {
 	if g.rules.WeightsByOrigins {
 		byPair = map[pk]map[uint32][]rec{}
 	}
+	// Множитель «связано»: самый слабый вид связи не должен тянуть разбиение
+	// наравне с названным отношением (Rules.RelatedWeight, замер Ф1).
+	relW := g.rules.RelatedWeightOr()
 	for _, ent := range g.Entities().Live() {
 		for _, ed := range g.Edges().Of(ent.ID) {
 			w := float64(ed.Weight)
 			if w <= 0 {
 				w = 1
+			}
+			if ed.Type == RelRelated {
+				w *= relW
 			}
 			if byPair == nil || ed.Evidence.Doc == 0 {
 				add(ed.Src, ed.Dst, w)

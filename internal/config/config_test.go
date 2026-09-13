@@ -458,6 +458,37 @@ func TestGraphNeighborRankSettings(t *testing.T) {
 	}
 }
 
+// Множитель веса «связано»: умолчание 0.5, единица возвращает прежнее
+// поведение, отрицательное отклоняется.
+//
+// Ноль здесь значит «не задано», а не «выбросить вид связи»: выбрасывание
+// стоит 19.7% понятий (замер Ф1), и оно не должно получаться из пустой
+// строки конфига.
+func TestGraphRelatedWeight(t *testing.T) {
+	def, err := writeConfig(t, "[graph]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Graph.RelatedWeight != 0 {
+		t.Errorf("в конфиге по умолчанию %v, ожидался 0 (то есть «не задано»)", def.Graph.RelatedWeight)
+	}
+	if got := def.Graph.Rules().RelatedWeightOr(); got != 0.5 {
+		t.Errorf("правила дают множитель %v, ожидалось умолчание 0.5", got)
+	}
+
+	one, err := writeConfig(t, "[graph]\nrelated_weight = 1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := one.Graph.Rules().RelatedWeightOr(); got != 1 {
+		t.Errorf("related_weight = 1 дал %v: прежнее поведение должно возвращаться настройкой, без пересборки", got)
+	}
+
+	if _, err := writeConfig(t, "[graph]\nrelated_weight = -0.5\n"); err == nil {
+		t.Error("отрицательный множитель должен отклоняться с объяснением")
+	}
+}
+
 // Советы при запуске: значение проверяется, а не приводится молча.
 //
 // Опечатка «of» вместо «off» иначе включила бы то, что человек выключал,

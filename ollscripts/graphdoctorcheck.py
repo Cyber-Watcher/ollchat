@@ -13,7 +13,7 @@ base = pathlib.Path.home()/".local/share/ollchat/kb/collections"/name
 gdir = base/"graph"
 
 # --- понятия: живые номера и их число -----------------------------------------
-ents, merged = {}, set()
+ents, merged, broken = {}, set(), 0
 for line in (gdir/"entities.jsonl").open(encoding="utf-8"):
     line = line.strip()
     if not line:
@@ -33,10 +33,23 @@ if mp.exists():
             r = json.loads(line)
         except Exception:
             continue
-        if r.get("drop"):
-            merged.add(r.get("from") or r.get("From"))
+        src = r.get("from", r.get("From"))
+        if src is None:
+            broken += 1
+            continue
+        merged.add(src)
 live = set(ents) - merged
+# 13.09.2026: здесь стояло `if r.get("drop")`, а поля `drop` в merges.jsonl нет
+# вовсе (запись: from, to, cos, verdict, alias, why, level, at). Склейки не
+# вычитались НИКОГДА, и строка печатала реестр целиком под видом «за вычетом
+# склеенных» — то есть выглядела проверкой, ничего не проверяя. Теперь склейка
+# считается по полю `from`, а запись без него — видимая поломка, а не тишина.
+if broken:
+    print(f"ВНИМАНИЕ: записей склеек без поля from: {broken} — формат merges.jsonl изменился")
+if mp.exists() and not merged:
+    print("ВНИМАНИЕ: merges.jsonl есть, но ни одной склейки не разобрано — проверьте формат")
 print(f"понятий (по entities.jsonl, за вычетом склеенных): {len(live)}")
+print(f"  из них поглощено склейкой: {len(merged)} (доктор называет это же число)")
 
 # --- связи и упоминания -------------------------------------------------------
 edges = (gdir/"edges.log").stat().st_size // 24
