@@ -1623,7 +1623,7 @@ func orAll(folder string) string {
 // потом будет выбрано правило склейки. Правило, придуманное до того, как
 // посмотрели на данные, один раз уже оказалось негодным (общие соседи).
 func Resolve(stdout io.Writer, cfg *config.Config, name string, minCos, minCosMutual float64,
-	full, crossOnly bool, show int, out string) error {
+	full, crossOnly, byNormKey bool, show int, out string) error {
 
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
@@ -1649,6 +1649,7 @@ func Resolve(stdout io.Writer, cfg *config.Config, name string, minCos, minCosMu
 	}
 	pairs, st, err := g.ResolveCandidates(graph.ResolveOpts{
 		MinCos: minCos, MinCosMutual: minCosMutual, Full: full, CrossOnly: crossOnly,
+		ByNormKey: byNormKey,
 	})
 	if err != nil {
 		return err
@@ -1668,6 +1669,13 @@ func Resolve(stdout io.Writer, cfg *config.Config, name string, minCos, minCosMu
 			registry-st.WithVectors, name)
 	}
 	fmt.Fprintf(stdout, "  пар, связанных синонимом от модели: %d\n", st.AliasPairs)
+	if st.KeyPairs > 0 || st.KeyBigSkip > 0 {
+		fmt.Fprintf(stdout, "  добавлено совпадением ключа отбора: %d", st.KeyPairs)
+		if st.KeyBigSkip > 0 {
+			fmt.Fprintf(stdout, " (пропущено крупных корзин: %d)", st.KeyBigSkip)
+		}
+		fmt.Fprintln(stdout)
+	}
 	fmt.Fprintf(stdout, "  кандидатов после отбора: %d (за %s)\n\n", st.Found, st.Elapsed.Round(time.Millisecond))
 
 	if len(pairs) == 0 {

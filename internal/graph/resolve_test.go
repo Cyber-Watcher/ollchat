@@ -262,3 +262,73 @@ func TestMutualAliasHasLowerThreshold(t *testing.T) {
 		t.Fatalf("порог взаимных обязан быть прижат к общему, получено %v", o.MinCosMutual)
 	}
 }
+
+// Ключ отбора: пары, найденные замером 14.09.2026 (этап 103, Ш3.1а), обязаны
+// сойтись в один ключ, а разные вещи — разойтись.
+func TestResolveKeyGroupsGrammaticalVariants(t *testing.T) {
+	same := [][2]string{
+		{"graph optimization", "graph optimizations"}, // число
+		{"custom routes", "custom route"},             // число
+		{"200 status code", "status code 200"},        // порядок слов
+		{"верификация и валидация", "Валидация и верификация"}, // регистр и порядок
+		{"model access control", "model access controls"},
+		{"KV-кэш", "kv кэш"}, // разделитель, регистр
+		{"API", "APIs"},      // множественное число аббревиатуры — то же понятие
+	}
+	for _, p := range same {
+		a, b := resolveKey(p[0]), resolveKey(p[1])
+		if a == "" || a != b {
+			t.Errorf("«%s» и «%s» должны давать один ключ отбора, а дали %q и %q",
+				p[0], p[1], a, b)
+		}
+	}
+
+	// Разное остаётся разным: ключ грубый, но не настолько.
+	diff := [][2]string{
+		{"HTTP_PROXY", "HTTPS_PROXY"}, // стеммер счёл бы https множественным от http
+		{"pk(i|j)", "pk(j|i)"},
+		{"Kubernetes", "Kubeflow"},
+		{"GPT-4", "GPT-5"}, // цифра различает
+		{"llama v1", "llama v2"},
+	}
+	for _, p := range diff {
+		if a, b := resolveKey(p[0]), resolveKey(p[1]); a == b {
+			t.Errorf("«%s» и «%s» не должны давать один ключ, а дали %q", p[0], p[1], a)
+		}
+	}
+
+	if resolveKey("") != "" || resolveKey("   ") != "" {
+		t.Error("пустое имя обязано давать пустой ключ")
+	}
+}
+
+// Отбор по ключу предлагает пару, которую синоним не связывал.
+func TestResolveByNormKeyAddsPair(t *testing.T) {
+	g, err := Create(collection(t), "books", 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	for _, n := range []string{"graph optimization", "graph optimizations"} {
+		if _, _, err := g.Entities().Add(n, TypeConcept); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Без ключа пара не предлагается: синонимов нет, векторов нет.
+	_, st, err := g.ResolveCandidates(ResolveOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.KeyPairs != 0 {
+		t.Errorf("без ByNormKey пар по ключу быть не должно, а их %d", st.KeyPairs)
+	}
+
+	_, st, err = g.ResolveCandidates(ResolveOpts{ByNormKey: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.KeyPairs != 1 {
+		t.Errorf("пара по ключу отбора = %d, ожидалась 1", st.KeyPairs)
+	}
+}

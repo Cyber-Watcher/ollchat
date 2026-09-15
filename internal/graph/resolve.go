@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // Разрешение сущностей: поиск двойников среди понятий графа.
@@ -109,6 +111,25 @@ type ResolveOpts struct {
 	// Дорого: счёт идёт на триллионы умножений и на минуты процессора.
 	Full bool
 
+	// ByNormKey — добавлять пары, у которых совпал КЛЮЧ ОТБОРА: имя с точностью
+	// до регистра, разделителей, основы слова и порядка слов (resolveKey).
+	//
+	// **Зачем.** Замер 14.09.2026 (`graphstats -vecsample`, этап 103, Ш3.1а):
+	// у 4,8% понятий есть сосед ближе 0.95, и **87,9% таких пар нынешний отбор
+	// не видит вовсе** — около 11 340 пар на граф против 4 828 кандидатов.
+	// Природа этих пар оказалась не смысловой, а грамматической:
+	// «graph optimization ↔ graph optimizations», «logical rules ↔ logic rules»,
+	// «200 status code ↔ status code 200», «верификация и валидация ↔
+	// Валидация и верификация». Синонимом модель их не связала, и отбор по
+	// синонимам их не поймает никогда, сколько ни считай векторы.
+	//
+	// **Это отбор, а не склейка.** Ключ намеренно грубый — он лишь предлагает
+	// пару арбитру. Тот же замер показал, почему решать ключом нельзя:
+	// `HTTP_PROXY ↔ HTTPS_PROXY` (0.985) и `pk(i|j) ↔ pk(j|i)` (0.979) — разные
+	// вещи с почти одинаковыми векторами. Ключи у них, к счастью, разные, но
+	// полагаться на это как на правило нельзя.
+	ByNormKey bool
+
 	// CrossOnly — оставить только пары через границу алфавита.
 	CrossOnly bool
 
@@ -143,6 +164,8 @@ type ResolveStats struct {
 	Merged      int // поглощено склейкой
 	WithVectors int // записей реестра с посчитанным вектором
 	AliasPairs  int // пар, связанных синонимом, до отсечки по близости
+	KeyPairs    int // пар, добавленных совпадением ключа отбора (ByNormKey)
+	KeyBigSkip  int // корзин ключа, пропущенных из-за размера (см. maxKeyBucket)
 	Found       int // пар после всех отборов
 	Full        bool
 	Elapsed     time.Duration
@@ -227,6 +250,38 @@ func (g *Graph) ResolveCandidates(o ResolveOpts) ([]ResolvePair, ResolveStats, e
 		}
 	}
 
+	// Пары по ключу отбора. Корзина больше maxKeyBucket пропускается целиком:
+	// такой ключ означает не двойников, а слишком грубое приведение (скажем,
+	// одно общее слово после стемминга), и пары из неё — квадрат мусора.
+	byKeyPair := map[[2]uint32]bool{}
+	if o.ByNormKey {
+		buckets := make(map[string][]uint32, len(list))
+		for _, e := range list {
+			if k := resolveKey(e.Name); k != "" {
+				buckets[k] = append(buckets[k], e.ID)
+			}
+		}
+		for _, ids := range buckets {
+			if len(ids) < 2 {
+				continue
+			}
+			if len(ids) > maxKeyBucket {
+				st.KeyBigSkip++
+				continue
+			}
+			for i := 0; i < len(ids); i++ {
+				for j := i + 1; j < len(ids); j++ {
+					key := pairKey(ids[i], ids[j])
+					byKeyPair[key] = true
+					if _, have := cand[key]; !have {
+						cand[key] = cosOf(vecs, key[0], key[1])
+						st.KeyPairs++
+					}
+				}
+			}
+		}
+	}
+
 	// Окружение считается один раз на весь прогон: строить его на каждую пару
 	// значит обойти все связи графа столько раз, сколько пар.
 	adj, _ := g.undirected()
@@ -236,6 +291,12 @@ func (g *Graph) ResolveCandidates(o ResolveOpts) ([]ResolvePair, ResolveStats, e
 		mutual := linked[key].fromLo && linked[key].fromHi
 		min := o.MinCos
 		if mutual {
+			min = o.MinCosMutual
+		}
+		// Совпадение ключа отбора — сильный признак сам по себе, как и взаимный
+		// синоним: два имени различаются только формой слова или порядком слов.
+		// Поэтому порог тот же, что у взаимных, а не общий.
+		if byKeyPair[key] && o.MinCosMutual < min {
 			min = o.MinCosMutual
 		}
 		if cos < min {
@@ -410,4 +471,83 @@ func splitDigits(s string) (digits, rest string) {
 		}
 	}
 	return d.String(), r.String()
+}
+
+// maxKeyBucket — сколько понятий с одинаковым ключом отбора ещё имеет смысл
+// разбирать. Корзина из двадцати даёт 190 пар; из ста — почти пять тысяч,
+// и это уже не двойники, а след слишком грубого приведения.
+const maxKeyBucket = 20
+
+// resolveKey — ключ ОТБОРА кандидатов на склейку: имя с точностью до регистра,
+// разделителей, основы слова и порядка слов.
+//
+// Отличие от Normalize и от StemPhrase намеренное и в одну сторону — грубее:
+//
+//   - Normalize снимает регистр, «ё», кавычки и разделители, но оставляет форму
+//     слова: «graph optimization» и «graph optimizations» для него разные;
+//   - StemPhrase берёт основы, но **сохраняет порядок слов** — и правильно
+//     делает: «окно контекста» и «контекстное окно» не одно и то же;
+//   - resolveKey снимает и порядок тоже, потому что «200 status code» и
+//     «status code 200» в книгах оказались одним и тем же (замер 14.09.2026).
+//
+// **Ключ ничего не склеивает.** Он только предлагает пару арбитру, и грубость
+// здесь — сознательный размен: лишняя пара стоит полсекунды работы модели,
+// а пропущенная не будет найдена никогда. Решение остаётся за арбитром и за
+// порогом близости: `HTTP_PROXY` и `HTTPS_PROXY` дают разные ключи, но если бы
+// давали один, склеить их всё равно было бы нельзя.
+func resolveKey(name string) string {
+	norm := Normalize(name)
+	if norm == "" {
+		return ""
+	}
+	// Слова исходного имени нужны до приведения регистра: аббревиатуру от
+	// обычного слова отличает именно регистр.
+	raw := strings.Fields(Normalize(name))
+	orig := strings.FieldsFunc(name, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '-' || r == '_' || r == '/'
+	})
+
+	words := make([]string, 0, len(raw))
+	for i, w := range raw {
+		src := w
+		if i < len(orig) {
+			src = orig[i]
+		}
+		if keepAsIs(src) {
+			words = append(words, w)
+			continue
+		}
+		words = append(words, kb.StemWord(w))
+	}
+	if len(words) == 0 {
+		return ""
+	}
+	sort.Strings(words)
+	return strings.Join(words, " ")
+}
+
+// keepAsIs — слово, которому основа противопоказана.
+//
+// **Откуда правило.** Тест на парах замера 14.09.2026 поймал `HTTP_PROXY` и
+// `HTTPS_PROXY`: английский стеммер счёл `https` множественным числом от `http`
+// и свёл оба имени к одному ключу. Так же пострадали бы `API`/`APIs`,
+// `v1`/`v2`, `GPT-4`/`GPT-5`. Поэтому аббревиатуры (слово целиком заглавными)
+// и слова с цифрами берутся как есть: у них «окончание» несёт смысл.
+func keepAsIs(word string) bool {
+	hasLetter, hasLower, hasDigit := false, false, false
+	for _, r := range word {
+		switch {
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case unicode.IsLetter(r):
+			hasLetter = true
+			if unicode.IsLower(r) {
+				hasLower = true
+			}
+		}
+	}
+	if hasDigit {
+		return true
+	}
+	return hasLetter && !hasLower // слово целиком заглавными — аббревиатура
 }

@@ -162,6 +162,7 @@ type cliFlags struct {
 	graphResolveMinCos    *float64
 	graphResolveMinCosMut *float64
 	graphResolveCross     *bool
+	graphResolveNormKey   *bool
 	graphResolveShow      *int
 	graphResolveOut       *string
 	graphEmbed            *string
@@ -397,6 +398,8 @@ func parseFlags() *cliFlags {
 		"с --graph-resolve: свой порог для пар со взаимным синонимом (0 — 0.80)")
 	f.graphResolveCross = flag.Bool("graph-resolve-cross", false,
 		"с --graph-resolve: только пары через границу алфавита")
+	f.graphResolveNormKey = flag.Bool("graph-resolve-normkey", false,
+		"с --graph-resolve: добавить пары с совпавшим ключом отбора — имя с точностью до регистра, разделителей, основы слова и порядка слов")
 	f.graphResolveShow = flag.Int("graph-resolve-show", 0,
 		"с --graph-resolve: сколько пар показать (0 — 40)")
 	f.graphResolveOut = flag.String("graph-resolve-out", "",
@@ -590,7 +593,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			*f.graphMergeMinSame, *f.graphMergeDrop, *f.graphMergeDry)
 	case *f.graphResolve != "":
 		return true, gmaint.Resolve(os.Stdout, cfg, *f.graphResolve, *f.graphResolveMinCos, *f.graphResolveMinCosMut, *f.graphResolveFull,
-			*f.graphResolveCross, *f.graphResolveShow, *f.graphResolveOut)
+			*f.graphResolveCross, *f.graphResolveNormKey, *f.graphResolveShow, *f.graphResolveOut)
 	case *f.graphQueueDoubts != "":
 		if *f.graphVerdicts == "" {
 			return true, fmt.Errorf("--graph-queue-doubts требует --graph-verdicts <файл.tsv>")
