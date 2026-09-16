@@ -118,7 +118,13 @@ type EmbedProgress struct {
 // приходят уже проверенными и упорядоченными (Entities.SafeAliases):
 // без чужих собственных имён, переводы впереди.
 // limit — сколько частей (имя плюс синонимы) уходит в вектор (Rules.VectorAliases).
-func embedText(e Entity, aliases []string, limit int) string {
+//
+// **desc — описание понятия**, приписываемое отдельным предложением после
+// синонимов; пусто у всех, кроме хабов, и подаётся сюда, только когда включено
+// Rules.VectorDesc. Отдельным предложением, а не ещё одним синонимом через
+// запятую, потому что это не написание понятия, а фраза о нём: смешивать их
+// в один перечень значит врать эмбеддеру о том, что он читает.
+func embedText(e Entity, aliases []string, limit int, desc string) string {
 	parts := []string{e.Name}
 	for _, a := range aliases {
 		a = strings.TrimSpace(a)
@@ -130,7 +136,26 @@ func embedText(e Entity, aliases []string, limit int) string {
 			break
 		}
 	}
-	return strings.Join(parts, ", ")
+	text := strings.Join(parts, ", ")
+	if desc = strings.TrimSpace(desc); desc != "" {
+		if r := []rune(desc); len(r) > descMaxRunes {
+			desc = strings.TrimSpace(string(r[:descMaxRunes]))
+		}
+		text += ". " + desc
+	}
+	return text
+}
+
+// descFor — описание понятия для вектора: пусто, пока правило выключено.
+//
+// Одно место на все сборки текста: забыть проверить правило в одном из двух
+// вызовов значило бы считать часть векторов по одному тексту, а часть —
+// по другому, и расхождение вылезло бы только на поиске.
+func (g *Graph) descFor(id uint32) string {
+	if g == nil || !g.rules.VectorDesc {
+		return ""
+	}
+	return g.desc.Of(id)
 }
 
 // EmbedTextOf — текст, который уходит эмбеддеру за это понятие: имя и до
@@ -141,7 +166,7 @@ func (g *Graph) EmbedTextOf(e Entity) string {
 	if g == nil || g.ents == nil {
 		return ""
 	}
-	return embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases)
+	return embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases, g.descFor(e.ID))
 }
 
 // EmbedEntities считает векторы всех понятий графа и кладёт их рядом с ним.
@@ -246,7 +271,7 @@ func (g *Graph) embedTexts() ([]string, error) {
 	texts := make([]string, maxID)
 	for _, e := range all {
 		if e.ID >= 1 && e.ID <= maxID {
-			texts[e.ID-1] = embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases)
+			texts[e.ID-1] = embedText(e, g.ents.SafeAliases(e), g.rules.VectorAliases, g.descFor(e.ID))
 		}
 	}
 	return texts, nil

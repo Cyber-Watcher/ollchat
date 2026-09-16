@@ -94,7 +94,7 @@ func TestNeighborsWithoutQueryKeepsWeightOrder(t *testing.T) {
 	g, root := rankFixture(t)
 	defer g.Close()
 
-	got := names(g.neighborsOf(root, 3, nil, NeighborRank{}))
+	got := names(g.neighborsOf(root, 3, nil, NeighborRank{}, nil))
 	want := []string{"FastAPI", "HTTP", "session_id"}
 	for i := range want {
 		if got[i] != want[i] {
@@ -110,7 +110,7 @@ func TestNeighborsRankedByQuery(t *testing.T) {
 
 	// Вопрос лежит на оси «безопасность cookie».
 	qv := []int8{127, 0, 0, 0}
-	got := g.neighborsOf(root, 3, qv, testRank)
+	got := g.neighborsOf(root, 3, qv, testRank, nil)
 	if !has(got, "SameSite") {
 		t.Fatalf("уместный сосед не попал в тройку: %v", names(got))
 	}
@@ -160,7 +160,7 @@ func TestNeighborsFusionKeepsWeight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := g.neighborsOf(root, 2, []int8{127, 0}, testRank)
+	got := g.neighborsOf(root, 2, []int8{127, 0}, testRank, nil)
 	if len(got) != 2 || got[0].Name != "частый" {
 		t.Fatalf("при равной уместности первым должен идти чаще подтверждённый, получено %v",
 			names(got))
@@ -175,7 +175,7 @@ func TestNeighborsIgnoresForeignVector(t *testing.T) {
 	g, root := rankFixture(t)
 	defer g.Close()
 
-	got := names(g.neighborsOf(root, 3, []int8{1, 2, 3}, testRank))
+	got := names(g.neighborsOf(root, 3, []int8{1, 2, 3}, testRank, nil))
 	if got[0] != "FastAPI" {
 		t.Fatalf("при чужой размерности порядок должен остаться прежним, получено %v", got)
 	}
@@ -204,7 +204,7 @@ func TestNeighborsKeepVectorlessNeighbors(t *testing.T) {
 	if err := g.SaveEntityVectors("проба", "", 2, []int8{127, 0, 0, 127}); err != nil {
 		t.Fatal(err)
 	}
-	got := g.neighborsOf(root, 5, []int8{0, 127}, testRank)
+	got := g.neighborsOf(root, 5, []int8{0, 127}, testRank, nil)
 	if len(got) != 2 {
 		t.Fatalf("соседей %d, ожидалось 2 — понятие без вектора не должно пропадать: %v",
 			len(got), names(got))
@@ -238,7 +238,7 @@ func TestNeighborsPoolIsBounded(t *testing.T) {
 	if err := g.SaveEntityVectors("проба", "", 2, data); err != nil {
 		t.Fatal(err)
 	}
-	got := g.neighborsOf(root, 5, []int8{127, 0}, testRank)
+	got := g.neighborsOf(root, 5, []int8{127, 0}, testRank, nil)
 	if has(got, "сосед 99") {
 		t.Errorf("сосед за пределами пула поднялся наверх: %v", names(got))
 	}
@@ -259,4 +259,70 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b[p:])
+}
+
+// Связь с другим понятием вопроса не должна теряться на ОТБОРЕ соседей.
+//
+// Замер 16.09.2026 (`graphstats -localityeval`): прямая связь между двумя
+// названными понятиями есть в графе у 30 пар из 60, а в выдачу попадала у 11 —
+// её вытесняли более подтверждённые соседи. Сортировка «связи между найденными
+// понятиями вперёд» в Search существовала и раньше, но спасти связь не могла:
+// до неё дело не доходило, потому что отбор соседей связь уже выбросил.
+func TestNeighborsKeepSeedEvenIfLight(t *testing.T) {
+	g, root := rankFixture(t)
+	defer g.Close()
+
+	// SameSite — самый лёгкий сосед, по весу шестой из шести: в тройку
+	// не попадает никогда.
+	if got := g.neighborsOf(root, 3, nil, NeighborRank{}, nil); has(got, "SameSite") {
+		t.Fatalf("заготовка негодна: SameSite и без подъёма в тройке — %v", names(got))
+	}
+
+	same, ok := g.Entities().Lookup("SameSite")
+	if !ok {
+		t.Fatal("SameSite не нашёлся")
+	}
+	got := names(g.neighborsOf(root, 3, nil, NeighborRank{}, map[uint32]bool{same.ID: true}))
+	if !hasName(got, "SameSite") {
+		t.Fatalf("понятие вопроса не поднято в выдачу: %v", got)
+	}
+	if got[0] != "SameSite" {
+		t.Fatalf("понятие вопроса не первое: %v", got)
+	}
+	if len(got) != 3 {
+		t.Fatalf("предел выдачи нарушен: %d соседей, ожидалось 3", len(got))
+	}
+	// Остальные места достаются прежним лидерам по весу, по порядку.
+	if got[1] != "FastAPI" || got[2] != "HTTP" {
+		t.Fatalf("прежний порядок сломан: %v", got)
+	}
+}
+
+// Понятий вопроса больше, чем мест в выдаче: они не должны вытеснять предел.
+// hasName — есть ли имя в списке имён (has берёт соседей, а не имена).
+func hasName(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestNeighborsSeedsDoNotExceedLimit(t *testing.T) {
+	g, root := rankFixture(t)
+	defer g.Close()
+
+	seeds := map[uint32]bool{}
+	for _, n := range []string{"FastAPI", "HTTP", "session_id", "secure", "HttpOnly"} {
+		e, ok := g.Entities().Lookup(n)
+		if !ok {
+			t.Fatalf("%s не нашёлся", n)
+		}
+		seeds[e.ID] = true
+	}
+	got := g.neighborsOf(root, 2, nil, NeighborRank{}, seeds)
+	if len(got) != 2 {
+		t.Fatalf("выдано %d соседей, предел 2: %v", len(got), names(got))
+	}
 }

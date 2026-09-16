@@ -130,7 +130,7 @@ func (g *Graph) Overview(query string, c *Communities, opt OverviewOpts) Overvie
 			// понятия, а его редкое написание («document-reranking» вместо
 			// «reranking»). Вес меньше собственного, но больше соседского:
 			// это единственная ниточка, а не добавка к прямому попаданию.
-			for _, n := range g.neighborsOf(s.ID, 8, nil, NeighborRank{}) {
+			for _, n := range g.neighborsOf(s.ID, 8, nil, NeighborRank{}, nil) {
 				if nid, ok := where[n.ID]; ok {
 					score[nid] += 0.5
 					hits[nid] = append(hits[nid], s.Name)
@@ -145,7 +145,7 @@ func (g *Graph) Overview(query string, c *Communities, opt OverviewOpts) Overvie
 
 		// Соседи тянут за собой смежные темы: вопрос про «переранжирование»
 		// должен приводить и к теме «поиск в RAG», где оно живёт.
-		for _, n := range g.neighborsOf(s.ID, 8, nil, NeighborRank{}) {
+		for _, n := range g.neighborsOf(s.ID, 8, nil, NeighborRank{}, nil) {
 			if nid, ok := where[n.ID]; ok && nid != id {
 				score[nid] += 0.25
 			}

@@ -197,7 +197,8 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 	// Соседи и связи. Связи между самими найденными понятиями ценнее прочих:
 	// именно они отвечают на вопрос «как это связано с тем».
 	for i := range seeds {
-		seeds[i].Neighbors = g.neighborsOf(seeds[i].ID, opt.TopNeighbors, opt.QueryVector, opt.Neighbors)
+		seeds[i].Neighbors = g.neighborsOf(seeds[i].ID, opt.TopNeighbors, opt.QueryVector,
+			opt.Neighbors, inSeeds)
 		for _, n := range seeds[i].Neighbors {
 			// Входящую связь печатаем в её настоящую сторону: сосед → мы.
 			// Иначе «горутина —использует→ канал» в карточке канала
@@ -427,7 +428,9 @@ func (g *Graph) Entity(name string, opt SearchOpts) (FoundEntity, bool) {
 		Matched:     Normalize(name),
 		Aliases:     g.ents.DisplayAliases(ent),
 		AliasesSafe: g.ents.SafeAliases(ent),
-		Neighbors:   g.neighborsOf(ent.ID, opt.TopNeighbors, opt.QueryVector, opt.Neighbors),
+		// Карточка одного понятия: других понятий вопроса тут нет,
+		// поднимать нечего.
+		Neighbors: g.neighborsOf(ent.ID, opt.TopNeighbors, opt.QueryVector, opt.Neighbors, nil),
 	}, true
 }
 
@@ -461,12 +464,17 @@ func (g *Graph) Entity(name string, opt SearchOpts) (FoundEntity, bool) {
 // **Пустой вектор оставляет всё как было.** Обзор тем зовёт эту функцию, не имея
 // вопроса вовсе (`overview.go`): он ищет тему понятия через соседей. Правка,
 // его не касающаяся, не должна его сдвинуть.
-func (g *Graph) neighborsOf(id uint32, limit int, qv []int8, rank NeighborRank) []NeighborInfo {
-	list := g.edge.Neighbors(id) // уже по убыванию веса
-	if len(list) == 0 {
+func (g *Graph) neighborsOf(id uint32, limit int, qv []int8, rank NeighborRank,
+	inSeeds map[uint32]bool) []NeighborInfo {
+
+	full := g.edge.Neighbors(id) // уже по убыванию веса
+	if len(full) == 0 {
 		return nil
 	}
-	list = g.rankNeighbors(list, limit, qv, rank)
+	list := g.rankNeighbors(full, limit, qv, rank)
+	if !g.rules.SeedRelationsOff {
+		list = promoteSeeds(full, list, inSeeds, limit)
+	}
 	if len(list) > limit {
 		list = list[:limit]
 	}
@@ -480,6 +488,65 @@ func (g *Graph) neighborsOf(id uint32, limit int, qv []int8, rank NeighborRank) 
 			ID: n.ID, Name: ent.Name, Rel: RelName(firstType(n.Types)),
 			Weight: n.Weight, Count: n.Count, In: n.In,
 		})
+	}
+	return out
+}
+
+// promoteSeeds ставит вперёд соседей, которые сами найдены по вопросу.
+//
+// **Зачем.** Связь между двумя понятиями вопроса — это и есть ответ на «как
+// связаны X и Y». Сортировка такой связи вперёд в общем списке уже была,
+// но она ничего не могла сделать, если связь не пережила ОТБОР соседей:
+// у понятия их тысячи, показываются четыре, и связь с другим понятием вопроса
+// вытесняли более подтверждённые соседи — `Y —часть→ Go` с 474 подтверждениями.
+//
+// **Замер 16.09.2026** (`graphstats -localityeval`, 60 пар «как связаны X и Y»):
+// прямая связь есть в графе у 30 пар, в выдачу попадала у **11**; с подъёмом —
+// у **23 из 30**, и доля связей из чужих каталогов не выросла (22,1% против
+// 22,1%). Там же отвергнуты три формулы понижения «растянутых» понятий:
+// они не чистили выдачу и теряли прямые связи (11 → 7–9).
+//
+// Ищем в ПОЛНОМ списке соседей, а не в том, что осталось после ранжирования:
+// иначе правка зависела бы от того, включено ли ранжирование, и работала бы
+// через раз.
+func promoteSeeds(full, list []Neighbor, inSeeds map[uint32]bool, limit int) []Neighbor {
+	if len(inSeeds) == 0 || limit <= 0 {
+		return list
+	}
+	have := make(map[uint32]bool, len(list))
+	for _, n := range list {
+		have[n.ID] = true
+	}
+	// Соседи-понятия вопроса: сперва те, что уже в списке (их только поднять),
+	// затем те, что отбор потерял. Порядок внутри — по весу, как пришли.
+	seedsFirst := make([]Neighbor, 0, limit)
+	for _, n := range list {
+		if inSeeds[n.ID] {
+			seedsFirst = append(seedsFirst, n)
+		}
+	}
+	for _, n := range full {
+		if inSeeds[n.ID] && !have[n.ID] {
+			seedsFirst = append(seedsFirst, n)
+		}
+	}
+	if len(seedsFirst) == 0 {
+		return list
+	}
+	// Больше мест, чем показываем, отдавать нельзя: иначе понятие с шестью
+	// соседями-понятиями вопроса вытеснит из выдачи всё остальное.
+	if len(seedsFirst) > limit {
+		seedsFirst = seedsFirst[:limit]
+	}
+	promoted := make(map[uint32]bool, len(seedsFirst))
+	for _, n := range seedsFirst {
+		promoted[n.ID] = true
+	}
+	out := append(make([]Neighbor, 0, len(list)+len(seedsFirst)), seedsFirst...)
+	for _, n := range list {
+		if !promoted[n.ID] {
+			out = append(out, n)
+		}
 	}
 	return out
 }

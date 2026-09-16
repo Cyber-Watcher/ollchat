@@ -66,7 +66,7 @@ func TestAliasesTranslationsFirst(t *testing.T) {
 // из настройки, а не по зашитому числу.
 func TestEmbedTextUsesTrustedOrder(t *testing.T) {
 	ent := Entity{ID: 1, Name: "Guard", Norm: "guard"}
-	got := embedText(ent, []string{"защита", "guards", "guardrail"}, 3) // имя плюс два синонима
+	got := embedText(ent, []string{"защита", "guards", "guardrail"}, 3, "") // имя плюс два синонима
 	if got != "Guard, защита, guards" {
 		t.Fatalf("неожиданный текст вектора: %q", got)
 	}

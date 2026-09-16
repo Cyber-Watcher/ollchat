@@ -805,6 +805,17 @@ type Graph struct {
 	// отравляет. 0 — умолчание (4).
 	VectorAliases int `toml:"vector_aliases"`
 
+	// VectorDesc — класть ли описание понятия из `entdesc.jsonl` в текст его
+	// вектора, следом за синонимами отдельным предложением. Описания собраны
+	// только для хабов (262 понятия на 16.09.2026), у остальных поле пусто
+	// и ничего не меняется.
+	//
+	// **Умолчание false.** Включение меняет векторы понятий, то есть смысловой
+	// вход в граф, которым пользуются и поиск, и подмешивание к вопросу.
+	// После включения нужен пересчёт векторов описанных понятий
+	// (`--graph-embed-recount`), иначе половина графа останется на старых.
+	VectorDesc bool `toml:"vector_desc"`
+
 	// MaxEvidences — сколько кусков-подтверждений показывать у одной связи.
 	// 0 — умолчание (4).
 	MaxEvidences int `toml:"max_evidences"`
@@ -1633,6 +1644,7 @@ func (g Graph) Rules() graph.Rules {
 		SenseTie:         g.SenseTie,
 		SenseMargin:      g.SenseMargin,
 		VectorAliases:    g.VectorAliases,
+		VectorDesc:       g.VectorDesc,
 		MaxEvidences:     g.MaxEvidences,
 		ChainHubLimit:    g.ChainHubLimit,
 		WeightsByOrigins: g.WeightsByOrigins,

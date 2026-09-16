@@ -280,6 +280,11 @@ type Graph struct {
 	// Отдельно от реестра нарочно: убрать файл — и граф прежний.
 	merges *Merges
 
+	// desc — описания понятий (entdesc.jsonl), надстройка поверх графа.
+	// Собираются только для хабов и действуют, лишь когда включено
+	// Rules.VectorDesc; см. entdesc.go.
+	desc *Descriptions
+
 	// opened — во что обошлось открытие: время и занятая память.
 	//
 	// Меряется затем, что обе величины растут вместе с библиотекой и однажды
@@ -521,6 +526,9 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 		return nil, err
 	}
 	g.merges.off = g.rules.MergesOff
+	if g.desc, err = openDescriptions(dir); err != nil {
+		return nil, fmt.Errorf("описания понятий: %w", err)
+	}
 	if g.links, err = openLinks(dir); err != nil {
 		return nil, fmt.Errorf("журнал связываний: %w", err)
 	}
