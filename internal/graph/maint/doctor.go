@@ -31,6 +31,15 @@ func Doctor(stdout io.Writer, cfg *config.Config, name string) error {
 
 // DoctorTo — то же с явным стоком для хода работы: интерфейсу, который рисует
 // экран сам, нужен io.Discard, иначе строки хода лягут поверх ленты.
+// Числа выборки провенанса. Три тысячи — замер 16.09.2026: секунды чтения,
+// и одна битая ссылка на тысячу дала бы в выборке три. Зерно постоянное,
+// чтобы два запуска доктора подряд давали одни числа и разница означала
+// изменение графа, а не другую выборку.
+const (
+	provenanceSample = 3000
+	provenanceSeed   = 20260916
+)
+
 func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
@@ -197,6 +206,24 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		corr := g.Corroboration()
 		fmt.Fprintf(stdout, "    по источникам: с одним источником %d%% (соседние куски одной книги — один источник), копий из перекрытия среди подтверждений %d%%\n",
 			corr.SingleOriginShare(), corr.InflationShare())
+		// Целостность провенанса — выборкой, а не по всем связям: их 1,6 млн,
+		// и у каждой надо прочитать кусок. «Agentic RAG Systems» (Norman, 2026,
+		// стр. 129) держит эту метрику в обязательных: граф, который тихо
+		// портится, даёт поиск, «постепенно становящийся неверным, причём
+		// ничто не выглядит поломанным». До 16.09.2026 доктор считал ЧИСЛО
+		// подтверждений, но не проверял, существует ли кусок за ними.
+		if prov := g.Provenance(coll, provenanceSample, provenanceSeed); prov.Checked > 0 {
+			fmt.Fprintf(stdout, "    провенанс (выборка %d связей): кусок-источник найден у %d, НЕ найден у %d (%.2f%%)\n",
+				prov.Checked, prov.Checked-prov.Missing, prov.Missing, 100*prov.Bad())
+			fmt.Fprintf(stdout, "      имена связи в куске: оба %d%%, одно %d%%, ни одного %d%% (последнее — вероятная ошибка извлечения)\n",
+				100*prov.Both/prov.Checked, 100*prov.One/prov.Checked, 100*prov.None/prov.Checked)
+			if prov.Missing > 0 {
+				fmt.Fprintf(stdout, "      ВНИМАНИЕ: выдержку по таким связям показать нечем. Примеры:\n")
+				for _, x := range prov.Examples {
+					fmt.Fprintf(stdout, "        %s\n", x)
+				}
+			}
+		}
 		if comms != nil && comms.ByOrigins != cfg.Graph.Rules().WeightsByOrigins {
 			fmt.Fprintf(stdout, "    ВНИМАНИЕ: разбиение тем считано на весах %s, а настройка graph.weights_by_origins = %v — пересчитать: ollchat --graph-communities %s\n",
 				weightsWord(comms.ByOrigins), cfg.Graph.Rules().WeightsByOrigins, name)

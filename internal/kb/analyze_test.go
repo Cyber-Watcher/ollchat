@@ -282,3 +282,58 @@ func TestNounsNotEatenByVerbRules(t *testing.T) {
 		t.Log("прошедшее время и инфинитив совпали — размен больше не нужен")
 	}
 }
+
+// Перенос слова на новой строке склеивается, но части сохраняются
+// (этап 104, П6.8).
+//
+// В книгах слова переносят типографским дефисом: «алго‐\nритмы». До 17.09.2026
+// такое слово попадало в индекс двумя обрубками и целиком не находилось
+// ни по одному запросу. Замер: переносы есть в 9,29% кусков.
+func TestTokensJoinsHyphenWrap(t *testing.T) {
+	got := termsOf("популярные алго‐\nритмы машинного обучения")
+	if !hasTerm(got, "алгоритм") {
+		t.Fatalf("склеенное слово не попало в индекс: %v", got)
+	}
+
+	// Части остаются: перенос и составное слово внешне неразличимы, и терять
+	// ни то ни другое нельзя. «специалистов-практиков» — не «специалистовпрактиков».
+	got = termsOf("для специалистов‐\nпрактиков всех уровней")
+	if !hasTerm(got, "специалист") || !hasTerm(got, "практик") {
+		t.Fatalf("части составного слова потеряны: %v", got)
+	}
+}
+
+// Обычный дефис переносом не считается: он бывает частью слова.
+func TestTokensKeepsPlainHyphen(t *testing.T) {
+	got := termsOf("подход out-of-the-box работает")
+	if !hasTerm(got, "out-of-the-box") {
+		t.Fatalf("составное слово с обычным дефисом разорвано: %v", got)
+	}
+}
+
+// Пустая строка после переноса — конец абзаца, склеивать нечего.
+func TestTokensNoWrapAcrossParagraph(t *testing.T) {
+	got := termsOf("конец строки со знаком‐\n\nновый абзац")
+	for _, tk := range got {
+		if strings.Contains(tk, "знакомновый") {
+			t.Fatalf("склеено через пустую строку: %v", got)
+		}
+	}
+}
+
+func termsOf(text string) []string {
+	var out []string
+	for _, tk := range Tokens(text, nil) {
+		out = append(out, tk.Term)
+	}
+	return out
+}
+
+func hasTerm(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

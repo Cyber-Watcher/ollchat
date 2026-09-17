@@ -107,6 +107,19 @@ type NeighborInfo struct {
 	Weight float32
 	Count  int  // сколькими кусками связь подтверждена
 	In     bool // связь идёт от соседа к нам: печатать её надо в обратную сторону
+
+	// Evidence — несколько подтверждений связи: по ним отрисовка узнаёт год
+	// самой свежей книги (этап 104, П10).
+	//
+	// **Зачем год.** «Building AI Agents with LLMs, RAG, and Knowledge Graphs»
+	// (2025, стр. 250) держит timeliness в измерениях качества графа: знание
+	// устаревает. Замер 16.09.2026: 16,3% связей держатся только на книгах
+	// старше 2023 года, а по выдаче это не видно никак — «86 подтверждений»
+	// одинаково выглядит и для книг 2026-го, и для книг 2019-го.
+	//
+	// Список короткий: годы читаются из кусков, а каждый кусок — обращение
+	// к хранилищу. Сам граф годов не знает, они живут в реестре книг.
+	Evidence []ChunkKey
 }
 
 // FoundEntity — понятие, найденное по вопросу.
@@ -128,6 +141,13 @@ type FoundEntity struct {
 	AliasesSafe []string
 
 	Neighbors []NeighborInfo // с чем связано, от прочного к слабому
+
+	// NeighborsTotal — сколько связей у понятия ВСЕГО, до обрезки.
+	//
+	// **Зачем.** Показывается четыре связи, а у хаба вроде `Go` их 11 466:
+	// по выдаче это выглядит как «вот и всё, что известно». Число говорит
+	// человеку и модели, что за показанным есть ещё (этап 104, П3.2).
+	NeighborsTotal int
 }
 
 // FoundRelation — связь между двумя найденными понятиями.
@@ -430,7 +450,8 @@ func (g *Graph) Entity(name string, opt SearchOpts) (FoundEntity, bool) {
 		AliasesSafe: g.ents.SafeAliases(ent),
 		// Карточка одного понятия: других понятий вопроса тут нет,
 		// поднимать нечего.
-		Neighbors: g.neighborsOf(ent.ID, opt.TopNeighbors, opt.QueryVector, opt.Neighbors, nil),
+		Neighbors:      g.neighborsOf(ent.ID, opt.TopNeighbors, opt.QueryVector, opt.Neighbors, nil),
+		NeighborsTotal: len(g.edge.Neighbors(ent.ID)),
 	}, true
 }
 

@@ -36,7 +36,9 @@ import (
 // коллекцию надо пересобрать — но только сегменты, тексты уже извлечены.
 
 // AnalyzerVersion — версия правил разбора. Меняется вместе с правилами.
-const AnalyzerVersion = "ru-en-v1"
+// ru-en-v2 (17.09.2026): слово, перенесённое на новую строку («алго‐\nритмы»),
+// склеивается и кладётся в индекс целиком, а его части сохраняются.
+const AnalyzerVersion = "ru-en-v2"
 
 const (
 	minTermRunes = 2
@@ -57,19 +59,34 @@ func Tokens(text string, out []Token) []Token {
 		word  []rune
 		flags wordFlags
 		pos   uint32
+		// wrapAt — места внутри слова, где стоял перенос строки. Нужны,
+		// чтобы положить в индекс не только склеенное слово, но и части.
+		wrapAt []int
 	)
 
 	flush := func() {
 		if len(word) > 0 {
 			out = emit(out, word, flags, pos)
+			// Слово было собрано через перенос строки: кладём ещё и части,
+			// чтобы составное слово («специалистов-практиков») тоже нашлось.
+			for _, at := range wrapAt {
+				out = emitWrapParts(out, word, at, flags, pos)
+			}
 			pos++
 			word = word[:0]
+			wrapAt = wrapAt[:0]
 			flags = 0
 		}
 	}
 
 	runes := []rune(text)
+	// skipTo — до какого места пропускать: знак переноса вместе с концом
+	// строки не должен закрывать слово, иначе склейки не выйдет.
+	skipTo := 0
 	for i, r := range runes {
+		if i < skipTo {
+			continue
+		}
 		switch {
 		case isWordRune(r):
 			if len(word) < maxTermRunes*2 {
@@ -90,6 +107,24 @@ func Tokens(text string, out []Token) []Token {
 			// слово уже закрыто предыдущей веткой.
 			word = append(word, r)
 			flags |= flagConnector
+		case isSoftHyphen(r) && len(word) > 0 && hyphenWrap(runes, i) > 0:
+			// Перенос слова на новой строке: «алго‐\nритмы» — это `алгоритмы`.
+			//
+			// **Зачем.** Такие переносы нарисованы в самих книгах (сторонний
+			// pdftotext даёт то же самое, наш разбор тут ни при чём), и до
+			// 17.09.2026 слово попадало в индекс двумя обрубками — `алго`
+			// и `ритмы`, — а целиком не находилось ни по одному запросу.
+			// Замер: переносы есть в 9,29% кусков, 93,6% из них — перенос
+			// строки, то есть именно этот случай.
+			//
+			// **Части тоже сохраняются** — их кладёт emitSplit ниже. Иначе
+			// пострадали бы составные слова: «специалистов‐\nпрактиков» —
+			// не «специалистовпрактиков», а два слова через дефис, и отличить
+			// их от переноса без словаря нельзя. Поэтому в индекс идёт и то
+			// и другое: лишний терм дешевле потерянного слова.
+			wrapAt = append(wrapAt, len(word))
+			flags |= flagWrapped
+			skipTo = hyphenWrap(runes, i)
 		default:
 			flush()
 		}
@@ -107,7 +142,70 @@ const (
 	flagLatin
 	flagCamel
 	flagConnector
+	// flagWrapped — слово собрано через перенос строки («алго‐\nритмы»).
+	// По нему flush кладёт в индекс ещё и части: перенос и составное слово
+	// внешне неразличимы, и терять ни то ни другое нельзя.
+	flagWrapped
 )
+
+// isSoftHyphen — знаки, которыми набирают перенос: мягкий перенос и
+// типографские дефисы. Обычный ASCII-дефис сюда НЕ входит: он бывает частью
+// слова («out-of-the-box»), и по нему перенос не опознать.
+func isSoftHyphen(r rune) bool {
+	switch r {
+	case '\u00ad', '\u2010', '\u2011', '\u2043':
+		return true
+	}
+	return false
+}
+
+// hyphenWrap — стоит ли знак в конце строки, а за ним продолжение слова.
+//
+// Возвращает место, с которого слово продолжается (0 — это не перенос).
+// Смотрим вперёд: после знака только пробелы и ровно один перевод строки,
+// а дальше буква. Пустая строка означает конец абзаца — там переноса нет.
+func hyphenWrap(runes []rune, i int) int {
+	newlines := 0
+	for j := i + 1; j < len(runes) && j < i+12; j++ {
+		switch r := runes[j]; {
+		case r == '\n':
+			newlines++
+			if newlines > 1 {
+				return 0
+			}
+		case r == ' ' || r == '\t' || r == '\r':
+			// пробелы между знаком и продолжением допустимы
+		case isWordRune(r):
+			if newlines == 1 {
+				return j
+			}
+			return 0
+		default:
+			return 0
+		}
+	}
+	return 0
+}
+
+// emitWrapParts кладёт в индекс части слова, собранного через перенос.
+//
+// Само слово уже положено целиком («алгоритмы»); здесь добавляются куски
+// («алго», «ритмы») — на случай, когда это было не перенос, а составное
+// слово, разорванное по дефису: «специалистов-практиков». Позиция у частей
+// та же, что у целого: они стоят на одном месте текста.
+func emitWrapParts(out []Token, word []rune, at int, flags wordFlags, pos uint32) []Token {
+	if at <= 0 || at >= len(word) {
+		return out
+	}
+	head, tail := word[:at], word[at:]
+	if len(head) >= minTermRunes {
+		out = emit(out, head, flags, pos)
+	}
+	if len(tail) >= minTermRunes {
+		out = emit(out, tail, flags, pos)
+	}
+	return out
+}
 
 func classify(r rune) wordFlags {
 	var f wordFlags

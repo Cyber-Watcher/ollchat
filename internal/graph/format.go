@@ -130,7 +130,17 @@ func Render(src Chunks, res SearchResult, opt RenderOpts) string {
 				fmt.Fprintf(&b, "  … ещё %d связей\n", len(res.Relations)-i)
 				break
 			}
-			fmt.Fprintf(&b, "  %s —%s→ %s (подтверждений %d)\n", r.Src, r.Type, r.Dst, r.Count)
+			// Год свежайшего подтверждения (П10.1) и сколько выдержек скрыто
+			// (П5.1): у связи бывает 186 подтверждений, показывается до четырёх,
+			// и по выдаче этого не видно.
+			extra := ""
+			if y := newestYear(src, r.Evidences); y > 0 {
+				extra = fmt.Sprintf(", свежайшее %d г.", y)
+			}
+			if hidden := r.Count - len(r.Evidences); hidden > 0 && len(r.Evidences) > 0 {
+				extra += fmt.Sprintf(", показано %d", len(r.Evidences))
+			}
+			fmt.Fprintf(&b, "  %s —%s→ %s (подтверждений %d%s)\n", r.Src, r.Type, r.Dst, r.Count, extra)
 			if opt.RelationRunes > 0 && src != nil {
 				if q := evidenceLine(src, r, opt.RelationRunes); q != "" {
 					fmt.Fprintf(&b, "      %s\n", q)
@@ -180,9 +190,23 @@ func RenderEntity(src Chunks, e FoundEntity, chunks []ChunkKey, opt RenderOpts) 
 	fmt.Fprintf(&b, "упоминаний %d в %s\n", e.Mentions, plural(e.Books, "книге", "книгах", "книгах"))
 
 	if len(e.Neighbors) > 0 {
-		b.WriteString("\nСвязано с:\n")
+		// Сколько связей ВСЕГО: показывается четыре, а у хаба вроде `Go`
+		// их 11 466, и без этой строки выдача выглядит исчерпывающей
+		// (этап 104, П3.2).
+		if e.NeighborsTotal > len(e.Neighbors) {
+			fmt.Fprintf(&b, "\nСвязано с (показано %d из %d):\n", len(e.Neighbors), e.NeighborsTotal)
+		} else {
+			b.WriteString("\nСвязано с:\n")
+		}
 		for _, n := range e.Neighbors {
-			fmt.Fprintf(&b, "  %s (подтверждений %d)\n", n.Name, n.Count)
+			// Год самой свежей книги, подтвердившей связь (этап 104, П10.1):
+			// «86 подтверждений» одинаково выглядит и для книг 2026-го,
+			// и для книг 2019-го, а в технической библиотеке это разные вещи.
+			if y := newestYear(src, n.Evidence); y > 0 {
+				fmt.Fprintf(&b, "  %s (подтверждений %d, свежайшее %d г.)\n", n.Name, n.Count, y)
+			} else {
+				fmt.Fprintf(&b, "  %s (подтверждений %d)\n", n.Name, n.Count)
+			}
 		}
 	}
 	if len(chunks) > 0 && src != nil {
@@ -244,6 +268,27 @@ func RenderPath(src Chunks, from, to string, steps []PathStep, ok bool, opt Rend
 }
 
 // bookLine — «Книга · Автор · стр. 40».
+// newestYear — год самой свежей книги среди подтверждений связи.
+//
+// Ноль, если год не известен ни у одного (у нас таких 12,2% — книги без года
+// в имени, копирайте и метаданных) или если читать куски нечем.
+func newestYear(src Chunks, keys []ChunkKey) int {
+	if src == nil {
+		return 0
+	}
+	newest := 0
+	for _, k := range keys {
+		info, ok := src.ChunkByRef(k.Doc, k.Ord)
+		if !ok {
+			continue
+		}
+		if info.Book.Year > newest {
+			newest = info.Book.Year
+		}
+	}
+	return newest
+}
+
 func bookLine(info kb.ChunkInfo) string {
 	name := info.Book.Title
 	if name == "" {

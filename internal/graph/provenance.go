@@ -1,0 +1,132 @@
+package graph
+
+import (
+	"math/rand"
+	"strings"
+)
+
+// Целостность провенанса: у каждой ли связи есть живой кусок-источник.
+//
+// **Зачем такая проверка.** «Agentic RAG Systems» (Norman, 2026, стр. 129)
+// перечисляет метрики, по которым за графом надо следить в работе, и среди
+// них provenance integrity — «как часто у связей есть годные куски-источники».
+// Причина там же: граф, который тихо портится, «даёт поиск, постепенно
+// становящийся неверным, причём ничто не выглядит поломанным».
+//
+// Доктор до 16.09.2026 считал ЧИСЛО подтверждений у связи, но не смотрел,
+// существует ли кусок, на который они указывают. Разница важная: число
+// подтверждений остаётся прежним и когда выдержку уже не показать.
+//
+// **Почему выборка, а не все связи.** Связей 1,6 миллиона, и у каждой надо
+// прочитать кусок из хранилища. Замер 16.09.2026: три тысячи связей — секунды,
+// и этого хватает, чтобы заметить беду (одна битая ссылка на тысячу дала бы
+// в выборке три).
+//
+// **Почему проверяются и синонимы.** Граф двуязычный, и модель извлечения
+// законно называет понятие написанием, которого в этом куске нет («горутина»
+// против «goroutine»). Первый прогон замера искал только имена и дал 6,73%
+// связей «не видно в куске»; с синонимами осталось 2,9%. Без синонимов
+// проверка записывала бы законные связи в ошибки.
+
+// ProvenanceReport — что вышло у проверки провенанса.
+type ProvenanceReport struct {
+	Checked int // сколько связей проверено
+	Missing int // кусок-источник не найден вовсе — настоящая беда
+	Dropped int // книга отброшена из выдачи: это норма, не ошибка
+	Both    int // оба имени связи встречаются в куске
+	One     int // только одно имя
+	None    int // ни одного имени: вероятная ошибка извлечения
+
+	// Examples — по нескольку случаев каждой беды, чтобы человек посмотрел
+	// глазами, а не верил доле на слово.
+	Examples []string
+}
+
+// Provenance проверяет на выборке связей, что кусок-источник существует
+// и что имена связи в нём действительно встречаются.
+//
+// src — откуда читать куски (коллекция базы знаний). sample — сколько связей
+// взять; seed — зерно выборки, чтобы повтор давал те же числа.
+func (g *Graph) Provenance(src Chunks, sample int, seed int64) ProvenanceReport {
+	var rep ProvenanceReport
+	if g == nil || src == nil || sample <= 0 {
+		return rep
+	}
+	live := g.ents.Live()
+	if len(live) == 0 {
+		return rep
+	}
+	rnd := rand.New(rand.NewSource(seed))
+
+	// Предел попыток: у понятия может не быть связей вовсе (у нас таких 4%),
+	// и без предела цикл на пустом графе не кончился бы никогда.
+	for tries := 0; rep.Checked < sample && tries < sample*20; tries++ {
+		e := live[rnd.Intn(len(live))]
+		edges := g.edge.Of(e.ID)
+		if len(edges) == 0 {
+			continue
+		}
+		ed := edges[rnd.Intn(len(edges))]
+		dst, ok := g.ents.Get(ed.Dst)
+		if !ok {
+			continue
+		}
+		rep.Checked++
+
+		if g.dropped.Dropped(ed.Evidence.Doc) {
+			rep.Dropped++
+			continue
+		}
+		ci, ok := src.ChunkByRef(ed.Evidence.Doc, ed.Evidence.Ord)
+		if !ok {
+			rep.Missing++
+			rep.addExample("нет куска " + ed.Evidence.String() + ": " + e.Name + " → " + dst.Name)
+			continue
+		}
+		low := strings.ToLower(ci.Text)
+		a := g.nameSeen(low, e)
+		b := g.nameSeen(low, dst)
+		switch {
+		case a && b:
+			rep.Both++
+		case a || b:
+			rep.One++
+		default:
+			rep.None++
+			rep.addExample("в куске " + ed.Evidence.String() + " нет ни одного имени: " +
+				e.Name + " → " + dst.Name)
+		}
+	}
+	return rep
+}
+
+// nameSeen — встречается ли понятие в тексте под своим именем или синонимом.
+//
+// Синонимы короче трёх знаков не проверяются: «ML» или «БД» найдутся внутри
+// случайного слова и дадут ложное «связь подтверждена».
+func (g *Graph) nameSeen(lowText string, e Entity) bool {
+	if strings.Contains(lowText, strings.ToLower(e.Name)) {
+		return true
+	}
+	for _, al := range g.ents.DisplayAliases(e) {
+		if len([]rune(al)) >= 3 && strings.Contains(lowText, strings.ToLower(al)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *ProvenanceReport) addExample(s string) {
+	if len(r.Examples) < 5 {
+		r.Examples = append(r.Examples, s)
+	}
+}
+
+// Bad — доля связей, у которых кусок-источник не найден. Именно она и есть
+// беда: остальные разряды говорят о качестве извлечения, а не о целостности.
+func (r ProvenanceReport) Bad() float64 {
+	if r.Checked == 0 {
+		return 0
+	}
+	return float64(r.Missing) / float64(r.Checked)
+}
