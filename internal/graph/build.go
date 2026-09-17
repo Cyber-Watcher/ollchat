@@ -145,6 +145,9 @@ type BuildResult struct {
 	// SkippedUntyped и SkippedOverlap — связи, не записанные по правилам
 	// формата 2: без названного отношения и повторы из перекрытия кусков.
 	SkippedUntyped, SkippedOverlap int
+	// DroppedNames и RenamedNames — понятия, чьего имени нет в тексте куска:
+	// отброшенные и получившие именем синоним из текста (формат 2).
+	DroppedNames, RenamedNames int
 }
 
 // Build разбирает куски коллекции и наполняет граф.
@@ -210,16 +213,8 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 	var left, service int
 	err := coll.EachChunkRef(filter, func(c kb.ChunkRef) error {
 		key := ChunkKey{Doc: c.Doc, Ord: c.Ord}
-		if mark, ok := g.Progress().MarkOf(key); ok {
-			switch {
-			case mark == MarkService && !c.TOC && !c.Refs:
-				// Признак служебного с куска сняли — он снова в работе.
-			case mark == MarkEmpty && opt.RedoEmpty:
-				// Пустые берутся заново только по явной просьбе: иначе каждый
-				// заход перечитывал бы одни и те же титульные листы.
-			default:
-				return nil
-			}
+		if !takesChunk(g, c, opt.RedoEmpty) {
+			return nil
 		}
 		// Служебный текст модели не показывается. Оглавление (FlagTOC, этап 99):
 		// в нём все понятия книги стоят рядом, и извлечение даёт связи «всё
@@ -286,7 +281,7 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 			if runCtx.Err() != nil {
 				return
 			}
-			facts, err, badAnswer := askModel(runCtx, ex, system, j, opt.Retry)
+			facts, err, badAnswer := askModel(runCtx, ex, system, g.Meta().Version, j, opt.Retry)
 
 			queued := time.Now()
 			mu.Lock()
@@ -308,6 +303,8 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 				empty++
 				_ = g.Progress().Mark(j.key, MarkEmpty)
 			default:
+				g.skipped.names += facts.DroppedNames
+				g.skipped.renamed += facts.RenamedNames
 				n, werr := writeFacts(ctx, g, j.key, facts, opt.Link)
 				linked += n
 				if werr != nil {
@@ -418,6 +415,7 @@ send:
 	}
 	res.Canceled = ctx.Err() != nil
 	res.SkippedUntyped, res.SkippedOverlap = g.SkippedRelations()
+	res.DroppedNames, res.RenamedNames = g.SkippedNames()
 	// Заход — в паспорт: когда, какой моделью и промптом, сколько кусков.
 	// Ошибка записи паспорта заход не отменяет: разобранное уже в журналах.
 	if nerr := g.NoteRun(RunStamp{
@@ -427,6 +425,41 @@ send:
 		firstErr = nerr
 	}
 	return res, firstErr
+}
+
+// takesChunk — возьмёт ли сборка этот кусок в работу. Одно правило на сборку
+// и на счёт остатка (PendingChunks): разойдись они, обвязка ждала бы конца
+// работы, которой сборка не видит, или бросала бы недоделанную.
+func takesChunk(g *Graph, c kb.ChunkRef, redoEmpty bool) bool {
+	mark, ok := g.Progress().MarkOf(ChunkKey{Doc: c.Doc, Ord: c.Ord})
+	if !ok {
+		return true
+	}
+	switch {
+	case mark == MarkService && !c.TOC && !c.Refs:
+		// Признак служебного с куска сняли (или кусок «забыт» командой
+		// --graph-forget-chunks) — он снова в работе.
+		return true
+	case mark == MarkEmpty && redoEmpty:
+		// Пустые берутся заново только по явной просьбе: иначе каждый
+		// заход перечитывал бы одни и те же титульные листы.
+		return true
+	}
+	return false
+}
+
+// PendingChunks — сколько кусков под этим отбором сборка ещё возьмёт в работу.
+// Служебные куски (оглавления, списки литературы) в счёт не идут: сборка их
+// только помечает.
+func PendingChunks(coll Source, g *Graph, filter kb.ChunkFilter) (int, error) {
+	n := 0
+	err := coll.EachChunkRef(filter, func(c kb.ChunkRef) error {
+		if !c.TOC && !c.Refs && takesChunk(g, c, false) {
+			n++
+		}
+		return nil
+	})
+	return n, err
 }
 
 // errEnough — внутренний признак «набрали сколько просили», а не ошибка.
@@ -465,7 +498,7 @@ type job struct {
 	text string
 }
 
-func askModel(ctx context.Context, ex Extractor, system string, j job, retry bool) (Facts, error, bool) {
+func askModel(ctx context.Context, ex Extractor, system string, version int, j job, retry bool) (Facts, error, bool) {
 	user := UserPrompt(j.book, j.unit, j.from, j.to, j.text)
 	answer, err := ex.Extract(ctx, system, user)
 	if err != nil {
@@ -480,12 +513,12 @@ func askModel(ctx context.Context, ex Extractor, system string, j job, retry boo
 			if err != nil {
 				return Facts{}, err, errors.Is(err, ErrEmptyAnswer)
 			}
-			facts, perr := ParseFacts(answer, j.text)
+			facts, perr := ParseFactsFor(version, answer, j.text)
 			return facts, perr, perr != nil
 		}
 		return Facts{}, err, false
 	}
-	facts, perr := ParseFacts(answer, j.text)
+	facts, perr := ParseFactsFor(version, answer, j.text)
 	if perr == nil {
 		return facts, nil, false
 	}
@@ -497,7 +530,7 @@ func askModel(ctx context.Context, ex Extractor, system string, j job, retry boo
 	if err != nil {
 		return Facts{}, err, false
 	}
-	facts, perr = ParseFacts(answer, j.text)
+	facts, perr = ParseFactsFor(version, answer, j.text)
 	return facts, perr, perr != nil
 }
 
@@ -603,6 +636,12 @@ func (g *Graph) pairFromChunk(a, b uint32, from ChunkKey) bool {
 // быть видно.
 func (g *Graph) SkippedRelations() (untyped, overlap int) {
 	return g.skipped.untyped, g.skipped.overlap
+}
+
+// SkippedNames — сколько понятий заход отбросил, потому что их имени нет
+// в тексте куска, и у скольких именем стал синоним из текста (формат 2).
+func (g *Graph) SkippedNames() (dropped, renamed int) {
+	return g.skipped.names, g.skipped.renamed
 }
 
 // flushAll сбрасывает журналы на диск и просит диск их записать.

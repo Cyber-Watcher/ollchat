@@ -3,6 +3,7 @@ package graph
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,8 +53,9 @@ type DescRec struct {
 
 // Descriptions — описания понятий, прочитанные из файла.
 type Descriptions struct {
-	path string
-	byID map[uint32]string
+	path    string
+	byID    map[uint32]string
+	problem string // почему файл прочитан не до конца; пусто — всё в порядке
 }
 
 // openDescriptions читает файл описаний. Отсутствие файла — обычное состояние:
@@ -92,7 +94,22 @@ func openDescriptions(dir string) (*Descriptions, error) {
 		// сбор описаний не должен требовать чистки прежних строк.
 		d.byID[r.ID] = text
 	}
+	// Сбой чтения посреди файла (диск, строка длиннее мегабайта) раньше молча
+	// обрывал загрузку: описаний становилось меньше, и узнать об этом было
+	// неоткуда. Прочитанное остаётся — описания не повод не открыть граф, —
+	// но причина сохраняется и видна через Problem (аудит 17.09.2026, Б17).
+	if err := sc.Err(); err != nil {
+		d.problem = fmt.Sprintf("%s прочитан не до конца (%v): описаний загружено %d", entDescFile, err, len(d.byID))
+	}
 	return d, nil
+}
+
+// Problem — почему описания загружены не все; пусто — всё в порядке.
+func (d *Descriptions) Problem() string {
+	if d == nil {
+		return ""
+	}
+	return d.problem
 }
 
 // Of — описание понятия; пусто, если его нет.

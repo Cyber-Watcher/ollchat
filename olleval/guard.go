@@ -183,12 +183,13 @@ func (g *Guard) Check(ctx context.Context) GuardReport {
 
 	switch {
 	case !utilKnown:
+		// Занятую память здесь проверять нечем: её число приходит из того же
+		// ответа о карте, которого нет (потому ветка и строгая). Проверка
+		// `GPUUsedMiB >= BusyVRAMMiB` стояла тут до 17.09.2026 и не могла
+		// сработать ни разу — поле в этой ветке всегда ноль (аудит, Б16).
+		// Строгость держится на процессах: любой процесс на карте — запрет.
 		for _, p := range snap.GPUProcs {
 			rep.Blocking = append(rep.Blocking, "на видеокарте работает процесс: "+procLine(p))
-		}
-		if g.Cfg.BusyVRAMMiB > 0 && rep.GPUUsedMiB >= g.Cfg.BusyVRAMMiB {
-			rep.Blocking = append(rep.Blocking,
-				fmt.Sprintf("на карте занято %d МиБ видеопамяти (порог %d)", rep.GPUUsedMiB, g.Cfg.BusyVRAMMiB))
 		}
 	default:
 		for _, p := range snap.GPUProcs {

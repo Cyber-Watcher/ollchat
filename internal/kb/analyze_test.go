@@ -445,3 +445,64 @@ func hasTerm(list []string, want string) bool {
 	}
 	return false
 }
+
+// Части слова через дефис лежат в индексе ещё и основой — так же, как лежало бы
+// само слово, стой оно отдельно. Без этого «fine-tuning» не находился по запросу
+// «tuning», а «пул-реквесты» — по «реквест» (этап 104, А3.5). У идентификаторов
+// с точкой и подчёркиванием основ частей нет: замер на наборе точных терминов
+// показал от них только шум.
+func TestTokensStemsPartsOfHyphenCompound(t *testing.T) {
+	has := func(text, term string) bool {
+		for _, tok := range Tokens(text, nil) {
+			if tok.Term == term {
+				return true
+			}
+		}
+		return false
+	}
+	// Основа части совпадает с тем, как индексируется то же слово отдельно.
+	for compound, word := range map[string]string{
+		"fine-tuning":     "tuning",
+		"пул-реквесты":    "реквест",
+		"веб-сервера":     "сервер",
+		"object-oriented": "oriented",
+	} {
+		alone := Tokens(word, nil)
+		if len(alone) != 1 {
+			t.Fatalf("слово %q разобрано не одним термом: %v", word, alone)
+		}
+		if !has(compound, alone[0].Term) {
+			t.Errorf("%q не находится по %q: терма %q в разборе нет — %v",
+				compound, word, alone[0].Term, Tokens(compound, nil))
+		}
+		// Само составное слово и часть как есть остаются: точный запрос не хуже.
+		if !has(compound, compound) {
+			t.Errorf("%q: пропало само составное слово", compound)
+		}
+	}
+	// Идентификаторы — без основ частей.
+	for ident, stemmed := range map[string]string{
+		"learn.microsoft": "learn",
+		"text_splitter":   "splitt",
+		"go.mod":          "go",
+	} {
+		got := Tokens(ident, nil)
+		for _, tok := range got {
+			if tok.Term == stemmed && stemmed != "learn" && stemmed != "go" {
+				t.Errorf("у идентификатора %q появилась основа части %q: %v", ident, stemmed, got)
+			}
+		}
+		if n := len(got); n != 3 {
+			t.Errorf("у идентификатора %q термов %d, ожидалось 3 (имя и две части): %v", ident, n, got)
+		}
+	}
+	// Части составного слова стоят на одной позиции с ним самим: фраза не рвётся.
+	toks := Tokens("метод fine-tuning модели", nil)
+	pos := map[string]uint32{}
+	for _, tok := range toks {
+		pos[tok.Term] = tok.Pos
+	}
+	if pos["fine-tuning"] != 1 || pos["tune"] != 1 || pos[Tokens("модели", nil)[0].Term] != 2 {
+		t.Fatalf("позиции разъехались: %v", toks)
+	}
+}

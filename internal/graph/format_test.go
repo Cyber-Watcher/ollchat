@@ -14,13 +14,42 @@ func TestEvidenceLineSkipsTableOfContents(t *testing.T) {
 		{104, 682}: "In Kubernetes, CoreDNS is the Pod that answers cluster DNS.",
 	}
 	r := FoundRelation{Src: "CoreDNS", Dst: "Kubernetes", Evidences: []ChunkKey{{104, 21}, {104, 682}}}
-	line := evidenceLine(src, r, 120)
+	line := evidenceLine(src, r, 120, false)
 	if !strings.Contains(line, "answers cluster DNS") {
 		t.Fatalf("подтверждение взято из оглавления: %q", line)
 	}
 	r.Evidences = []ChunkKey{{104, 21}}
-	if evidenceLine(src, r, 120) == "" {
+	if evidenceLine(src, r, 120, false) == "" {
 		t.Fatal("единственное оглавление выброшено — строка пуста")
+	}
+}
+
+// Под связью печатается кусок, где её имена стоят ближе всего, а не первый,
+// где они оба есть (замер 17.09.2026, этап 104, П5.3): в первом имена могут
+// стоять в разных концах страницы, и в окно выдержки попадёт только одно.
+func TestEvidenceLinePrefersNearestPair(t *testing.T) {
+	far := "Go is a compiled language. " + strings.Repeat("Лишний текст о сборке проекта. ", 12) +
+		"Garbage collection упомянута в самом конце."
+	src := memChunks{
+		{7, 1}: far,
+		{7, 2}: "Только про Go и ничего больше.",
+		{7, 3}: "In Go, garbage collection runs concurrently with the program.",
+	}
+	r := FoundRelation{Src: "Go", Dst: "Garbage collection", Evidences: []ChunkKey{{7, 1}, {7, 2}, {7, 3}}}
+	line := evidenceLine(src, r, 140, false)
+	if !strings.Contains(line, "runs concurrently") {
+		t.Fatalf("взят не кусок с ближайшей парой имён: %q", line)
+	}
+	// Прежнее правило — за выключателем, для сравнения одним бинарём.
+	// Прежний выбор — первый кусок с обоими именами; в его окно помещается
+	// только одно из них, остальное занято посторонним текстом.
+	if old := evidenceLine(src, r, 140, true); !strings.Contains(old, "Лишний текст") || strings.Contains(old, "runs concurrently") {
+		t.Fatalf("выключатель не вернул прежний выбор (первый кусок с обоими именами): %q", old)
+	}
+	// Ни в одном куске нет обоих имён — берётся первый, строка не пуста.
+	r.Dst = "Borrow checker"
+	if evidenceLine(src, r, 140, false) == "" {
+		t.Fatal("без куска с обоими именами выдержка пропала вовсе")
 	}
 }
 
@@ -123,5 +152,37 @@ func TestEntityCardYearThroughDataPath(t *testing.T) {
 	res := g.Search("Go goroutine", SearchOpts{})
 	if out := Render(src, res, RenderOpts{}); !strings.Contains(out, "свежайшее 2026 г.") || strings.Contains(out, "показано") {
 		t.Fatalf("список связей: год по первым записям или осталась приписка «показано»:\n%s", out)
+	}
+}
+
+// Карта понятий для модели (подмес, mix.relation_years): год свежайшей книги
+// у связи виден, а цитат по-прежнему нет — ни выдержки под связью, ни раздела
+// подтверждений. Шапка подмеса говорит модели «цитат здесь нет, зови kb_search»,
+// и строка со страницей провоцировала бы ссылаться на непрочитанное (П10.3).
+func TestRenderYearsOnlyShowsAgeWithoutQuotes(t *testing.T) {
+	src := yearChunks{
+		ChunkKey{Doc: 1, Ord: 1}.Pack(): 2019,
+		ChunkKey{Doc: 2, Ord: 5}.Pack(): 2021,
+	}
+	res := SearchResult{
+		Entities: []FoundEntity{{Entity: Entity{ID: 1, Name: "Docker", Type: TypeTech}, Mentions: 9, Books: 2}},
+		Relations: []FoundRelation{{
+			Src: "Docker", Dst: "Swarm", Type: "использует", Count: 12,
+			Evidence:  ChunkKey{Doc: 1, Ord: 1},
+			Evidences: []ChunkKey{{Doc: 1, Ord: 1}},
+			Books:     []ChunkKey{{Doc: 1, Ord: 1}, {Doc: 2, Ord: 5}},
+		}},
+		Chunks: []ChunkKey{{Doc: 1, Ord: 1}},
+	}
+	out := Render(src, res, RenderOpts{Collection: "books", YearsOnly: true})
+	if !strings.Contains(out, "свежайшее 2021 г.") {
+		t.Fatalf("год свежайшей книги у связи не напечатан:\n%s", out)
+	}
+	if strings.Contains(out, "Подтверждения из книг") || strings.Contains(out, "текст") {
+		t.Fatalf("в карту для модели попали цитаты:\n%s", out)
+	}
+	// Прежнее поведение подмеса — без источника кусков: ни года, ни цитат.
+	if plain := Render(nil, res, RenderOpts{Collection: "books"}); strings.Contains(plain, "свежайшее") {
+		t.Fatalf("без источника кусков год взяться не мог:\n%s", plain)
 	}
 }

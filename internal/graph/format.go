@@ -3,6 +3,7 @@ package graph
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
@@ -47,6 +48,19 @@ type RenderOpts struct {
 	// одного обращения к хранилищу и работает на всём графе сразу, включая
 	// разобранное год назад.
 	RelationRunes int
+
+	// EvidenceFirst — брать под связь ПЕРВЫЙ кусок, где есть оба её имени,
+	// как было до 17.09.2026. По умолчанию берётся кусок, где имена стоят
+	// ближе всего (см. evidenceLine). Выключатель нужен замеру: «до» и «после»
+	// сравниваются одним бинарём.
+	EvidenceFirst bool
+
+	// YearsOnly — из кусков брать ТОЛЬКО год издания: у связи печатается
+	// «свежайшее NNNN г.», а выдержки под связями и раздел подтверждений
+	// не печатаются. Так карта понятий уходит модели при подмесе (mix.relation_years):
+	// цитат в ней нет намеренно — за ними модель зовёт kb_search, — а возраст
+	// знания ей виден так же, как человеку в /search (этап 104, П10.3).
+	YearsOnly bool
 }
 
 func (o RenderOpts) norm() RenderOpts {
@@ -145,15 +159,15 @@ func Render(src Chunks, res SearchResult, opt RenderOpts) string {
 				extra = fmt.Sprintf(", свежайшее %d г.", y)
 			}
 			fmt.Fprintf(&b, "  %s —%s→ %s (подтверждений %d%s)\n", r.Src, r.Type, r.Dst, r.Count, extra)
-			if opt.RelationRunes > 0 && src != nil {
-				if q := evidenceLine(src, r, opt.RelationRunes); q != "" {
+			if opt.RelationRunes > 0 && src != nil && !opt.YearsOnly {
+				if q := evidenceLine(src, r, opt.RelationRunes, opt.EvidenceFirst); q != "" {
 					fmt.Fprintf(&b, "      %s\n", q)
 				}
 			}
 		}
 	}
 
-	if len(res.Chunks) > 0 && src != nil {
+	if len(res.Chunks) > 0 && src != nil && !opt.YearsOnly {
 		b.WriteString("\nПодтверждения из книг:\n")
 		var n int
 		for _, k := range res.Chunks {
@@ -320,24 +334,35 @@ func bookLine(info kb.ChunkInfo) string {
 // Берётся окно вокруг первого упоминания одного из концов связи: начало куска
 // часто попадает на середину чужой мысли, а рядом с именем понятия стоит как раз
 // то предложение, ради которого связь и была извлечена.
-func evidenceLine(src Chunks, r FoundRelation, runes int) string {
+func evidenceLine(src Chunks, r FoundRelation, runes int, firstOnly bool) string {
 	keys := r.Evidences
 	if len(keys) == 0 {
 		keys = []ChunkKey{r.Evidence}
 	}
 
-	// Из нескольких подтверждений берётся то, где рядом стоят ОБА конца связи:
-	// именно там книга их и связывает. Замер 02.09.2026: у связи
-	// `Go —использует→ Garbage collection` (186 подтверждений) первым куском
-	// оказалась шпаргалка по приведению типов, где имя Go стоит само по себе.
+	// Из нескольких подтверждений берётся то, где оба конца связи стоят БЛИЖЕ
+	// всего друг к другу: именно там книга их и связывает. Замер 02.09.2026:
+	// у связи `Go —использует→ Garbage collection` (186 подтверждений) первым
+	// куском оказалась шпаргалка по приведению типов, где имя Go стоит само
+	// по себе.
 	//
-	// Первый подходящий кусок и берётся: перебирать все ради «лучшего» незачем,
-	// разницы между двумя кусками, где связь названа прямо, для читателя нет.
+	// **Почему ближайшая пара, а не первый кусок с обоими именами** (замер
+	// 17.09.2026, `graphstats -evidencerule`, этап 104, П5.3). Под связью
+	// печатается окно в 140 знаков, и мера пользы — помещаются ли в него оба
+	// имени. Первый кусок с обоими именами: 71,2% на наборе пар и 39,9%
+	// на методологических вопросах; ближайшая пара среди тех же записей —
+	// 86,1% и 50,8%, ценой одного-трёх лишних чтений на связь (меньше
+	// миллисекунды). Расширение перебора БЕЗ смены признака не даёт почти
+	// ничего (+1–2 п.п.) — это же показала проба 02.09.2026 на восьми записях.
+	//
+	// Перебор обрывается на куске, где имена стоят в пределах одного-двух
+	// предложений (evidenceNear): лучшего читателю не нужно.
 	//
 	// Оглавление подтверждением не считается (решение владельца 07.09.2026):
 	// в нём оба конца связи стоят рядом всегда — как и все остальные понятия
 	// книги. Берётся только если других кусков у связи нет.
-	var first, toc string
+	var first, toc, best string
+	bestGap := -1
 	for _, k := range keys {
 		if k.Doc == 0 && k.Ord == 0 {
 			continue
@@ -357,24 +382,71 @@ func evidenceLine(src Chunks, r FoundRelation, runes int) string {
 			}
 			continue
 		}
-		if hasBoth(text, r.Src, r.Dst) {
-			return line
-		}
 		if first == "" {
 			first = line
 		}
+		gap := pairGap(text, r.Src, r.Dst)
+		if gap < 0 {
+			continue
+		}
+		if firstOnly {
+			return line
+		}
+		if bestGap < 0 || gap < bestGap {
+			best, bestGap = line, gap
+		}
+		if gap <= evidenceNear {
+			break
+		}
 	}
-	if first != "" {
+	switch {
+	case best != "":
+		return best
+	case first != "":
 		return first
 	}
 	return toc
 }
 
-// hasBoth — стоят ли в куске оба конца связи.
-func hasBoth(text, a, b string) bool {
+// evidenceNear — на каком расстоянии между именами связи (в знаках) перебор
+// подтверждений прекращается: имена в соседних предложениях, искать ближе незачем.
+const evidenceNear = 60
+
+// pairGap — сколько знаков между началами ближайшей пары вхождений a и b
+// в тексте; -1 — хотя бы одного из имён в тексте нет. Сравнение без учёта
+// регистра, как и в around.
+func pairGap(text, a, b string) int {
 	low := strings.ToLower(text)
 	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
-	return a != "" && b != "" && strings.Contains(low, a) && strings.Contains(low, b)
+	if a == "" || b == "" {
+		return -1
+	}
+	pa, pb := allIndexes(low, a), allIndexes(low, b)
+	best := -1
+	for _, i := range pa {
+		for _, j := range pb {
+			lo, hi := i, j
+			if j < i {
+				lo, hi = j, i
+			}
+			if d := utf8.RuneCountInString(low[lo:hi]); best < 0 || d < best {
+				best = d
+			}
+		}
+	}
+	return best
+}
+
+func allIndexes(text, w string) []int {
+	var out []int
+	for from := 0; ; {
+		i := strings.Index(text[from:], w)
+		if i < 0 {
+			return out
+		}
+		out = append(out, from+i)
+		from += i + len(w)
+	}
 }
 
 // around вырезает из куска окно, в котором стоит связь.

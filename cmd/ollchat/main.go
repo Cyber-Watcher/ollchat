@@ -78,6 +78,9 @@ type cliFlags struct {
 	graphForgetFile       *string
 	graphForgetSkip       *bool
 	graphDenyAliases      *string
+	graphUnmerge          *string
+	graphUnmergeFile      *string
+	graphUnmergeWhy       *string
 	graphDenyFile         *string
 	kbReindex             *string
 	kbRecnt               *bool
@@ -152,6 +155,8 @@ type cliFlags struct {
 	graphMergeDrop        *bool
 	graphBook             *string
 	graphBookName         *string
+	graphDocsFile         *string
+	graphPending          *string
 	graphGroupsBuild      *string
 	graphGroupsFrom       *string
 	graphGroupsMinCos     *float64
@@ -252,6 +257,10 @@ func parseFlags() *cliFlags {
 		"с --graph-forget-chunks: куски больше не разбирать (мусор); без ключа следующая сборка разберёт их заново")
 	f.graphDenyAliases = flag.String("graph-deny-aliases", "",
 		"запретить понятиям ложные синонимы по списку: --graph-deny-aliases books --graph-deny-file список.tsv (с --kb-dry-run — только показать)")
+	f.graphUnmerge = flag.String("graph-unmerge", "",
+		"снять отдельные склейки по списку: --graph-unmerge books --graph-unmerge-file список.tsv (с --kb-dry-run — только показать)")
+	f.graphUnmergeFile = flag.String("graph-unmerge-file", "", "с --graph-unmerge: файл «поглощённое<TAB>выживший<TAB>причина» или перепись со столбцами from и to")
+	f.graphUnmergeWhy = flag.String("graph-unmerge-why", "", "с --graph-unmerge: причина снятия — пишется в merges-undone.jsonl")
 	f.graphDenyFile = flag.String("graph-deny-file", "", "с --graph-deny-aliases: файл «номер понятия<TAB>синоним<TAB>причина»")
 	f.graphForgetTOC = flag.String("graph-forget-toc", "",
 		"убрать из графа упоминания и связи, извлечённые из служебных кусков — оглавлений, списков литературы, выходных данных (после --kb-flag-toc): --graph-forget-toc books; с --kb-dry-run — только посчитать")
@@ -379,6 +388,10 @@ func parseFlags() *cliFlags {
 		"с --graph-merge: снять все склейки, вернув граф в прежний вид")
 	f.graphBook = flag.String("graph-book", "",
 		"показать вклад книги в граф: --graph-book books --graph-book-name <часть имени>")
+	f.graphDocsFile = flag.String("graph-docs-file", "",
+		"с --graph-build и --graph-pending: файл отбора книг — в строке номер книги или часть имени (без учёта регистра)")
+	f.graphPending = flag.String("graph-pending", "",
+		"напечатать одно число — сколько кусков сборка ещё возьмёт: --graph-pending books [--graph-folder … | --graph-book-name … | --graph-docs-file …]")
 	f.graphBookName = flag.String("graph-book-name", "",
 		"с --graph-book, --graph-drop-book и --graph-build: часть имени или пути книги")
 	f.graphGroupsBuild = flag.String("graph-groups-build", "",
@@ -527,16 +540,23 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, kmaint.Embed(os.Stdout, cfg, *f.kbEmbed, kmaint.EmbedRun{Dry: *f.kbDry, Recount: *f.kbRecnt, Plain: *f.kbEmbedPlain})
 	case *f.graphBuild != "":
 		return true, gmaint.Build(os.Stdout, cfg, *f.graphBuild, gmaint.BuildRun{
-			Folder: *f.graphFolder, Book: *f.graphBookName,
+			Folder: *f.graphFolder, Book: *f.graphBookName, DocsFile: *f.graphDocsFile,
 			Limit: *f.graphLimit, Workers: *f.graphWorkers,
 			AllowModelChange: *f.graphNewModel, AllowPromptChange: *f.graphNewPrompt,
 			RedoEmpty: *f.graphRedoEmpty, LinkNew: *f.graphLinkNew, IgnoreBusy: *f.graphIgnoreBusy,
 			LogPath: *f.graphLog, Kind: *f.graphKind, Note: *f.graphNote,
 		})
+	case *f.graphPending != "":
+		return true, gmaint.Pending(os.Stdout, cfg, *f.graphPending, *f.graphFolder, *f.graphBookName, *f.graphDocsFile)
 	case *f.nodes:
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
+	case *f.graphUnmerge != "":
+		if *f.graphUnmergeFile == "" {
+			return true, fmt.Errorf("--graph-unmerge требует список: --graph-unmerge-file <файл>")
+		}
+		return true, gmaint.Unmerge(os.Stdout, cfg, *f.graphUnmerge, *f.graphUnmergeFile, *f.graphUnmergeWhy, *f.kbDry)
 	case *f.graphDenyAliases != "":
 		if *f.graphDenyFile == "" {
 			return true, fmt.Errorf("--graph-deny-aliases требует список: --graph-deny-file <файл>")
@@ -956,7 +976,7 @@ func sessionDir() string {
 // Вынесено в постоянную, потому что это обещание пользователю: перечисленные
 // здесь команды обязаны ничего не менять при --kb-dry-run. Проверяется тестом.
 const dryRunFlagHelp = "только показать, что будет сделано: " +
-	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases"
+	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases, --graph-unmerge"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `ollchat %s — TUI-клиент и агент для Ollama

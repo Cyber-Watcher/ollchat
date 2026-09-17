@@ -110,8 +110,17 @@ func (p *reviewPanel) height() int {
 	return rows*2 + 3 + extra // рамка и заголовок
 }
 
-func (p *reviewPanel) move(delta int) { p.step(delta, len(p.items), p.visibleRows()) }
-func (p *reviewPanel) clampCursor()   { p.clamp(len(p.items), p.visibleRows()) }
+// Выдержки выделенной пары читаются с диска ЗДЕСЬ — там, где меняется курсор,
+// а не в view(): отрисовка в Bubble Tea зовётся на каждое событие и обязана
+// быть чистой функцией состояния (аудит 17.09.2026, Б17).
+func (p *reviewPanel) move(delta int) {
+	p.step(delta, len(p.items), p.visibleRows())
+	p.loadEvidence()
+}
+func (p *reviewPanel) clampCursor() {
+	p.clamp(len(p.items), p.visibleRows())
+	p.loadEvidence()
+}
 func (p *reviewPanel) current() *reviewItem {
 	if p.cursor < len(p.items) {
 		return &p.items[p.cursor]
@@ -133,7 +142,6 @@ func (p *reviewPanel) loadEvidence() {
 }
 
 func (p *reviewPanel) view(width int) string {
-	p.loadEvidence()
 	title := "разбор пар"
 	if p.judge {
 		title = "проверка решений арбитра"
@@ -245,6 +253,7 @@ func (m *Model) graphReviewCmd(arg string) tea.Cmd {
 		}
 		p := &reviewPanel{judge: judge, coll: name, g: g, kbc: coll, rows: m.cfg.Input.FindRows}
 		p.items = reviewItems(g, coll, judge)
+		p.loadEvidence() // первая пара: команда и так идёт вне цикла отрисовки
 		return reviewReadyMsg{panel: p}
 	}
 }

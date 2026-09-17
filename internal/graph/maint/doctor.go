@@ -132,6 +132,9 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 			fmt.Fprintln(stdout, "  векторы понятий не считались — смыслового входа в граф нет")
 		}
 	}
+	if p := g.Descriptions().Problem(); p != "" {
+		fmt.Fprintf(stdout, "  описания понятий: %s\n", p)
+	}
 
 	// 3. Векторы кусков самой коллекции.
 	needKBEmbed := cst.Vectors < cst.Chunks

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,11 +33,11 @@ import (
 // skip — судьба куска: false — «разобрать заново следующей сборкой»,
 // true — «не разбирать вовсе» (мусор).
 func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, dry bool) error {
-	keys, err := readChunkList(file)
+	keys, wholeDocs, err := readChunkList(file)
 	if err != nil {
 		return err
 	}
-	if len(keys) == 0 {
+	if len(keys) == 0 && len(wholeDocs) == 0 {
 		return fmt.Errorf("в файле %s нет ни одного номера куска", file)
 	}
 	base, err := kb.OpenBase(cfg.KB.Dir)
@@ -55,6 +56,21 @@ func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, d
 		k := graph.UnpackChunk(packed)
 		if _, ok := coll.ChunkByRef(k.Doc, k.Ord); !ok {
 			unknown = append(unknown, k.String())
+		}
+	}
+	// Книга целиком («12#*»): нужна перед перечитыванием книги — её прежние
+	// куски получат статус удалённых, и извлечённое из них обязано уйти из графа.
+	for doc := range wholeDocs {
+		found := false
+		if err := coll.EachChunkRef(kb.ChunkFilter{Docs: []uint32{doc}}, func(r kb.ChunkRef) error {
+			found = true
+			keys[graph.ChunkKey{Doc: r.Doc, Ord: r.Ord}.Pack()] = true
+			return nil
+		}); err != nil {
+			return err
+		}
+		if !found {
+			unknown = append(unknown, fmt.Sprintf("%d#*", doc))
 		}
 	}
 	if len(unknown) > 0 {
@@ -104,14 +120,16 @@ func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, d
 	return nil
 }
 
-// readChunkList читает номера кусков из файла: первое поле строки.
-func readChunkList(file string) (map[uint64]bool, error) {
+// readChunkList читает номера кусков из файла: первое поле строки. Запись
+// «12#*» означает все куски книги №12.
+func readChunkList(file string) (map[uint64]bool, map[uint32]bool, error) {
 	f, err := os.Open(file)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 	keys := map[uint64]bool{}
+	docs := map[uint32]bool{}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for line := 1; sc.Scan(); line++ {
@@ -120,11 +138,19 @@ func readChunkList(file string) (map[uint64]bool, error) {
 			continue
 		}
 		first := strings.Fields(text)[0]
+		if doc, ok := strings.CutSuffix(first, "#*"); ok {
+			n, err := strconv.ParseUint(doc, 10, 32)
+			if err != nil || n == 0 {
+				return nil, nil, fmt.Errorf("%s, строка %d: книга целиком записывается как «12#*», а не %q", file, line, first)
+			}
+			docs[uint32(n)] = true
+			continue
+		}
 		k, err := graph.ParseChunkKey(first)
 		if err != nil {
-			return nil, fmt.Errorf("%s, строка %d: %w", file, line, err)
+			return nil, nil, fmt.Errorf("%s, строка %d: %w", file, line, err)
 		}
 		keys[k.Pack()] = true
 	}
-	return keys, sc.Err()
+	return keys, docs, sc.Err()
 }

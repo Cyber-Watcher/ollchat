@@ -52,6 +52,10 @@ type Settings struct {
 	// (этап 101, D1). Настройка mix.chain; пусто в конфиге — включено.
 	Chain bool
 
+	// RelationYears — печатать у связей карты год самой свежей подтверждающей
+	// книги (mix.relation_years; этап 104, П10.3). Цитат это не добавляет.
+	RelationYears bool
+
 	// Карта понятий.
 	Entities  int                // сколько понятий брать
 	Neighbors int                // сколько связей у каждого
@@ -201,7 +205,18 @@ func Build(question string, d Deps, s Settings) Result {
 			"чего в них нет — говори от себя и так и помечай.\n\n"
 	}
 	b.WriteString(head)
-	b.WriteString(graph.Render(nil, res, graph.RenderOpts{Collection: s.Collection}))
+	// Возраст знания модель видит так же, как человек в /search: «свежайшее
+	// 2021 г.» у связи. Без оценок и предупреждений — сегодняшняя дата у модели
+	// есть в системном сообщении, сопоставит сама. Источник кусков даётся
+	// отрисовке только ради года (YearsOnly): цитат в карте по-прежнему нет.
+	// Коллекция приходит сюда интерфейсом поиска; год берётся, только если она
+	// умеет отдавать кусок по ссылке (настоящая коллекция умеет, подставная
+	// в тестах — не обязана).
+	if chunks, ok := coll.(graph.Chunks); ok && s.RelationYears {
+		b.WriteString(graph.Render(chunks, res, graph.RenderOpts{Collection: s.Collection, YearsOnly: true}))
+	} else {
+		b.WriteString(graph.Render(nil, res, graph.RenderOpts{Collection: s.Collection}))
+	}
 
 	// Цепочка между двумя понятиями вопроса — то же, что показывает `/search`
 	// (этап 101, D1). Модель может добыть её сама вызовом graph_path, но это

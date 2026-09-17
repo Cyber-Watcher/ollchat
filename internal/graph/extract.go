@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -61,6 +62,13 @@ type FactRelation struct {
 type Facts struct {
 	Entities  []FactEntity   `json:"entities"`
 	Relations []FactRelation `json:"relations"`
+
+	// DroppedNames — сколько понятий отброшено проверкой «имя есть в тексте
+	// куска» (только формат 2, см. groundNames). Нужно итогу захода.
+	DroppedNames int `json:"-"`
+	// RenamedNames — у скольких понятий именем стал синоним, стоящий в тексте,
+	// вместо имени, которого в тексте нет.
+	RenamedNames int `json:"-"`
 }
 
 // SystemPrompt — постановка задачи модели.
@@ -110,6 +118,20 @@ func UserPrompt(book string, unit string, from, to int, text string) string {
 // пары вводных предложений. Разбирается всё это одинаково — берётся первый
 // сбалансированный объект. Если его нет, это ошибка, и кусок пойдёт в пропуск.
 func ParseFacts(answer, chunkText string) (Facts, error) {
+	return ParseFactsFor(1, answer, chunkText)
+}
+
+// ParseFactsFor — разбор ответа по правилам формата графа. У формата 2 к общей
+// чистке добавляется проверка имён понятий по тексту куска (groundNames).
+func ParseFactsFor(version int, answer, chunkText string) (Facts, error) {
+	f, err := parseFacts(answer, chunkText)
+	if err != nil || version < FormatV2 {
+		return f, err
+	}
+	return groundNames(f, chunkText), nil
+}
+
+func parseFacts(answer, chunkText string) (Facts, error) {
 	raw := firstJSONObject(answer)
 	if raw == "" {
 		// Ответ мог оборваться на середине: модель упёрлась в потолок длины.
@@ -269,6 +291,7 @@ func isWordRune(r rune) bool {
 // у которых текста куска нет.
 func clean(f Facts, chunkText string) Facts {
 	haystack := strings.ToLower(collapseSpaces(chunkText))
+	joined, hyphened := MatchText(chunkText)
 	inText := func(alias string) bool {
 		if chunkText == "" {
 			return true // текста нет — проверять нечем, оставляем как было
@@ -278,7 +301,17 @@ func clean(f Facts, chunkText string) Facts {
 		// и требовать пробел перед ним значит терять верные совпадения.
 		// А граница нужна, чтобы «go» не совпало внутри «goroutine».
 		a := strings.ToLower(collapseSpaces(alias))
-		return containsWord(haystack, a)
+		if containsWord(haystack, a) {
+			return true
+		}
+		// Вторая сверка — с поправкой на ЗАПИСЬ текста: слово разорвано
+		// переносом, внутри мягкий перенос или лигатура, «ё» набрано как «е»,
+		// в книге «load-balancing», а модель пишет «load balancing».
+		// Объединение, а не замена — по замеру 17.09.2026 (`graphstats
+		// -aliascheck`, 53 230 пар «синоним, кусок»): общая сверка возвращает
+		// 3,4% законных синонимов, но сама не видит имён короче трёх знаков
+		// (`AI`, `ИИ`, `GC` — 3,5%), а они — самый частый мост между языками.
+		return SeenInText(joined, hyphened, alias)
 	}
 
 	var out Facts
@@ -327,6 +360,99 @@ func clean(f Facts, chunkText string) Facts {
 		if len(out.Relations) >= maxRelationsPerChunk {
 			break
 		}
+	}
+	return out
+}
+
+// groundNames оставляет только понятия, чьё имя стоит в тексте куска
+// (формат 2; паспорт опытного графа, этап 104).
+//
+// **Зачем.** Проверка «сказанное моделью должно стоять в куске» была только
+// у синонимов; имена понятий с текстом не сверялись никогда. Перепись рабочего
+// графа 17.09.2026: понятие не видно в своём куске у 4,3% упоминаний, и это
+// смесь — вывод из контекста, имя по-русски для английского куска, подмена
+// ключа. Для опытного графа правило одно: **имя — на языке куска и как
+// в тексте** (так теперь велит и промпт extract2.txt), перевод допустим только
+// синонимом и только если сам дословно стоит во фрагменте.
+//
+// **Проверка мягкая**, иначе она срезала бы верное (замер П6.3: строгая
+// сверка фразой отсекла бы 25,8% упоминаний, мягкая — 7,0%). Имя засчитывается,
+// если стоит в тексте фразой (с поправкой на запись: переносы, дефис вместо
+// пробела, лигатуры — SeenInText) ЛИБО по основам слов: «каталоги» при
+// «каталогами» в тексте, `goroutine` при «goroutines».
+//
+// **Спасение вместо отказа.** Если имени в тексте нет, а какой-то его синоним
+// есть (он уже прошёл clean, то есть стоит дословно), именем становится этот
+// синоним: модель перевела имя, а настоящее написание положила в aliases.
+// Связи отброшенных понятий отпадают вместе с ними.
+func groundNames(f Facts, chunkText string) Facts {
+	if chunkText == "" {
+		return f // текста нет — проверять нечем (только тесты)
+	}
+	joined, hyphened := MatchText(chunkText)
+	stems := map[string]bool{}
+	for _, t := range kb.Tokens(joined, nil) {
+		stems[t.Term] = true
+	}
+	seen := func(name string) bool {
+		if SeenInText(joined, hyphened, name) {
+			return true
+		}
+		n := MatchName(name)
+		if len([]rune(n)) < 3 {
+			// «Go», «C», «R»: только отдельным словом.
+			return containsWord(joined, n)
+		}
+		toks := kb.Tokens(n, nil)
+		if len(toks) == 0 {
+			return false
+		}
+		for _, t := range toks {
+			if !stems[t.Term] {
+				return false
+			}
+		}
+		return true
+	}
+
+	out := Facts{}
+	rename := map[string]string{} // прежнее имя → новое (нормализованные → как писать)
+	kept := map[string]bool{}
+	for _, e := range f.Entities {
+		if !seen(e.Name) {
+			swapped := false
+			for i, a := range e.Aliases {
+				if goodName(a) && seen(a) {
+					rename[Normalize(e.Name)] = a
+					rest := append(append([]string(nil), e.Aliases[:i]...), e.Aliases[i+1:]...)
+					e.Name, e.Aliases = a, rest
+					swapped = true
+					out.RenamedNames++
+					break
+				}
+			}
+			if !swapped {
+				out.DroppedNames++
+				continue
+			}
+		}
+		if kept[Normalize(e.Name)] {
+			continue // после переименования имя могло совпасть с уже взятым
+		}
+		kept[Normalize(e.Name)] = true
+		out.Entities = append(out.Entities, e)
+	}
+	for _, r := range f.Relations {
+		if to, ok := rename[Normalize(r.Src)]; ok {
+			r.Src = to
+		}
+		if to, ok := rename[Normalize(r.Dst)]; ok {
+			r.Dst = to
+		}
+		if !kept[Normalize(r.Src)] || !kept[Normalize(r.Dst)] || Normalize(r.Src) == Normalize(r.Dst) {
+			continue
+		}
+		out.Relations = append(out.Relations, r)
 	}
 	return out
 }

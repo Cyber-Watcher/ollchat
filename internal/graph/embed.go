@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,6 +44,21 @@ type EmbedOpts struct {
 	// с «connection refused». Обрыв дороги — не отказ сервера; ждать его
 	// возвращения дешевле, чем считать заново.
 	NodeWait time.Duration
+
+	// Checkpoint — через сколько понятий фиксировать посчитанное на диске;
+	// 0 — 4096, то есть около сорока секунд карты при 96 понятиях в секунду.
+	//
+	// **Почему нужно.** До 17.09.2026 счёт держал всё в памяти и писал один раз
+	// в конце: обрыв посреди получасового счёта терял его целиком, а новые
+	// понятия до следующей удачной докатки находились только точным написанием.
+	// Теперь цена обрыва — одна порция, и повтор той же команды продолжает
+	// с места: досчёт хвоста дописывает основной файл (vecappend.go), полный
+	// пересчёт копит рядом в файлах `.part` (vecpart.go).
+	Checkpoint int
+
+	// OnWait зовётся перед каждым повтором после обрыва связи: что случилось,
+	// сколько уже ждём и сколько готовы ждать. Зовётся из нескольких потоков.
+	OnWait func(err error, waited, limit time.Duration)
 }
 
 // embedRetryEvery — как часто пробовать снова после обрыва. Переменная,
@@ -59,36 +75,65 @@ func (o EmbedOpts) norm() EmbedOpts {
 	if o.NodeWait <= 0 {
 		o.NodeWait = 15 * time.Minute
 	}
+	if o.Checkpoint <= 0 {
+		o.Checkpoint = 4096
+	}
 	return o
 }
 
 // transientEmbedErr — обрыв дороги до сервера, а не отказ по существу:
 // соединение отклонено, оборвано, истёк срок запроса.
+//
+// **Чем обрыв НЕ является** (аудит 17.09.2026, Б13). Любая ошибка HTTP-клиента
+// Go завёрнута в `*url.Error`, а он сам удовлетворяет `net.Error` — поэтому
+// прежняя проверка «это net.Error?» отвечала «да» на всё подряд: опечатку
+// в адресе, неизвестную схему, негодный сертификат. Счёт на таких ошибках
+// молча повторял запрос пятнадцать минут и выглядел зависшим. Обёртка
+// снимается, и смотрим внутрь: имя, которого нет в DNS, — опечатка, а не обрыв;
+// сеть, отказавшая на соединении, чтении или записи, — обрыв.
 func transientEmbedErr(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
-	var ne net.Error
-	if errors.As(err, &ne) {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if ue.Timeout() {
+			return true
+		}
+		err = ue.Err
+	}
+	var de *net.DNSError
+	if errors.As(err, &de) {
+		// Нет такого имени — так настроено; временный сбой DNS — дорога.
+		return !de.IsNotFound && (de.IsTemporary || de.IsTimeout)
+	}
+	var oe *net.OpError
+	if errors.As(err, &oe) {
 		return true
 	}
 	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
+	// Клиент Ollama отдаёт часть ошибок текстом, без обёрнутой причины.
 	s := err.Error()
 	return strings.Contains(s, "connection refused") || strings.Contains(s, "connection reset") ||
-		strings.Contains(s, "broken pipe") || strings.Contains(s, "no such host")
+		strings.Contains(s, "broken pipe")
 }
 
 // embedWithWait считает пачку, пережидая обрыв связи до o.NodeWait.
-func embedWithWait(ctx context.Context, emb kb.Embedder, texts []string, wait time.Duration) ([][]float32, error) {
+// О каждом ожидании сообщает o.OnWait: молчащий счёт неотличим от зависшего.
+func embedWithWait(ctx context.Context, emb kb.Embedder, texts []string, o EmbedOpts) ([][]float32, error) {
 	started := time.Now()
 	for {
 		vecs, err := emb.Embed(ctx, texts)
-		if err == nil || !transientEmbedErr(err) || time.Since(started) >= wait {
+		if err == nil || !transientEmbedErr(err) || time.Since(started) >= o.NodeWait {
 			return vecs, err
+		}
+		if o.OnWait != nil {
+			o.OnWait(err, time.Since(started), o.NodeWait)
 		}
 		select {
 		case <-ctx.Done():
@@ -195,6 +240,10 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 		return err
 	}
 
+	if len(texts) == 0 {
+		return fmt.Errorf("в графе нет понятий — считать нечего")
+	}
+
 	// Отпечаток снимается до счёта: узнать о чужих весах после того, как
 	// хвост посчитан, значит выбросить его.
 	digest := embedderDigest(ctx, emb)
@@ -205,15 +254,11 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	// «хвост» — это ровно те понятия, чей номер больше прошлого счёта. Понятия,
 	// у которых с тех пор прибавились синонимы, сохранят прежний вектор: он чуть
 	// беднее нового, но верен, а пересчёт ради этого стоил бы всей работы.
-	var (
-		kept    []int8
-		already int
-	)
+	already := 0
 	if !o.Recount {
-		kept, already = g.vecs.Existing(emb.Model(), 0)
+		_, already = g.vecs.Existing(emb.Model(), 0)
 		if already > len(texts) {
-			already = len(texts) // граф ужался: досчитывать нечего, считаем заново
-			kept = nil
+			already = 0 // граф ужался: досчитывать нечего, считаем заново
 		}
 		// Досчёт хвостом на другом сервере — тот самый случай, когда одно имя
 		// модели указывает на разные веса. Догонщик (vecfollow.go) сверяет
@@ -226,32 +271,92 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 			}
 		}
 	}
-	if already > 0 {
-		texts = texts[already:]
-		if len(texts) == 0 {
-			return nil // всё уже посчитано
-		}
-	}
-
-	dim, data, err := embedBatches(ctx, emb, texts, o, onProgress)
-	if err != nil {
-		return err
+	if already == len(texts) && already > 0 {
+		return nil // всё уже посчитано
 	}
 	if already == 0 {
-		return g.SaveEntityVectors(emb.Model(), digest, dim, data)
+		// Счёт с нуля: полный пересчёт, смена эмбеддера, первый счёт. Прежние
+		// векторы (если есть) работают до самой подмены — см. vecpart.go.
+		return g.recountInParts(ctx, emb, o, texts, digest, onProgress)
 	}
-	if len(kept) != already*dim {
-		// Размерность прежних векторов не та — склеивать нельзя.
-		return fmt.Errorf("прежние векторы не той размерности: %d на %d понятий",
-			len(kept), already)
+
+	// Досчёт хвоста порциями: посчитали — дописали — зафиксировали.
+	total := len(texts) - already
+	for from := already; from < len(texts); from += o.Checkpoint {
+		to := from + o.Checkpoint
+		if to > len(texts) {
+			to = len(texts)
+		}
+		// Копия: embedBatches подменяет пустые имена пробелом, а отпечатки
+		// считаются от настоящих текстов.
+		seg := append([]string(nil), texts[from:to]...)
+		dim, data, err := embedBatches(ctx, emb, seg, o, shifted(onProgress, from-already, total))
+		if err != nil {
+			return savedSoFar(err, from-already, total)
+		}
+		if err := g.vecs.appendVectors(emb.Model(), digest, dim, data); err != nil {
+			return savedSoFar(err, from-already, total)
+		}
+		// Свежие — только эта порция: отпечатки головы остаются прежними, иначе
+		// устаревшие векторы перестали бы находиться (saveEntityVectors).
+		fresh := make([]uint32, 0, to-from)
+		for id := from + 1; id <= to; id++ {
+			fresh = append(fresh, uint32(id))
+		}
+		_ = saveStamps(g.dir, mergeStamps(loadStamps(g.dir), texts[:to], fresh))
 	}
-	// Свежие — только хвост: отпечатки головы остаются прежними, иначе
-	// устаревшие векторы перестали бы находиться (saveEntityVectors).
-	fresh := make([]uint32, 0, len(texts))
-	for i := range texts {
-		fresh = append(fresh, uint32(already+i+1))
+	return nil
+}
+
+// recountInParts считает векторы всех понятий с нуля, фиксируя посчитанное
+// порциями в файлах `.part`; оборванный счёт продолжается повтором команды.
+func (g *Graph) recountInParts(ctx context.Context, emb kb.Embedder, o EmbedOpts,
+	texts []string, digest string, onProgress func(EmbedProgress)) error {
+
+	part := loadVecPart(g.dir, emb.Model(), digest, len(texts))
+	for from := part.meta.Count; from < len(texts); from += o.Checkpoint {
+		to := from + o.Checkpoint
+		if to > len(texts) {
+			to = len(texts)
+		}
+		seg := append([]string(nil), texts[from:to]...)
+		dim, data, err := embedBatches(ctx, emb, seg, o, shifted(onProgress, from, len(texts)))
+		if err != nil {
+			return savedSoFar(err, from, len(texts))
+		}
+		if err := part.add(dim, data, texts[from:to]); err != nil {
+			return savedSoFar(err, from, len(texts))
+		}
 	}
-	return g.saveEntityVectors(emb.Model(), digest, dim, append(kept, data...), fresh)
+	// Подмена: прежняя атомарная запись целиком, отпечатки — те, что копились
+	// вместе с векторами (текст мог измениться между обрывом и продолжением).
+	if err := g.vecs.save(emb.Model(), digest, part.meta.Dim, part.data); err != nil {
+		return err
+	}
+	_ = saveStamps(g.dir, part.stamps)
+	part.drop()
+	return nil
+}
+
+// shifted сдвигает ход порции в общий счёт: человеку показывается «сделано
+// из всего», а не «сделано из порции».
+func shifted(onProgress func(EmbedProgress), done, total int) func(EmbedProgress) {
+	if onProgress == nil {
+		return nil
+	}
+	return func(p EmbedProgress) {
+		onProgress(EmbedProgress{Done: done + p.Done, Total: total})
+	}
+}
+
+// savedSoFar дописывает к ошибке счёта, сколько уже лежит на диске: после
+// обрыва человеку важно знать, что работа не пропала и чем её продолжить.
+func savedSoFar(err error, saved, total int) error {
+	if saved <= 0 {
+		return err
+	}
+	return fmt.Errorf("%w\nпосчитанное сохранено: %d из %d; повтор той же команды продолжит с этого места",
+		err, saved, total)
 }
 
 // embedTexts собирает тексты понятий по местам: место N-1 — понятие с номером N.
@@ -342,7 +447,7 @@ func embedBatches(ctx context.Context, emb kb.Embedder, texts []string, o EmbedO
 					return
 				}
 				j := jobs[i]
-				vecs, err := embedWithWait(ctx, emb, texts[j.from:j.to], o.NodeWait)
+				vecs, err := embedWithWait(ctx, emb, texts[j.from:j.to], o)
 				mu.Lock()
 				switch {
 				case err != nil:

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,9 +52,12 @@ type BuildRun struct {
 	// в каталоге, где остаток на тридцать часов карты: 08.09.2026 девять книг
 	// про графы приехали в /AI, где оставалось 33 594 куска. Отбор по имени
 	// разбирает их за час, а не за полторы недели ночей (этап 101, часть C).
-	Book    string
-	Limit   int // сколько кусков взять в этот заход; 0 — все
-	Workers int // параллельных запросов к модели; 0 — из настроек
+	Book string
+	// DocsFile — файл отбора книг: в строке номер книги или часть имени
+	// (см. pickBooks). Нужен работам, которые трогают куски сотен книг разом.
+	DocsFile string
+	Limit    int // сколько кусков взять в этот заход; 0 — все
+	Workers  int // параллельных запросов к модели; 0 — из настроек
 
 	AllowModelChange  bool // сборка другой моделью извлечения
 	AllowPromptChange bool // сборка другим промптом
@@ -147,17 +151,11 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// Отбор по имени книги сужает уже выбранный каталог: «--graph-folder /AI
 	// --graph-book-name Graph» — книги про графы внутри /AI. Без каталога
 	// ищется по всей коллекции.
-	var picked []uint32
-	if strings.TrimSpace(bookQuery) != "" {
-		for _, b := range coll.MatchingDocs(kb.ChunkFilter{PathContains: bookQuery}) {
-			if folder == "" || strings.Contains(b.Path, folder) {
-				picked = append(picked, b.ID)
-			}
-		}
-		if len(picked) == 0 {
-			return fmt.Errorf("в коллекции %s нет книг по «%s»%s", name, bookQuery,
-				folderNote(folder))
-		}
+	picked, err := pickBooks(coll, folder, bookQuery, run.DocsFile)
+	if err != nil {
+		return err
+	}
+	if len(picked) > 0 {
 		filter.Docs = picked
 	}
 	books := coll.MatchingDocs(filter)
@@ -223,8 +221,12 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	switch {
 	case len(picked) > 0:
 		fmt.Fprintf(stdout, "отбор по книгам «%s»%s — книг %d, кусков %d\n",
-			bookQuery, folderNote(folder), len(books), inFolder)
-		for _, b := range books {
+			strings.TrimSpace(bookQuery+" "+run.DocsFile), folderNote(folder), len(books), inFolder)
+		for i, b := range books {
+			if i >= 12 {
+				fmt.Fprintf(stdout, "  · … и ещё %d\n", len(books)-i)
+				break
+			}
 			fmt.Fprintf(stdout, "  · %s\n", b.Title)
 		}
 	case folder != "":
@@ -308,6 +310,10 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// Очередь на общий замок записи. Пока карта одна, она тонет в секундах
 	// генерации; на нескольких узлах это первый подозреваемый, если суммарная
 	// скорость вышла заметно ниже суммы одиночных.
+	if res.DroppedNames+res.RenamedNames > 0 {
+		fmt.Fprintf(stdout, "  имя понятия не найдено в тексте куска: отброшено %d, именем стал синоним из текста у %d\n",
+			res.DroppedNames, res.RenamedNames)
+	}
 	if res.SkippedUntyped+res.SkippedOverlap > 0 {
 		// Правила формата 2 (опытный граф): связь без названного отношения
 		// и повтор из зоны перекрытия кусков в граф не пишутся.
@@ -845,6 +851,7 @@ func Recheck(stdout io.Writer, cfg *config.Config, name string, count, minMember
 	defer stop()
 
 	last := time.Now()
+	var failed, total int
 	err = g.Summarize(ctx, ex, comms, graph.SummaryOpts{
 		MinMembers:   minMembers,
 		MaxMembers:   cfg.Graph.SummaryMaxMembers,
@@ -852,6 +859,7 @@ func Recheck(stdout io.Writer, cfg *config.Config, name string, count, minMember
 		Workers:      cfg.Graph.SummaryWorkers,
 	},
 		func(p graph.SummaryProgress) {
+			failed, total = p.Failed, p.Total
 			if time.Since(last) < 2*time.Second && p.Done+p.Failed < p.Total {
 				return
 			}
@@ -882,7 +890,7 @@ func Recheck(stdout io.Writer, cfg *config.Config, name string, count, minMember
 			mark, w.ID, w.Share, was.Rating, now.Rating, trimTitle(now.Title))
 	}
 	fmt.Fprintf(stdout, "\nпересмотрено %d тем, оценка снижена у %d\n", len(weak), dropped)
-	return nil
+	return tooManyFailures("пересмотр описаний тем", failed, total)
 }
 
 // Summaries просит модель назвать и описать каждое сообщество.
@@ -939,6 +947,7 @@ func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int
 	if minMembers <= 0 {
 		minMembers = cfg.Graph.SummaryMinMembers
 	}
+	var failed, total int
 	err = g.Summarize(ctx, ex, comms, graph.SummaryOpts{
 		MinMembers:   minMembers,
 		MaxMembers:   cfg.Graph.SummaryMaxMembers,
@@ -946,6 +955,7 @@ func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int
 		Workers:      cfg.Graph.SummaryWorkers,
 	},
 		func(p graph.SummaryProgress) {
+			failed, total = p.Failed, p.Total
 			if time.Since(last) < 2*time.Second && p.Done+p.Failed < p.Total {
 				return
 			}
@@ -965,6 +975,122 @@ func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int
 		}
 	}
 	fmt.Fprintf(stdout, "описано сообществ: %d\n", done)
+	return tooManyFailures("описания тем", failed, total)
+}
+
+// tooManyFailures превращает массовый сбой шага с моделью в ошибку команды.
+//
+// Один-два сбоя на сотни запросов — обычное дело, и шаг их переживает. Но
+// 15.09.2026 сервер лёг посреди шага описаний: 236 сбоев из 298, а команда
+// вышла с кодом 0, докатка записала «описания новых тем — код 0», и потерю
+// заметили по доктору на следующий день. Каждый пятый сбой — уже не шум,
+// а беда дороги или модели: код возврата обязан о ней сказать.
+func tooManyFailures(what string, failed, total int) error {
+	if total == 0 || failed*5 < total {
+		return nil
+	}
+	return fmt.Errorf("%s: сбоев %d из %d — шаг не состоялся (сервер лёг или модель не отвечает); "+
+		"сделанное сохранено, повторный запуск возьмёт только оставшееся", what, failed, total)
+}
+
+// pickBooks собирает номера книг по имени и по файлу отбора.
+//
+// Имя ищется в пути книги БЕЗ учёта регистра: 15.09.2026 заход с
+// `--graph-book-name "on-device"` отказал через 330 секунд кодом 1, потому что
+// файл назывался «On-Device…», а очередь молча пошла дальше (этап 102).
+// В файле отбора строка из цифр — номер книги, любая другая — часть имени;
+// пустые строки и строки с `//` пропускаются. Имя или номер, которым ничего
+// не соответствует, — ошибка: опечатка в списке не должна сузить работу молча.
+func pickBooks(coll *kb.Collection, folder, bookQuery, docsFile string) ([]uint32, error) {
+	var queries []string
+	var ids []uint32
+	if q := strings.TrimSpace(bookQuery); q != "" {
+		queries = append(queries, q)
+	}
+	if docsFile != "" {
+		data, err := os.ReadFile(docsFile)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "//") {
+				continue
+			}
+			if n, err := strconv.ParseUint(line, 10, 32); err == nil {
+				ids = append(ids, uint32(n))
+				continue
+			}
+			queries = append(queries, line)
+		}
+	}
+	if len(queries) == 0 && len(ids) == 0 {
+		return nil, nil
+	}
+	all := coll.MatchingDocs(kb.ChunkFilter{})
+	live := map[uint32]bool{}
+	for _, b := range all {
+		live[b.ID] = true
+	}
+	seen := map[uint32]bool{}
+	var picked []uint32
+	add := func(id uint32) {
+		if !seen[id] {
+			seen[id] = true
+			picked = append(picked, id)
+		}
+	}
+	for _, id := range ids {
+		if !live[id] {
+			return nil, fmt.Errorf("книги №%d в коллекции нет (удалена или перечитана под новым номером)", id)
+		}
+		add(id)
+	}
+	for _, q := range queries {
+		low, found := strings.ToLower(q), false
+		for _, b := range all {
+			if strings.Contains(strings.ToLower(b.Path), low) && (folder == "" || strings.Contains(b.Path, folder)) {
+				add(b.ID)
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("нет книг по «%s»%s", q, folderNote(folder))
+		}
+	}
+	return picked, nil
+}
+
+// Pending печатает одно число: сколько кусков под этим отбором сборка ещё
+// возьмёт в работу. Для обвязки: по нему цикл догона решает, продолжать ли.
+func Pending(stdout io.Writer, cfg *config.Config, name, folder, bookQuery, docsFile string) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules())
+	if err != nil {
+		return err
+	}
+	defer g.Close()
+	filter := kb.ChunkFilter{PathContains: folder}
+	picked, err := pickBooks(coll, folder, bookQuery, docsFile)
+	if err != nil {
+		return err
+	}
+	if len(picked) > 0 {
+		filter.Docs = picked
+	}
+	n, err := graph.PendingChunks(coll, g, filter)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, n)
 	return nil
 }
 
@@ -1029,6 +1155,7 @@ func Embed(stdout io.Writer, cfg *config.Config, name string, recount bool) erro
 		Batch:   cfg.KB.EmbedBatch,
 		Workers: cfg.KB.EmbedWorkers,
 		Recount: recount,
+		OnWait:  embedWaitNote(),
 	}, func(p graph.EmbedProgress) {
 		if time.Since(last) < time.Second && p.Done < p.Total {
 			return
@@ -1044,6 +1171,25 @@ func Embed(stdout io.Writer, cfg *config.Config, name string, recount bool) erro
 	fmt.Fprintf(stdout, "посчитано: понятий %d, размерность %d, модель %s\n",
 		info.Count, info.Dim, info.Model)
 	return nil
+}
+
+// embedWaitNote — строка о том, что счёт векторов пережидает обрыв связи.
+// Не чаще раза в минуту и под замком: ждут сразу несколько потоков счёта.
+func embedWaitNote() func(error, time.Duration, time.Duration) {
+	var (
+		mu   sync.Mutex
+		last time.Time
+	)
+	return func(err error, waited, limit time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(last) < time.Minute {
+			return
+		}
+		last = time.Now()
+		fmt.Fprintf(os.Stderr, "\n  сервер векторов не отвечает (%v) — жду его возвращения: прошло %s из %s\n",
+			err, waited.Round(time.Second), limit)
+	}
 }
 
 // Findings пишет разбор по важным темам — пятый раздел отчёта.
@@ -1114,7 +1260,9 @@ func Findings(stdout io.Writer, cfg *config.Config, name string, minRating, minM
 
 	fmt.Fprintf(stdout, "разбирает %s\n", ex.Model())
 	last := time.Now()
+	var failedReq, totalReq int
 	err = g.Findings(ctx, ex, comms, opt, func(p graph.FindingsProgress) {
+		failedReq, totalReq = p.Failed, p.Total
 		if time.Since(last) < 2*time.Second && p.Done+p.Failed < p.Total {
 			return
 		}
@@ -1136,7 +1284,7 @@ func Findings(stdout io.Writer, cfg *config.Config, name string, minRating, minM
 	}
 	fmt.Fprintf(stdout, "тем с разбором %d, выводов всего %d (в среднем %.1f на тему)\n",
 		withFindings, total, float64(total)/float64(max(withFindings, 1)))
-	return nil
+	return tooManyFailures("разборы тем", failedReq, totalReq)
 }
 
 // Drift отвечает на вопрос «пора ли пересчитывать сообщества».
@@ -2413,7 +2561,7 @@ func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 	defer stop()
 
 	started := time.Now()
-	fixed, err := g.EmbedStale(ctx, emb, graph.EmbedOpts{}, nil)
+	fixed, err := g.EmbedStale(ctx, emb, graph.EmbedOpts{OnWait: embedWaitNote()}, nil)
 	if err != nil {
 		return err
 	}
@@ -2444,6 +2592,13 @@ func QueueDoubts(stdout io.Writer, cfg *config.Config, name, tsvPath string) err
 	}
 	defer f.Close()
 	dir := cfg.Graph.Rules().Dir(coll.Dir())
+	// Признак пишущей работы: без него архив коллекции мог начаться посреди
+	// дозаписи журнала связываний (аудит 17.09.2026, Б17).
+	unmark, err := graph.MarkWork(dir, "очередь спорных пар")
+	if err != nil {
+		return err
+	}
+	defer unmark()
 	n, err := graph.QueueDoubtsTSV(dir, f)
 	if err != nil {
 		return err

@@ -128,3 +128,24 @@ func TestVectorDescIsOffByDefault(t *testing.T) {
 		t.Fatalf("при включённом правиле описание не попало в вектор: %q", got)
 	}
 }
+
+// Сбой чтения посреди файла описаний не теряется молча: прочитанное остаётся,
+// граф открывается, а причина видна доктору (аудит 17.09.2026, Б17).
+func TestDescriptionsReportUnreadTail(t *testing.T) {
+	dir := t.TempDir()
+	good := `{"id":1,"name":"Go","desc":"Язык программирования с горутинами и каналами."}` + "\n"
+	huge := `{"id":2,"name":"X","desc":"` + strings.Repeat("я", 800*1024) + `"}` + "\n" // строка длиннее мегабайта
+	if err := os.WriteFile(filepath.Join(dir, entDescFile), []byte(good+huge), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := openDescriptions(dir)
+	if err != nil {
+		t.Fatalf("сбой чтения описаний не должен мешать открыть граф: %v", err)
+	}
+	if d.Of(1) == "" {
+		t.Fatal("прочитанное до сбоя описание потеряно")
+	}
+	if d.Problem() == "" {
+		t.Fatal("о недочитанном файле описаний ничего не сказано")
+	}
+}

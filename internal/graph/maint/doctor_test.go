@@ -50,3 +50,20 @@ func TestCountUncoveredSkipsMerged(t *testing.T) {
 		t.Errorf("без понятий вне тем = %d, ожидался 0", got)
 	}
 }
+
+// Массовый сбой шага с моделью — ошибка команды, а не «код 0» (этап 102):
+// 15.09.2026 сервер лёг посреди описаний тем, 236 сбоев из 298, а докатка
+// записала успех.
+func TestTooManyFailures(t *testing.T) {
+	if err := tooManyFailures("описания тем", 236, 298); err == nil {
+		t.Fatal("236 сбоев из 298 сошли за успех")
+	}
+	if err := tooManyFailures("описания тем", 60, 298); err == nil {
+		t.Fatal("каждый пятый сбой сошёл за успех")
+	}
+	for _, c := range [][2]int{{0, 298}, {3, 298}, {0, 0}} {
+		if err := tooManyFailures("описания тем", c[0], c[1]); err != nil {
+			t.Fatalf("%d сбоев из %d — обычный шум, а не беда: %v", c[0], c[1], err)
+		}
+	}
+}

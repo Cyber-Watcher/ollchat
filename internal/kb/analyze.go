@@ -46,7 +46,11 @@ import (
 // ширины пропускаются; мягкий перенос внутри слова слово не рвёт.
 // Старый индекс с новыми правилами совместим: в запросах переносов нет.
 // Пересобрать его без перечитывания книг — Collection.Reanalyze.
-const AnalyzerVersion = "ru-en-v3"
+// ru-en-v4 (17.09.2026): части слова через дефис кладутся ещё и основой —
+// «fine-tuning» находится по «tuning», «пул-реквесты» по «реквест». У имён
+// с точкой, подчёркиванием и слешем частей-основ нет (замер: шум на точных
+// терминах).
+const AnalyzerVersion = "ru-en-v4"
 
 const (
 	minTermRunes = 2
@@ -419,12 +423,55 @@ func emit(out []Token, word []rune, flags wordFlags, pos uint32) []Token {
 	}
 	// Части имени — на той же позиции: запрос «http клиент» должен находить
 	// HTTPClient, а «go mod» — go.mod.
+	// Слово через дефис — обычное составное слово («пул-реквесты», «fine-tuning»),
+	// а не идентификатор: его части кладутся ещё и основой.
+	compound := hyphenOnly(term)
 	for _, part := range splitIdent(term) {
 		if part != term && fits(part) {
 			out = append(out, Token{Term: part, Pos: pos})
 		}
+		// Часть — ещё и основой, на той же позиции. Обычное слово в индексе лежит
+		// основой, и без этого «пул-реквесты» не находились по запросу «реквест»
+		// («реквесты» ≠ «реквест»), «fine-tuning» — по «tuning» (основа «tune»),
+		// «object-oriented» — по «oriented» (этап 104, А3.5). Замер 17.09.2026
+		// на копии коллекции: «tuning» 5 940 → 10 579 кусков, «oriented» 1 296 →
+		// 4 503, «ориентированный» 940 → 2 070.
+		//
+		// Только у слов через дефис. У идентификаторов с точкой, подчёркиванием
+		// и слешем (`learn.microsoft`, `text_splitter`) основы частей дают шум:
+		// на наборе точных терминов порядок выдачи ухудшался (MRR 0,228 → 0,220).
+		if !compound {
+			continue
+		}
+		if st := partStem(part); st != "" && st != part && st != term {
+			out = append(out, Token{Term: st, Pos: pos})
+		}
 	}
 	return out
+}
+
+// hyphenOnly — все разделители в слове — дефисы.
+func hyphenOnly(term string) bool {
+	seen := false
+	for _, r := range term {
+		if isConnector(r) {
+			if r != '-' {
+				return false
+			}
+			seen = true
+		}
+	}
+	return seen
+}
+
+// partStem — основа части составного имени; пусто, если часть не обычное слово.
+func partStem(part string) string {
+	for _, r := range part {
+		if !unicode.IsLetter(r) {
+			return ""
+		}
+	}
+	return stem(part, flagsOf([]rune(part)))
 }
 
 // normalize приводит слово к нижнему регистру и снимает различие ё/е.

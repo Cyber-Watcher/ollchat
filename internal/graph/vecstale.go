@@ -163,25 +163,33 @@ func (g *Graph) EmbedStale(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	}
 	dim := len(data) / already
 
-	// Считаем только изменившиеся тексты, пачками того же размера.
-	want := make([]string, 0, len(ids))
-	for _, id := range ids {
-		want = append(want, texts[id-1])
+	// Считаем только изменившиеся тексты — порциями, и каждую порцию сразу
+	// записываем: обрыв стоит одной порции, а повтор команды найдёт устаревшими
+	// только те, до которых не дошли (их отпечатки остались прежними).
+	for from := 0; from < len(ids); from += o.Checkpoint {
+		to := from + o.Checkpoint
+		if to > len(ids) {
+			to = len(ids)
+		}
+		want := make([]string, 0, to-from)
+		for _, id := range ids[from:to] {
+			want = append(want, texts[id-1])
+		}
+		newDim, fresh, err := embedBatches(ctx, emb, want, o, shifted(onProgress, from, len(ids)))
+		if err != nil {
+			return fixed, savedSoFar(err, fixed, len(ids))
+		}
+		if newDim != dim {
+			return fixed, fmt.Errorf("размерность нового счёта %d против прежней %d", newDim, dim)
+		}
+		// Перезапись на месте: чужие векторы не трогаются.
+		for k, id := range ids[from:to] {
+			copy(data[int(id-1)*dim:int(id)*dim], fresh[k*dim:(k+1)*dim])
+		}
+		if err := g.saveEntityVectors(emb.Model(), digest, dim, data, ids[from:to]); err != nil {
+			return fixed, savedSoFar(err, fixed, len(ids))
+		}
+		fixed = to
 	}
-	newDim, fresh, err := embedBatches(ctx, emb, want, o, onProgress)
-	if err != nil {
-		return 0, err
-	}
-	if newDim != dim {
-		return 0, fmt.Errorf("размерность нового счёта %d против прежней %d", newDim, dim)
-	}
-
-	// Перезапись на месте: чужие векторы не трогаются.
-	for k, id := range ids {
-		copy(data[int(id-1)*dim:int(id)*dim], fresh[k*dim:(k+1)*dim])
-	}
-	if err := g.saveEntityVectors(emb.Model(), digest, dim, data, ids); err != nil {
-		return 0, err
-	}
-	return len(ids), nil
+	return fixed, nil
 }

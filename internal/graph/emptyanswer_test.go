@@ -31,7 +31,7 @@ func (s *stubExtractor) Extract(context.Context, string, string) (string, error)
 // продолжиться, пропустив кусок. Раньше он валил весь заход.
 func TestEmptyAnswerSkipsChunkNotRun(t *testing.T) {
 	ex := &stubExtractor{errs: []error{ErrEmptyAnswer, ErrEmptyAnswer}}
-	_, err, bad := askModel(context.Background(), ex, SystemPrompt, job{book: "книга", unit: "стр.", from: 1, to: 2, text: "текст"}, true)
+	_, err, bad := askModel(context.Background(), ex, SystemPrompt, 1, job{book: "книга", unit: "стр.", from: 1, to: 2, text: "текст"}, true)
 	if err == nil {
 		t.Fatal("ошибка должна остаться: кусок не разобран")
 	}
@@ -46,7 +46,7 @@ func TestEmptyAnswerRetriedOnce(t *testing.T) {
 		errs:    []error{ErrEmptyAnswer, nil},
 		answers: []string{"", `{"entities":[{"name":"горутина","type":"понятие"}],"relations":[]}`},
 	}
-	facts, err, bad := askModel(context.Background(), ex, SystemPrompt, job{book: "книга", unit: "стр.", from: 1, to: 2, text: "текст"}, true)
+	facts, err, bad := askModel(context.Background(), ex, SystemPrompt, 1, job{book: "книга", unit: "стр.", from: 1, to: 2, text: "текст"}, true)
 	if err != nil || bad {
 		t.Fatalf("повтор должен был удаться: err=%v bad=%v", err, bad)
 	}
@@ -59,7 +59,7 @@ func TestEmptyAnswerRetriedOnce(t *testing.T) {
 // иначе выключенный сервер пометит полбиблиотеки пропущенной.
 func TestTransportErrorStillStopsRun(t *testing.T) {
 	ex := &stubExtractor{errs: []error{errors.New("connection refused")}}
-	_, err, bad := askModel(context.Background(), ex, SystemPrompt, job{book: "книга", unit: "стр.", from: 1, to: 2, text: "текст"}, true)
+	_, err, bad := askModel(context.Background(), ex, SystemPrompt, 1, job{book: "книга", unit: "стр.", from: 1, to: 2, text: "текст"}, true)
 	if err == nil {
 		t.Fatal("ошибка дороги должна вернуться")
 	}

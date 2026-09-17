@@ -330,7 +330,7 @@ type Graph struct {
 
 	// skipped — связи, не записанные заходом по правилам формата 2
 	// (см. writeFacts). Правится под замком записи сборки.
-	skipped struct{ untyped, overlap int }
+	skipped struct{ untyped, overlap, names, renamed int }
 	vecs    *EntityVectors // смысловой вход; пусто, пока векторы не посчитаны
 
 	// alias — журнал синонимов с источником; есть только у формата 2,

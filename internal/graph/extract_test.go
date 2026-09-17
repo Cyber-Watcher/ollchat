@@ -221,6 +221,33 @@ func TestCleanAliasAcrossLineBreak(t *testing.T) {
 	}
 }
 
+// Синоним засчитывается с поправкой на ЗАПИСЬ текста книги, а короткий —
+// прежней сверкой: замер 17.09.2026 (этап 104, А3.4) показал, что общая сверка
+// `SeenInText` возвращает 3,4% законных синонимов, но не видит имён короче трёх
+// знаков, поэтому сверки объединены, а не заменены одна другой.
+func TestCleanAliasSurvivesHowBookIsTyped(t *testing.T) {
+	text := "Deployment описывает развертывания приложения. Балансировка (load-balan\u00adcing) " +
+		"распределяет запросы, а classi\ufb01er размечает их. Словом ИИ называют AI. " +
+		"Разрыв: конвей-\nер доставки."
+	f := Facts{Entities: []FactEntity{{
+		Name: "Deployment", Type: "понятие",
+		Aliases: []string{
+			"развёртывания",  // в книге «е» вместо «ё»
+			"load balancing", // в книге дефис и мягкий перенос
+			"classifier",     // в книге лигатура «fi»
+			"конвейер",       // в книге слово разорвано переносом строки
+			"AI",             // короче трёх знаков — видит только прежняя сверка
+			"ИИ",
+			"оркестратор", // этого в тексте нет вовсе
+		},
+	}}}
+	got := clean(f, text).Entities[0].Aliases
+	want := []string{"развёртывания", "load balancing", "classifier", "конвейер", "AI", "ИИ"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("синонимы после сверки:\n получено %v\n ожидалось %v", got, want)
+	}
+}
+
 // Без текста куска проверка не делается — формат 1 и тесты ведут себя как раньше.
 func TestCleanWithoutTextKeepsAliases(t *testing.T) {
 	f := Facts{Entities: []FactEntity{{

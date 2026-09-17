@@ -2,7 +2,11 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"strings"
 	"syscall"
 	"testing"
@@ -219,5 +223,53 @@ func TestEmbedEntitiesWaitsOutConnectionLoss(t *testing.T) {
 	_ = bad
 	if transientEmbedErr(fmt.Errorf("модель не найдена")) {
 		t.Fatal("отказ сервера принят за обрыв связи")
+	}
+}
+
+// Ошибка настройки — не обрыв связи: счёт обязан упасть сразу, а не молча
+// повторять запрос пятнадцать минут (аудит 17.09.2026, Б13). Клиент HTTP
+// заворачивает ЛЮБУЮ ошибку в *url.Error, который сам выглядит как net.Error.
+func TestTransientEmbedErrTellsTypoFromOutage(t *testing.T) {
+	wrap := func(inner error) error {
+		return fmt.Errorf("запрос векторов: %w", &url.Error{Op: "Post", URL: "http://ollama.example:11434/api/embed", Err: inner})
+	}
+	notTransient := map[string]error{
+		"имени нет в DNS":     wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host", Name: "ollama.example", IsNotFound: true}}),
+		"неизвестная схема":   wrap(errors.New(`unsupported protocol scheme "htp"`)),
+		"негодный сертификат": wrap(errors.New("x509: certificate signed by unknown authority")),
+	}
+	for name, err := range notTransient {
+		if transientEmbedErr(err) {
+			t.Errorf("%s принято за обрыв связи: %v", name, err)
+		}
+	}
+	transient := map[string]error{
+		"соединение отклонено": wrap(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}),
+		"соединение оборвано":  wrap(&net.OpError{Op: "read", Err: syscall.ECONNRESET}),
+		"ответ оборван":        wrap(io.ErrUnexpectedEOF),
+		"временный сбой DNS":   wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Err: "server misbehaving", IsTemporary: true}}),
+		"истёк срок запроса":   wrap(context.DeadlineExceeded),
+	}
+	for name, err := range transient {
+		if !transientEmbedErr(err) {
+			t.Errorf("%s НЕ принято за обрыв связи: %v", name, err)
+		}
+	}
+}
+
+// Ожидание сервера не молчит: о каждом повторе сообщается наружу.
+func TestEmbedWaitReportsItself(t *testing.T) {
+	prev := embedRetryEvery
+	embedRetryEvery = time.Millisecond
+	defer func() { embedRetryEvery = prev }()
+
+	emb := &flakyEmbedder{fakeEmbedder: fakeEmbedder{model: "проба"}, failsLeft: 2}
+	notes := 0
+	o := EmbedOpts{NodeWait: time.Second, OnWait: func(error, time.Duration, time.Duration) { notes++ }}
+	if _, err := embedWithWait(context.Background(), emb, []string{"горутина"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if notes != 2 {
+		t.Fatalf("сообщений об ожидании %d, ожидалось 2 — по одному на обрыв", notes)
 	}
 }
