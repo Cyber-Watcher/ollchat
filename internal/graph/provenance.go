@@ -1,8 +1,6 @@
 package graph
 
-import (
-	"math/rand"
-)
+import ()
 
 // Целостность провенанса: у каждой ли связи есть живой кусок-источник.
 //
@@ -51,21 +49,17 @@ func (g *Graph) Provenance(src Chunks, sample int, seed int64) ProvenanceReport 
 	if g == nil || src == nil || sample <= 0 {
 		return rep
 	}
-	live := g.ents.Live()
-	if len(live) == 0 {
-		return rep
-	}
-	rnd := rand.New(rand.NewSource(seed))
-
-	// Предел попыток: у понятия может не быть связей вовсе (у нас таких 4%),
-	// и без предела цикл на пустом графе не кончился бы никогда.
-	for tries := 0; rep.Checked < sample && tries < sample*20; tries++ {
-		e := live[rnd.Intn(len(live))]
-		edges := g.edge.Of(e.ID)
-		if len(edges) == 0 {
+	// Выборка равномерна ПО ЗАПИСЯМ СВЯЗЕЙ. Прежняя — «случайное понятие,
+	// затем случайная его связь» — брала связь с вероятностью, обратной степени
+	// понятия, а у нас 6,8% понятий держат 61,6% связей: доли выходили
+	// по понятиям, а подписаны были как доли связей (аудит 17.09.2026, S9).
+	// Заодно выборка стала воспроизводимой: прежняя при одном зерне давала
+	// 79% и 78% на двух запусках подряд из-за порядка обхода поглощённых.
+	for _, ed := range g.SampleEdges(sample, seed) {
+		e, ok := g.ents.Get(ed.Src)
+		if !ok {
 			continue
 		}
-		ed := edges[rnd.Intn(len(edges))]
 		dst, ok := g.ents.Get(ed.Dst)
 		if !ok {
 			continue

@@ -26,7 +26,7 @@ func TestServeStdioOneCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, _, err := build(cfg)
+	srv, _, err := build(cfg, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -403,7 +403,7 @@ func tocFlag(text string) ChunkFlags {
 	if LooksLikeTOC(text) {
 		f |= FlagTOC
 	}
-	if LooksLikeRefs(text) || LooksLikeColophon(text) {
+	if ServiceRefs(text) {
 		f |= FlagRefs
 	}
 	return f

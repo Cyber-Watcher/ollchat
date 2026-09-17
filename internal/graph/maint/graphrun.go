@@ -308,6 +308,12 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// Очередь на общий замок записи. Пока карта одна, она тонет в секундах
 	// генерации; на нескольких узлах это первый подозреваемый, если суммарная
 	// скорость вышла заметно ниже суммы одиночных.
+	if res.SkippedUntyped+res.SkippedOverlap > 0 {
+		// Правила формата 2 (опытный граф): связь без названного отношения
+		// и повтор из зоны перекрытия кусков в граф не пишутся.
+		fmt.Fprintf(stdout, "  не записано по правилам формата 2: без названного отношения %d, повторов из перекрытия %d\n",
+			res.SkippedUntyped, res.SkippedOverlap)
+	}
 	if res.Done > 0 && res.LockWait > 0 {
 		share := res.LockWait.Seconds() / (elapsed.Seconds() * float64(workers)) * 100
 		fmt.Fprintf(stdout, "  очередь на запись: %s суммарно (%.1f%% времени воркеров)\n",

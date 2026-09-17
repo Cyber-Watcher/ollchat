@@ -337,10 +337,7 @@ func (g *Graph) undirected() (map[uint32]map[uint32]float64, []uint32) {
 	// По источникам (Rules.WeightsByOrigins): записи одной пары из соседних
 	// кусков одной книги — одна фраза из зоны перекрытия, считается раз.
 	type pk struct{ a, b uint32 }
-	type rec struct {
-		ord uint32
-		w   float64
-	}
+	type rec = originRec
 	var byPair map[pk]map[uint32][]rec
 	if g.rules.WeightsByOrigins {
 		byPair = map[pk]map[uint32][]rec{}
@@ -374,13 +371,9 @@ func (g *Graph) undirected() (map[uint32]map[uint32]float64, []uint32) {
 	}
 	for k, docs := range byPair {
 		for _, recs := range docs {
-			sort.Slice(recs, func(i, j int) bool { return recs[i].ord < recs[j].ord })
-			for i, r := range recs {
-				if i > 0 && recs[i].ord == recs[i-1].ord+1 {
-					continue
-				}
-				add(k.a, k.b, r.w)
-				add(k.b, k.a, r.w)
+			for _, w := range originWeights(recs) {
+				add(k.a, k.b, w)
+				add(k.b, k.a, w)
 			}
 		}
 	}

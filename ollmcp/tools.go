@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
@@ -32,7 +33,7 @@ import (
 var readOnlyTools = tools.ReadOnlyNames()
 
 // build собирает сервер по настройкам ollchat.
-func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
+func build(cfg *config.Config, service bool) (*mcp.Server, kbserve.Opts, error) {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return nil, kbserve.Opts{}, fmt.Errorf("база знаний %s: %w", cfg.KB.Dir, err)
@@ -77,8 +78,19 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 	// перезапуска службы не ждал открытия графа.
 	var graphCache *graph.Cache
 	if cfg.Graph.Cache {
-		graphCache = graph.NewCache(serviceGraphTTL, cfg.Graph.Rules()).RefreshInBackground()
-		go warmGraphs(base, graphCache, cfg.Graph.Rules())
+		// Прогрев и вечное удержание графа — только у службы (--http). Раньше
+		// прогрев стоял здесь без условия: `ollmcp --tools` открывал рабочий
+		// граф (десятки секунд, до гигабайта), чтобы напечатать список и выйти,
+		// а каждый stdio-сеанс клиента держал свой граф вечно, даже если о графе
+		// ни разу не спросили (аудит 17.09.2026, Б15).
+		ttl := stdioGraphTTL
+		if service {
+			ttl = serviceGraphTTL
+		}
+		graphCache = graph.NewCache(ttl, cfg.Graph.Rules()).RefreshInBackground()
+		if service {
+			go warmGraphs(base, graphCache, cfg.Graph.Rules())
+		}
 	} // иначе graph.cache = false: открывать на каждый вызов
 	registry, err := tools.NewRegistry(enabled, tools.Options{
 		GraphRules:     cfg.Graph.Rules(),
@@ -143,6 +155,10 @@ func build(cfg *config.Config) (*mcp.Server, kbserve.Opts, error) {
 // второй экземпляр на время фоновой подмены. Это и есть плата за службу,
 // которая отвечает сразу; TUI ollchat закрывает свой граф по-прежнему.
 const serviceGraphTTL = 0
+
+// stdioGraphTTL — сколько держит граф сеанс stdio: его запускает клиент MCP
+// на время разговора, и граф, о котором перестали спрашивать, память не занимает.
+const stdioGraphTTL = 15 * time.Minute
 
 // statusTool — справка о том, на что клиент вообще может опираться.
 //

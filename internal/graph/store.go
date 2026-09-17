@@ -67,6 +67,19 @@ func RelName(t uint8) string {
 	}
 }
 
+// RelTypeStrict — то же, что RelType, но честно говорит, назван ли тип.
+//
+// RelType превращает в «связано» всё подряд: и явное «связано», и пустую
+// строку, и выдуманное «коррелирует». Поэтому отказ модели назвать отношение
+// неотличим от самого слабого вида связи, а таких у рабочего графа 29,7%.
+// Формат 2 требует названного отношения (паспорт опытного графа, решение 5):
+// связь без него в граф не пишется. ok == false — тип не назван, назван
+// неизвестный или назван «связано».
+func RelTypeStrict(s string) (typ uint8, ok bool) {
+	t := RelType(s)
+	return t, t != RelRelated
+}
+
 // RelType разбирает название типа связи, пришедшее от модели.
 func RelType(s string) uint8 {
 	switch Normalize(s) {
@@ -578,17 +591,24 @@ func hasType(list []uint8, t uint8) bool {
 	return false
 }
 
-// Between возвращает связи между двумя сущностями в обе стороны.
+// Between возвращает связи между двумя сущностями в обе стороны — с наложением
+// склеек, как Of и Neighbors.
+//
+// До 17.09.2026 читались сырые списки: связь, записанная под поглощённым
+// номером, из ответа выпадала. Пользуются функцией только замеры, и ошибались
+// они молча: «год не известен», «прямой связи нет» (аудит обвязки, S8).
 func (e *Edges) Between(a, b uint32) []Edge {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	a, b = e.merges.Resolve(a), e.merges.Resolve(b)
+	if a == b {
+		return nil
+	}
 	var out []Edge
-	for _, ed := range e.bySrc[a] {
+	for _, ed := range e.outgoing(a) {
 		if ed.Dst == b {
 			out = append(out, ed)
 		}
 	}
-	for _, ed := range e.bySrc[b] {
+	for _, ed := range e.outgoing(b) {
 		if ed.Dst == a {
 			out = append(out, ed)
 		}

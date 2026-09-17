@@ -133,12 +133,16 @@ func Render(src Chunks, res SearchResult, opt RenderOpts) string {
 			// Год свежайшего подтверждения (П10.1) и сколько выдержек скрыто
 			// (П5.1): у связи бывает 186 подтверждений, показывается до четырёх,
 			// и по выдаче этого не видно.
+			// Год — по всем книгам связи (r.Books), а не по первым записям.
+			// Прежняя приписка «показано N» снята: под связью печатается одна
+			// выдержка, а N было числом кандидатов на неё (аудит, Б10).
 			extra := ""
-			if y := newestYear(src, r.Evidences); y > 0 {
-				extra = fmt.Sprintf(", свежайшее %d г.", y)
+			keys := r.Books
+			if len(keys) == 0 {
+				keys = r.Evidences
 			}
-			if hidden := r.Count - len(r.Evidences); hidden > 0 && len(r.Evidences) > 0 {
-				extra += fmt.Sprintf(", показано %d", len(r.Evidences))
+			if y := newestYear(src, keys); y > 0 {
+				extra = fmt.Sprintf(", свежайшее %d г.", y)
 			}
 			fmt.Fprintf(&b, "  %s —%s→ %s (подтверждений %d%s)\n", r.Src, r.Type, r.Dst, r.Count, extra)
 			if opt.RelationRunes > 0 && src != nil {

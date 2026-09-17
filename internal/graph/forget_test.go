@@ -103,3 +103,55 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// Судьба забытого куска выбирается: «разобрать заново» или «не разбирать».
+func TestForgetChunksAsChoosesFate(t *testing.T) {
+	g, _ := graph(t)
+	dir := g.Dir()
+	a, _, _ := g.Entities().Add("Relation extraction", TypeConcept)
+	junk := ChunkKey{Doc: 7, Ord: 1}
+	redo := ChunkKey{Doc: 7, Ord: 2}
+	for _, k := range []ChunkKey{junk, redo} {
+		must(t, g.Mentions().Add(a, k))
+		must(t, g.Progress().Mark(k, MarkDone))
+	}
+	must(t, g.Entities().SaveCounters())
+	must(t, g.Close())
+
+	if _, err := ForgetChunksAs(dir, func(k ChunkKey) bool { return k == junk }, MarkSkipped, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ForgetChunksAs(dir, func(k ChunkKey) bool { return k == redo }, MarkService, false); err != nil {
+		t.Fatal(err)
+	}
+	// «Разобран» и «пусто» при забытом содержимом — ложь о состоянии графа.
+	for _, bad := range []uint32{MarkDone, MarkEmpty, 0} {
+		if _, err := ForgetChunksAs(dir, func(ChunkKey) bool { return false }, bad, true); err == nil {
+			t.Errorf("отметка %d принята, а должна быть отвергнута", bad)
+		}
+	}
+
+	p, err := openProgress(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if m, _ := p.MarkOf(junk); m != MarkSkipped {
+		t.Errorf("мусорный кусок: отметка %d, ожидалась «пропущен»", m)
+	}
+	if m, _ := p.MarkOf(redo); m != MarkService {
+		t.Errorf("кусок к повтору: отметка %d, ожидалась «служебный»", m)
+	}
+}
+
+func TestParseChunkKey(t *testing.T) {
+	k, err := ParseChunkKey(" 12#37 ")
+	if err != nil || k != (ChunkKey{Doc: 12, Ord: 37}) || k.String() != "12#37" {
+		t.Fatalf("разбор: %+v %v", k, err)
+	}
+	for _, bad := range []string{"", "12", "12#", "#37", "a#b", "12#37#1", "-1#2"} {
+		if _, err := ParseChunkKey(bad); err == nil {
+			t.Errorf("%q принято, а должно быть отвергнуто", bad)
+		}
+	}
+}

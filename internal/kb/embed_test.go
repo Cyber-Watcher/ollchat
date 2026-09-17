@@ -826,3 +826,37 @@ func TestVecMetaRemembersHeader(t *testing.T) {
 		t.Fatalf("паспорт остался с шапкой после пересчёта без неё: %+v", m)
 	}
 }
+
+// Пересчёт векторов с нуля не оставляет коллекцию неоткрываемой: паспорт
+// уменьшается раньше, чем усекается файл (аудит 17.09.2026, Б7).
+func TestCreateVecWriterShrinksMetaBeforeTruncate(t *testing.T) {
+	dir := t.TempDir()
+	w, err := CreateVecWriter(dir, "m", 4, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append([][]float32{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	if v, err := OpenVectors(dir); err != nil || v.Count() != 3 {
+		t.Fatalf("исходные векторы: %v %v", v, err)
+	}
+
+	// Пересчёт с нуля открыт, но ни одной волны ещё не записано — и тут обрыв.
+	w2, err := CreateVecWriter(dir, "m", 4, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2.Close()
+	v, err := OpenVectors(dir)
+	if err != nil {
+		t.Fatalf("после оборванного пересчёта векторы (и с ними вся коллекция) не открываются: %v", err)
+	}
+	if v != nil && v.Count() != 0 {
+		t.Fatalf("паспорт обещает %d векторов при пустом файле", v.Count())
+	}
+}

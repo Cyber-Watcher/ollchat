@@ -74,6 +74,11 @@ type cliFlags struct {
 	kbFlagTOC             *string
 	kbEmbedPlain          *bool
 	graphForgetTOC        *string
+	graphForgetChunks     *string
+	graphForgetFile       *string
+	graphForgetSkip       *bool
+	graphDenyAliases      *string
+	graphDenyFile         *string
 	kbReindex             *string
 	kbRecnt               *bool
 	graphBuild            *string
@@ -240,6 +245,14 @@ func parseFlags() *cliFlags {
 	f.kbQuick = flag.Bool("kb-quick", false, "с --kb-doctor: без сверки книг по содержимому — быстрее, но повторы не найдутся")
 	f.kbYears = flag.String("kb-years", "", "проставить книгам коллекции год издания")
 	f.kbReanalyze = flag.String("kb-reanalyze", "", "пересобрать словесный индекс коллекции новыми правилами разбора, не перечитывая книг")
+	f.graphForgetChunks = flag.String("graph-forget-chunks", "",
+		"убрать из графа извлечённое из кусков по списку: --graph-forget-chunks books --graph-forget-file список.txt (с --kb-dry-run — только посчитать)")
+	f.graphForgetFile = flag.String("graph-forget-file", "", "с --graph-forget-chunks: файл со списком, номер куска «книга#кусок» в начале строки")
+	f.graphForgetSkip = flag.Bool("graph-forget-skip", false,
+		"с --graph-forget-chunks: куски больше не разбирать (мусор); без ключа следующая сборка разберёт их заново")
+	f.graphDenyAliases = flag.String("graph-deny-aliases", "",
+		"запретить понятиям ложные синонимы по списку: --graph-deny-aliases books --graph-deny-file список.tsv (с --kb-dry-run — только показать)")
+	f.graphDenyFile = flag.String("graph-deny-file", "", "с --graph-deny-aliases: файл «номер понятия<TAB>синоним<TAB>причина»")
 	f.graphForgetTOC = flag.String("graph-forget-toc", "",
 		"убрать из графа упоминания и связи, извлечённые из служебных кусков — оглавлений, списков литературы, выходных данных (после --kb-flag-toc): --graph-forget-toc books; с --kb-dry-run — только посчитать")
 	f.kbFlagTOC = flag.String("kb-flag-toc", "",
@@ -524,6 +537,16 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
+	case *f.graphDenyAliases != "":
+		if *f.graphDenyFile == "" {
+			return true, fmt.Errorf("--graph-deny-aliases требует список: --graph-deny-file <файл>")
+		}
+		return true, gmaint.DenyAliases(os.Stdout, cfg, *f.graphDenyAliases, *f.graphDenyFile, *f.kbDry)
+	case *f.graphForgetChunks != "":
+		if *f.graphForgetFile == "" {
+			return true, fmt.Errorf("--graph-forget-chunks требует список кусков: --graph-forget-file <файл>")
+		}
+		return true, gmaint.ForgetList(os.Stdout, cfg, *f.graphForgetChunks, *f.graphForgetFile, *f.graphForgetSkip, *f.kbDry)
 	case *f.graphForgetTOC != "":
 		return true, gmaint.ForgetTOC(os.Stdout, cfg, *f.graphForgetTOC, *f.kbDry)
 	case *f.graphArchive != "":
@@ -933,7 +956,7 @@ func sessionDir() string {
 // Вынесено в постоянную, потому что это обещание пользователю: перечисленные
 // здесь команды обязаны ничего не менять при --kb-dry-run. Проверяется тестом.
 const dryRunFlagHelp = "только показать, что будет сделано: " +
-	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze"
+	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `ollchat %s — TUI-клиент и агент для Ollama

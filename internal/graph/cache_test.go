@@ -331,3 +331,34 @@ func TestCacheBackgroundCloseWaitsForLoad(t *testing.T) {
 		t.Error("Get после Close обязан отказать, а не открыть граф мимо кэша")
 	}
 }
+
+// Признаки работы и резервные копии не меняют отпечаток каталога графа:
+// иначе архив или любая команда обслуживания заставляли бы службу заново
+// открывать граф (аудит 17.09.2026, Б14).
+func TestDirStampIgnoresServiceFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("edges.log", "данные")
+	before := dirStamp(dir)
+	for _, name := range []string{"LOCK", "ARCHIVE", "WORK-12345", "edges.log.bak-20260917-125802", "entities.jsonl.compact"} {
+		write(name, "служебное")
+	}
+	if got := dirStamp(dir); got != before {
+		t.Fatalf("служебные файлы изменили отпечаток:\n%s\n---\n%s", before, got)
+	}
+	write("edges.log", "данные выросли")
+	if dirStamp(dir) == before {
+		t.Fatal("настоящая правка данных отпечаток не изменила")
+	}
+	// Журнал запретов синонимов — данные: он меняет ключи реестра.
+	stamp := dirStamp(dir)
+	write("alias-deny.jsonl", "{}")
+	if dirStamp(dir) == stamp {
+		t.Fatal("журнал запретов синонимов обязан менять отпечаток")
+	}
+}

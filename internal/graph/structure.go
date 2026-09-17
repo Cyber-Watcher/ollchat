@@ -163,6 +163,11 @@ func countHubs(adj map[uint32]map[uint32]float64, order []uint32, limit int,
 func (g *Graph) Shape(c *Communities) (Structure, Connectivity) {
 	adj, order := g.undirected()
 	st := structure(adj, order, len(g.Entities().Live()), g.rules.ChainHubLimit)
+	// «На одном подтверждении» — по числу кусков-источников пары, а не по весу:
+	// «связано» весит 0,5 (Rules.RelatedWeight), и пара с двумя такими записями
+	// при правиле `w <= 1` считалась одиночной. Замер 17.09.2026 на выборке
+	// 4 000 пар: одиночных 72,5%, а доктор показывал 83%.
+	st.PairsOnce = g.Corroboration().Single
 	st.Hubs = countHubs(adj, order, st.HubLimit, g.neighborCount)
 	var conn Connectivity
 	if c != nil {

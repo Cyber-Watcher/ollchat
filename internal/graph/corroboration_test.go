@@ -74,3 +74,32 @@ func TestUndirectedByOriginsCollapsesAdjacent(t *testing.T) {
 		g.Close()
 	}
 }
+
+// Источники пары считаются одинаково везде и не зависят от порядка записей
+// (аудит 17.09.2026, Б12).
+func TestOriginWeights(t *testing.T) {
+	cases := []struct {
+		name string
+		recs []originRec
+		want []float64
+	}{
+		{"соседние куски — одна фраза из перекрытия", []originRec{{4, 1}, {5, 1}}, []float64{1}},
+		{"повтор того же куска — не второй источник", []originRec{{4, 1}, {5, 0.5}, {5, 1}}, []float64{1}},
+		{"вес источника — наибольший, в любом порядке", []originRec{{5, 1}, {5, 0.5}, {4, 0.5}}, []float64{1}},
+		{"далёкие куски — разные источники", []originRec{{4, 1}, {9, 0.5}}, []float64{1, 0.5}},
+		{"цепочка из трёх — один источник", []originRec{{6, 0.5}, {4, 0.5}, {5, 0.5}}, []float64{0.5}},
+	}
+	for _, c := range cases {
+		got := originWeights(c.recs)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: источников %d, ожидалось %d (%v)", c.name, len(got), len(c.want), got)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: веса %v, ожидались %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}

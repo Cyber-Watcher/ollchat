@@ -170,3 +170,24 @@ func TestServiceFlagsAtChunking(t *testing.T) {
 		t.Errorf("обычному тексту поставлен служебный признак: %b", f)
 	}
 }
+
+// Заголовок списка литературы делает кусок служебным, даже когда самих записей
+// в нём две-три и доля «строк-ссылок» не набирается (этап 104, Ж1.2).
+func TestServiceRefsByHeading(t *testing.T) {
+	heading := "Further reading\n\nYou can refer to the following links for more information:\n• Ansible 2 for Configuration Management"
+	if LooksLikeRefs(heading) {
+		t.Fatal("образец должен не проходить по доле строк — иначе тест ничего не проверяет")
+	}
+	if !ServiceRefs(heading) {
+		t.Fatal("кусок с заголовком «Further reading» не признан служебным")
+	}
+	// Слово внутри предложения заголовком не считается.
+	for _, prose := range []string{
+		"References to the original object are kept by the garbage collector until the scope ends.",
+		"Литература по этой теме обширна, и мы разберём три подхода к проектированию.",
+	} {
+		if ServiceRefs(prose) {
+			t.Errorf("обычный текст принят за список литературы: %q", prose)
+		}
+	}
+}

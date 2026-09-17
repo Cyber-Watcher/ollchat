@@ -128,6 +128,19 @@ func UnpackChunk(v uint64) ChunkKey {
 // String печатает кусок так же, как это делает база знаний: «12#37».
 func (k ChunkKey) String() string { return fmt.Sprintf("%d#%d", k.Doc, k.Ord) }
 
+// ParseChunkKey разбирает запись «12#37» — ту же, что печатает String.
+func ParseChunkKey(s string) (ChunkKey, error) {
+	var k ChunkKey
+	doc, ord, ok := strings.Cut(strings.TrimSpace(s), "#")
+	d, err1 := strconv.ParseUint(doc, 10, 32)
+	o, err2 := strconv.ParseUint(ord, 10, 32)
+	if !ok || err1 != nil || err2 != nil {
+		return k, fmt.Errorf("номер куска записывается как «книга#кусок», например 12#37, а не %q", s)
+	}
+	k.Doc, k.Ord = uint32(d), uint32(o)
+	return k, nil
+}
+
 // Meta — паспорт графа. Лежит в graph.meta и связывает граф с коллекцией.
 type Meta struct {
 	Version    int    `json:"version"`
@@ -164,6 +177,18 @@ type Meta struct {
 	// PromptHistory — когда и при каком покрытии промпт записан или сменён.
 	PromptHistory []PromptStamp `json:"prompt_history,omitempty"`
 
+	// FormatHistory — когда и при каком покрытии граф заведён этим форматом
+	// (и сменил его, если до этого дойдёт). Версия без даты не отвечает
+	// на вопрос «какими правилами собрана вот эта часть графа» (этап 90, Н2).
+	FormatHistory []FormatStamp `json:"format_history,omitempty"`
+
+	// Runs — заходы сборки: когда, какой моделью и каким промптом, сколько
+	// кусков разобрано. В паспорте модель одна, а заход чужой моделью возможен
+	// (--graph-allow-model-change): без отметки у захода смешение двух моделей
+	// в одном графе неразличимо (этап 101; аудит 17.09.2026). Хранятся
+	// последние maxRunStamps заходов.
+	Runs []RunStamp `json:"runs,omitempty"`
+
 	// Chunks — сколько кусков было в коллекции на момент последней сборки.
 	// По нему видно, сколько книг долито после и осталось без графа.
 	Chunks int `json:"chunks"`
@@ -190,6 +215,45 @@ type Meta struct {
 }
 
 // PromptStamp — отметка о версии промпта в истории графа.
+// FormatStamp — отметка о формате графа.
+type FormatStamp struct {
+	Version int       `json:"version"`
+	At      time.Time `json:"at"`
+	Covered int       `json:"covered"`
+}
+
+// RunStamp — один заход сборки.
+type RunStamp struct {
+	At       time.Time `json:"at"`    // когда заход закончился
+	Model    string    `json:"model"` // чем извлекалось
+	PromptID string    `json:"prompt_id"`
+	Format   int       `json:"format"`
+	Done     int       `json:"done"`    // сколько кусков разобрано за заход
+	Covered  int       `json:"covered"` // сколько всего разобрано после него
+	Seconds  float64   `json:"seconds"`
+	Nodes    []string  `json:"nodes,omitempty"`
+}
+
+// maxRunStamps — сколько заходов помнит паспорт.
+const maxRunStamps = 500
+
+// NoteRun записывает в паспорт закончившийся заход сборки.
+func (g *Graph) NoteRun(r RunStamp) error {
+	if r.Done <= 0 {
+		return nil // пустой заход ничего не собрал — и помнить нечего
+	}
+	if len(g.meta.FormatHistory) == 0 {
+		// Графы, заведённые до 17.09.2026: историю формата начинаем с первого
+		// захода после правки, честно помечая покрытие на этот момент.
+		g.meta.FormatHistory = []FormatStamp{{Version: g.meta.Version, At: r.At, Covered: r.Covered - r.Done}}
+	}
+	g.meta.Runs = append(g.meta.Runs, r)
+	if n := len(g.meta.Runs); n > maxRunStamps {
+		g.meta.Runs = append([]RunStamp(nil), g.meta.Runs[n-maxRunStamps:]...)
+	}
+	return g.saveMeta()
+}
+
 type PromptStamp struct {
 	ID      string    `json:"id"`
 	At      time.Time `json:"at"`
@@ -263,7 +327,11 @@ type Graph struct {
 	ment *Mentions
 	edge *Edges
 	prog *Progress
-	vecs *EntityVectors // смысловой вход; пусто, пока векторы не посчитаны
+
+	// skipped — связи, не записанные заходом по правилам формата 2
+	// (см. writeFacts). Правится под замком записи сборки.
+	skipped struct{ untyped, overlap int }
+	vecs    *EntityVectors // смысловой вход; пусто, пока векторы не посчитаны
 
 	// alias — журнал синонимов с источником; есть только у формата 2,
 	// у формата 1 остаётся nil.
@@ -380,6 +448,7 @@ func CreateKind(collDir, name string, chunks int, rules Rules, o CreateOpts) (*G
 		Note:          note,
 		PromptID:      pid,
 		PromptHistory: []PromptStamp{{ID: pid, At: now}},
+		FormatHistory: []FormatStamp{{Version: version, At: now}},
 		Created:       now,
 		Updated:       now,
 	}
@@ -496,7 +565,7 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 			cb(OpenProgress{Stage: stage})
 		}
 	}
-	if g.ents, err = openEntitiesWith(dir, g.rules.StemMinLen, cb); err != nil {
+	if g.ents, err = openEntitiesWith(dir, g.rules.StemMinLen, cb, m.Version >= FormatV2); err != nil {
 		return nil, err
 	}
 	step("упоминания")

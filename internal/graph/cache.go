@@ -332,7 +332,11 @@ func dirStamp(dir string) string {
 	}
 	names := make([]string, 0, len(ents))
 	for _, e := range ents {
-		if !e.IsDir() {
+		// Признаки работы и резервные копии данных графа не меняют. С ними
+		// в отпечатке любой архив или команда обслуживания (WORK-<pid>) выглядели
+		// как «граф изменился», и служба заново открывала его — 77 с и до
+		// гигабайта на пике, при живом прежнем экземпляре (аудит 17.09.2026, Б14).
+		if !e.IsDir() && !stampIgnored(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
@@ -351,4 +355,18 @@ func dirStamp(dir string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// stampIgnored — файлы каталога графа, которые о данных ничего не говорят:
+// замки, признаки идущей работы и архива, резервные копии, недописанные части.
+func stampIgnored(name string) bool {
+	switch {
+	case name == lockFile, name == vecLockFile, name == "ARCHIVE":
+		return true
+	case strings.HasPrefix(name, workPrefix):
+		return true
+	case strings.Contains(name, ".bak-"), strings.HasSuffix(name, ".part"), strings.HasSuffix(name, ".compact"):
+		return true
+	}
+	return false
 }

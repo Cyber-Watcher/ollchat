@@ -47,9 +47,30 @@ type ForgetStats struct {
 }
 
 // ForgetChunks убирает из графа в каталоге dir всё, что извлечено из кусков,
-// для которых drop возвращает true. dry — только посчитать.
+// для которых drop возвращает true. dry — только посчитать. Отметка разбора
+// становится MarkService: служебный кусок сборка не берёт, а кусок без
+// служебного признака в индексе — берёт заново.
 func ForgetChunks(dir string, drop func(ChunkKey) bool, dry bool) (ForgetStats, error) {
+	return ForgetChunksAs(dir, drop, MarkService, dry)
+}
+
+// ForgetChunksAs — то же с выбором судьбы куска (этап 104, Ж1.1):
+//
+//   - MarkService — «разобрать заново»: у куска без служебного признака
+//     в индексе такая отметка значит «снова в работе» (см. Build), и следующая
+//     сборка перечитает его уже нынешними правилами. Так чистятся ошибки
+//     прошлых извлечений, которые лечатся повтором: ложное раскрытие
+//     аббревиатуры, связь, которой нет в тексте;
+//   - MarkSkipped — «не разбирать вовсе»: мусорный кусок (распавшаяся вёрстка),
+//     от которого модель и во второй раз ничего путного не извлечёт.
+//
+// Других значений не принимает: MarkDone и MarkEmpty при забытом содержимом
+// были бы ложью о состоянии графа.
+func ForgetChunksAs(dir string, drop func(ChunkKey) bool, mark uint32, dry bool) (ForgetStats, error) {
 	var st ForgetStats
+	if mark != MarkService && mark != MarkSkipped {
+		return st, fmt.Errorf("забытому куску ставится отметка «служебный» или «пропущен», а не %d", mark)
+	}
 	if _, err := os.Stat(filepath.Join(dir, lockFile)); err == nil {
 		if owner := readLock(filepath.Join(dir, lockFile)); owner.alive() {
 			return st, &LockedError{Path: filepath.Join(dir, lockFile), PID: owner.PID, Since: owner.Since}
@@ -100,11 +121,11 @@ func ForgetChunks(dir string, drop func(ChunkKey) bool, dry bool) (ForgetStats, 
 	// разобрала бы кусок заново. А снимут с него признак — возьмёт снова.
 	marks, err := rewriteBinaryMap(filepath.Join(dir, progressFile), 12, stamp, dry, func(b []byte) bool {
 		k := ChunkKey{Doc: binary.LittleEndian.Uint32(b[0:]), Ord: binary.LittleEndian.Uint32(b[4:])}
-		if !drop(k) || binary.LittleEndian.Uint32(b[8:]) == MarkService {
+		if !drop(k) || binary.LittleEndian.Uint32(b[8:]) == mark {
 			return false
 		}
 		touched[k.Pack()] = true
-		binary.LittleEndian.PutUint32(b[8:], MarkService)
+		binary.LittleEndian.PutUint32(b[8:], mark)
 		return true
 	})
 	if err != nil {

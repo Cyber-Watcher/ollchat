@@ -141,6 +141,10 @@ type BuildResult struct {
 	// чтобы подозрение проверялось замером, а не рассуждением: при
 	// --graph-link-new под этим же замком идут запросы к эмбеддеру и арбитру.
 	LockWait time.Duration
+
+	// SkippedUntyped и SkippedOverlap — связи, не записанные по правилам
+	// формата 2: без названного отношения и повторы из перекрытия кусков.
+	SkippedUntyped, SkippedOverlap int
 }
 
 // Build разбирает куски коллекции и наполняет граф.
@@ -413,6 +417,15 @@ send:
 		res.Pending = 0
 	}
 	res.Canceled = ctx.Err() != nil
+	res.SkippedUntyped, res.SkippedOverlap = g.SkippedRelations()
+	// Заход — в паспорт: когда, какой моделью и промптом, сколько кусков.
+	// Ошибка записи паспорта заход не отменяет: разобранное уже в журналах.
+	if nerr := g.NoteRun(RunStamp{
+		At: time.Now(), Model: ex.Model(), PromptID: PromptIDFor(g.Meta().Version), Format: g.Meta().Version,
+		Done: done, Covered: g.Progress().Count(), Seconds: time.Since(started).Seconds(),
+	}); nerr != nil && firstErr == nil {
+		firstErr = nerr
+	}
 	return res, firstErr
 }
 
@@ -539,19 +552,57 @@ func writeFacts(ctx context.Context, g *Graph, key ChunkKey, f Facts, link *Link
 			}
 		}
 	}
+	strict := g.Meta().Version >= FormatV2
 	for _, r := range f.Relations {
 		src, okSrc := ids[Normalize(r.Src)]
 		dst, okDst := ids[Normalize(r.Dst)]
 		if !okSrc || !okDst {
 			continue
 		}
+		typ := RelType(r.Type)
+		if strict {
+			// Формат 2: отношение обязано быть названо. «Связано», пустой
+			// и выдуманный тип — отказ модели, а не вид связи.
+			var named bool
+			if typ, named = RelTypeStrict(r.Type); !named {
+				g.skipped.untyped++
+				continue
+			}
+			// Куски нарезаны с перекрытием, и одна фраза из общей зоны
+			// подтверждала связь дважды: у рабочего графа 16,2% подтверждений —
+			// такие копии. Пара, уже записанная из предыдущего куска той же
+			// книги, второй раз не пишется: запись и есть источник.
+			if key.Ord > 0 && g.pairFromChunk(src, dst, ChunkKey{Doc: key.Doc, Ord: key.Ord - 1}) {
+				g.skipped.overlap++
+				continue
+			}
+		}
 		if err := g.Edges().Add(Edge{
-			Src: src, Dst: dst, Type: RelType(r.Type), Weight: 1, Evidence: key,
+			Src: src, Dst: dst, Type: typ, Weight: 1, Evidence: key,
 		}); err != nil {
 			return linked, err
 		}
 	}
 	return linked, nil
+}
+
+// pairFromChunk — есть ли уже связь этой пары (в любую сторону), взятая
+// из названного куска.
+func (g *Graph) pairFromChunk(a, b uint32, from ChunkKey) bool {
+	for _, ed := range g.Edges().Between(a, b) {
+		if ed.Evidence == from {
+			return true
+		}
+	}
+	return false
+}
+
+// SkippedRelations — сколько связей заход не записал по правилам формата 2:
+// без названного отношения и повторов из зоны перекрытия кусков. Числа нужны
+// итогу захода: правило, которое молча выбрасывает треть связей, обязано
+// быть видно.
+func (g *Graph) SkippedRelations() (untyped, overlap int) {
+	return g.skipped.untyped, g.skipped.overlap
 }
 
 // flushAll сбрасывает журналы на диск и просит диск их записать.

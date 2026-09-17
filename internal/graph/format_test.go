@@ -92,3 +92,36 @@ func (y yearChunks) ChunkByRef(doc, ord uint32) (kb.ChunkInfo, bool) {
 	}
 	return kb.ChunkInfo{Doc: doc, Ord: ord, Text: "текст", Book: kb.BookRec{Title: "Книга", Year: year}}, true
 }
+
+// Год свежайшего подтверждения доходит до карточки ПО ПУТИ ДАННЫХ — от журнала
+// связей через Graph.Entity до строки, а не только в отрисовке собранной руками
+// структуры. До 17.09.2026 поле NeighborInfo.Evidence не заполнялось нигде,
+// год в карточке не печатался никогда, а тест выше этого не видел (аудит, Б8).
+// Заодно: год берётся по всем книгам связи, а не по первым записям журнала (Б9).
+func TestEntityCardYearThroughDataPath(t *testing.T) {
+	g, _ := graph(t)
+	goID, _, _ := g.Entities().Add("Go", TypeTech)
+	gr, _, _ := g.Entities().Add("goroutine", TypeConcept)
+	src := yearChunks{}
+	// Шесть подтверждений из старой книги идут в журнале первыми, свежая — последней.
+	for i := 1; i <= 6; i++ {
+		k := ChunkKey{Doc: 1, Ord: uint32(i * 10)}
+		src[k.Pack()] = 2015
+		must(t, g.Edges().Add(Edge{Src: goID, Dst: gr, Type: RelUses, Weight: 1, Evidence: k}))
+	}
+	fresh := ChunkKey{Doc: 2, Ord: 5}
+	src[fresh.Pack()] = 2026
+	must(t, g.Edges().Add(Edge{Src: goID, Dst: gr, Type: RelUses, Weight: 1, Evidence: fresh}))
+
+	card, ok := g.Entity("Go", SearchOpts{})
+	if !ok || len(card.Neighbors) != 1 {
+		t.Fatalf("карточка: %+v %v", card, ok)
+	}
+	if out := RenderEntity(src, card, nil, RenderOpts{}); !strings.Contains(out, "свежайшее 2026 г.") {
+		t.Fatalf("год свежайшего подтверждения не дошёл до карточки:\n%s", out)
+	}
+	res := g.Search("Go goroutine", SearchOpts{})
+	if out := Render(src, res, RenderOpts{}); !strings.Contains(out, "свежайшее 2026 г.") || strings.Contains(out, "показано") {
+		t.Fatalf("список связей: год по первым записям или осталась приписка «показано»:\n%s", out)
+	}
+}

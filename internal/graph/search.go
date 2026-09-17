@@ -169,7 +169,17 @@ type FoundRelation struct {
 	// Список короткий намеренно: каждый кусок — обращение к хранилищу, а связей
 	// в выдаче дюжина. Первым идёт тот же кусок, что лежит в Evidence.
 	Evidences []ChunkKey
+
+	// Books — по одному куску на каждую книгу, подтвердившую связь (не больше
+	// maxYearBooks). По ним отрисовка считает год самой свежей книги: считать
+	// его по Evidences нельзя — это первые четыре записи в порядке журнала,
+	// и у связи со 186 подтверждениями из книг 2015–2026 годов выходило
+	// «свежайшее 2015 г.» (аудит 17.09.2026, Б9).
+	Books []ChunkKey
 }
+
+// maxYearBooks — по скольким книгам считать год свежайшего подтверждения.
+const maxYearBooks = 64
 
 // maxEvidences — сколько кусков-подтверждений собирать на связь.
 //
@@ -233,6 +243,7 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 				Src: from, Dst: to, Type: n.Rel,
 				Weight: n.Weight, Count: n.Count,
 			}
+			seenBook := map[uint32]bool{}
 			for _, e := range g.edge.Of(fromID) {
 				if e.Dst != toID {
 					continue
@@ -244,9 +255,12 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 				if len(rel.Evidences) == 0 {
 					rel.Evidence = e.Evidence
 				}
-				rel.Evidences = append(rel.Evidences, e.Evidence)
-				if len(rel.Evidences) >= g.rules.MaxEvidences {
-					break
+				if len(rel.Evidences) < g.rules.MaxEvidences {
+					rel.Evidences = append(rel.Evidences, e.Evidence)
+				}
+				if !seenBook[e.Evidence.Doc] && len(rel.Books) < maxYearBooks {
+					seenBook[e.Evidence.Doc] = true
+					rel.Books = append(rel.Books, e.Evidence)
 				}
 			}
 			res.Relations = append(res.Relations, rel)
@@ -508,7 +522,29 @@ func (g *Graph) neighborsOf(id uint32, limit int, qv []int8, rank NeighborRank,
 		out = append(out, NeighborInfo{
 			ID: n.ID, Name: ent.Name, Rel: RelName(firstType(n.Types)),
 			Weight: n.Weight, Count: n.Count, In: n.In,
+			Evidence: g.pairBooks(id, n.ID),
 		})
+	}
+	return out
+}
+
+// pairBooks — по одному куску на каждую книгу, подтвердившую связь двух понятий
+// в любую сторону. Нужен карточке понятия для года свежайшего подтверждения:
+// до 17.09.2026 поле NeighborInfo.Evidence не заполнялось нигде, и год в
+// карточке не печатался никогда — тесты собирали структуру руками и этого
+// не видели (аудит, Б8).
+func (g *Graph) pairBooks(a, b uint32) []ChunkKey {
+	seen := map[uint32]bool{}
+	var out []ChunkKey
+	for _, e := range g.edge.Between(a, b) {
+		if seen[e.Evidence.Doc] || g.dropped.Dropped(e.Evidence.Doc) {
+			continue
+		}
+		seen[e.Evidence.Doc] = true
+		out = append(out, e.Evidence)
+		if len(out) >= maxYearBooks {
+			break
+		}
 	}
 	return out
 }

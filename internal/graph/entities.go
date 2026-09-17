@@ -104,6 +104,24 @@ type Entities struct {
 	// (Rules.StemMinLen); ноль — умолчание.
 	stemMinLen int
 
+	// strictKeys — формат 2: синоним-аббревиатура не становится ключом поиска.
+	//
+	// «RE» честно раскрывается и в Relation Extraction, и в Regular Expressions:
+	// по буквам омоним не отличить, и ключ-аббревиатура собирал в одно понятие
+	// всё, что в книгах названо этими буквами. У рабочего графа так «Relation
+	// extraction» получил стандартную библиотеку Go, а «Incremental plasticity» —
+	// 157 кусков про IP-адреса (перепись 17.09.2026). В формате 2 сокращение
+	// остаётся в карточке понятия справкой, а названное в тексте «RE» заводит
+	// своё понятие; одно ли это с чем-то другим, решает разбор двойников —
+	// с арбитром и с обратным ходом, а не сборка вслепую.
+	strictKeys bool
+
+	// deny — запрещённые синонимы по понятиям (см. aliasdeny.go): читается
+	// из журнала рядом с реестром при каждой загрузке. extraDeny — запреты,
+	// которых в журнале ещё нет: ими DenyAliases считает последствия до записи.
+	deny      map[uint32]map[string]bool
+	extraDeny []AliasDeny
+
 	list  []Entity          // по номеру: list[id-1]
 	byKey map[string]uint32 // нормализованное имя или синоним → номер
 
@@ -122,11 +140,12 @@ type Entities struct {
 const entitiesFile = "entities.jsonl"
 
 func openEntities(dir string, stemMinLen int) (*Entities, error) {
-	return openEntitiesWith(dir, stemMinLen, nil)
+	return openEntitiesWith(dir, stemMinLen, nil, false)
 }
 
-func openEntitiesWith(dir string, stemMinLen int, cb func(OpenProgress)) (*Entities, error) {
-	e := &Entities{path: filepath.Join(dir, entitiesFile), stemMinLen: stemMinLen,
+// strictKeys — правило формата 2: аббревиатура ключом не служит (см. put).
+func openEntitiesWith(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool) (*Entities, error) {
+	e := &Entities{path: filepath.Join(dir, entitiesFile), stemMinLen: stemMinLen, strictKeys: strictKeys,
 		byKey: map[string]uint32{}, byStem: map[string]uint32{}}
 	if err := e.load(cb); err != nil {
 		return nil, err
@@ -143,6 +162,23 @@ func openEntitiesWith(dir string, stemMinLen int, cb func(OpenProgress)) (*Entit
 // и загружается всё остальное — оборванная запись это последняя строка после
 // внезапного выключения, а не повод потерять сорок тысяч сущностей.
 func (e *Entities) load(cb func(OpenProgress)) error {
+	// Запреты читаются до реестра: put применяет их к каждой записи.
+	e.deny = loadAliasDeny(filepath.Dir(e.path))
+	for _, r := range e.extraDeny {
+		if k := Normalize(r.Alias); k != "" && r.ID != 0 {
+			if e.deny == nil {
+				e.deny = map[uint32]map[string]bool{}
+			}
+			if r.Undo {
+				delete(e.deny[r.ID], k)
+				continue
+			}
+			if e.deny[r.ID] == nil {
+				e.deny[r.ID] = map[string]bool{}
+			}
+			e.deny[r.ID][k] = true
+		}
+	}
 	f, err := os.Open(e.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -197,6 +233,9 @@ func (e *Entities) load(cb func(OpenProgress)) error {
 // сливаются в одно, и граф начинает уверенно врать. Промпт это требование
 // тоже проговаривает, но полагаться на послушание модели здесь нельзя.
 func (e *Entities) put(ent Entity) {
+	// Запрещённый синоним не хранится в памяти вовсе: ни ключом, ни в карточке,
+	// ни в тексте вектора (см. aliasdeny.go).
+	ent.Aliases = e.allowedAliases(ent.ID, ent.Aliases)
 	for uint32(len(e.list)) < ent.ID {
 		e.list = append(e.list, Entity{})
 	}
@@ -206,6 +245,9 @@ func (e *Entities) put(ent Entity) {
 	for _, a := range ent.Aliases {
 		k := Normalize(a)
 		if k == "" || !usableAlias(ent.Norm, k) {
+			continue
+		}
+		if e.strictKeys && isAcronymPair(ent.Norm, k) {
 			continue
 		}
 		e.claimKey(k, ent.ID)
@@ -472,6 +514,11 @@ func script(w string) int {
 }
 
 // acronymOf проверяет, что short — сокращение слов words по первым буквам.
+// isAcronymPair — один из двух ключей есть аббревиатура другого.
+func isAcronymPair(norm, alias string) bool {
+	return acronymOf(norm, strings.Fields(alias)) || acronymOf(alias, strings.Fields(norm))
+}
+
 func acronymOf(short string, words []string) bool {
 	short = strings.ReplaceAll(short, " ", "")
 	if len(short) < 2 || len(words) < 2 || len([]rune(short)) != len(words) {
@@ -719,7 +766,9 @@ func (e *Entities) mergeAliases(id uint32, aliases []string) error {
 	var added bool
 	for _, a := range aliases {
 		k := Normalize(a)
-		if k == "" || have[k] {
+		if k == "" || have[k] || e.deny[id][k] {
+			// Запрещённый синоним модель предложит снова на следующем же
+			// куске — журнал запретов для того и заведён.
 			continue
 		}
 		if len(ent.Aliases) >= maxAliases {

@@ -89,7 +89,7 @@ func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, 
 				f |= uint16(FlagTOC)
 				res.Flagged++
 				pd[1]++
-			} else if LooksLikeRefs(texts[i]) || LooksLikeColophon(texts[i]) {
+			} else if ServiceRefs(texts[i]) {
 				f |= uint16(FlagRefs)
 				res.FlaggedRefs++
 				pd[1]++

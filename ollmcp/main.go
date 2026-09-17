@@ -64,7 +64,8 @@ func run(cfgPath, addr string, list, verbose bool) error {
 		return fmt.Errorf("файл настроек %s не найден.\nСоздайте его командой: ollchat --init-config", path)
 	}
 
-	srv, data, err := build(cfg)
+	// Служба — это режим --http без --tools: только ей нужен прогретый граф.
+	srv, data, err := build(cfg, addr != "" && !list)
 	if err != nil {
 		return err
 	}

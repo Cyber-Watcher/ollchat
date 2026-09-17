@@ -102,10 +102,7 @@ func (g *Graph) ExperimentPartition(o PartitionOpts) PartitionExperiment {
 	// По источникам: записи одной пары группируются по книге, и соседние куски
 	// схлопываются в один источник; вес источника — вес его первой записи.
 	type pk struct{ a, b uint32 }
-	type rec struct {
-		ord uint32
-		w   float64
-	}
+	type rec = originRec
 	byPair := map[pk]map[uint32][]rec{}
 	for _, ent := range g.Entities().Live() {
 		for _, ed := range g.Edges().Of(ent.ID) {
@@ -138,13 +135,9 @@ func (g *Graph) ExperimentPartition(o PartitionOpts) PartitionExperiment {
 	}
 	for k, docs := range byPair {
 		for _, recs := range docs {
-			sort.Slice(recs, func(i, j int) bool { return recs[i].ord < recs[j].ord })
-			for i, r := range recs {
-				if i > 0 && recs[i].ord == recs[i-1].ord+1 {
-					continue // сосед предыдущего: та же фраза из перекрытия
-				}
-				add(k.a, k.b, r.w)
-				add(k.b, k.a, r.w)
+			for _, w := range originWeights(recs) {
+				add(k.a, k.b, w)
+				add(k.b, k.a, w)
 				// conf считает источники, а не записи: add увеличил его на запись,
 				// и это верно — здесь каждая запись и есть источник.
 			}

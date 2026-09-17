@@ -182,6 +182,21 @@ func CreateVecWriter(dir, model string, dim, from int, header bool) (*VecWriter,
 	if err != nil {
 		return nil, err
 	}
+	// Паспорт правится ДО усечения файла: число векторов в нём не может быть
+	// больше, чем лежит в файле, ни на миг. Иначе при пересчёте с нуля
+	// (--kb-embed … --kb-recount) файл уже пуст, паспорт ещё обещает полмиллиона
+	// векторов, и до первой записанной волны — а после обрыва навсегда — коллекция
+	// не открывается вовсе: «vectors.dat короче обещанного». В это окно попадала
+	// и служба ollmcp, переоткрывающая коллекцию по отпечатку (аудит 17.09.2026, Б7).
+	_, metaPath := vecPaths(dir)
+	var old VecMeta
+	if err := readJSON(metaPath, &old); err == nil && old.Count > from {
+		old.Count = from
+		if err := writeJSON(metaPath, old); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
 	// Обрезаем ровно по границе продолжения: и хвост прерванной работы,
 	// и всё лишнее при пересчёте уходят одинаково.
 	if err := f.Truncate(int64(from) * int64(dim)); err != nil {

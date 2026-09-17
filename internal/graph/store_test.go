@@ -333,3 +333,24 @@ func TestForeignAliasNotFound(t *testing.T) {
 		t.Errorf("поиск по чужому понятию нашёл %q", got.Name)
 	}
 }
+
+// Between видит связь, записанную под поглощённым номером (аудит 17.09.2026, S8).
+func TestBetweenAppliesMerges(t *testing.T) {
+	g, _ := graph(t)
+	a, _, _ := g.Entities().Add("Kubernetes", TypeTech)
+	old, _, _ := g.Entities().Add("K8s", TypeTech)
+	c, _, _ := g.Entities().Add("Pod", TypeConcept)
+	must(t, g.Edges().Add(Edge{Src: old, Dst: c, Type: RelUses, Weight: 1, Evidence: ChunkKey{Doc: 1, Ord: 1}}))
+	if _, err := g.Merges().Add([]MergeRec{{From: old, To: a, Verdict: "ДА", Level: "human"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.Edges().Between(a, c); len(got) != 1 || got[0].Src != a || got[0].Dst != c {
+		t.Fatalf("связь под поглощённым номером не видна: %+v", got)
+	}
+	if got := g.Edges().Between(c, old); len(got) != 1 {
+		t.Fatalf("обратный порядок и поглощённый номер: %+v", got)
+	}
+	if got := g.Edges().Between(a, old); len(got) != 0 {
+		t.Fatalf("понятие связано само с собой: %+v", got)
+	}
+}

@@ -42,7 +42,7 @@ func TestToolsListEqualsReadOnlyNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("конфиг: %v", err)
 	}
-	srv, _, err := build(cfg)
+	srv, _, err := build(cfg, false)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

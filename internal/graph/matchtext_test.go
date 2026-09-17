@@ -22,6 +22,9 @@ func TestSeenInText(t *testing.T) {
 		{"we are going to google it", "Go", false},                 // короткое имя не ищется вовсе
 		{"ongoing work", "going", false},                           // границы слова
 		{"five\u2010step saga", "five-step saga", true},
+		{"requests go through load balancing first", "load-balancing", true}, // дефис = пробел
+		{"the critic loss penalizes errors", "critic_loss", true},            // подчёркивание = пробел
+		{"minimize kl-дивергенция between", "KL дивергенция", true},
 		{"конец-\n\nабзаца", "конецабзаца", false},
 	}
 	for _, c := range cases {
