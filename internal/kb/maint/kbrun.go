@@ -215,6 +215,53 @@ func Merge(stdout io.Writer, cfg *config.Config, name string, force, yes, dry bo
 	return nil
 }
 
+// Reanalyze пересобирает словесный индекс коллекции новыми правилами разбора.
+//
+// Книги не перечитываются: термы заново считаются по текстам кусков, которые
+// уже лежат в хранилище. Поэтому номера книг и кусков, векторы и граф остаются
+// как были, а видеокарта не нужна.
+func Reanalyze(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	st := coll.Stats()
+	fmt.Fprintf(stdout, "коллекция %s: кусков %d, сегментов %d, термов %d\n", name, st.Chunks, st.Segments, st.Terms)
+	fmt.Fprintf(stdout, "  правила разбора: индекс собран по %s, нынешние — %s\n", st.Analyzer, kb.AnalyzerVersion)
+	if !st.Stale {
+		fmt.Fprintln(stdout, "  индекс собран нынешними правилами; пересборка всё равно допустима и безвредна")
+	}
+	fmt.Fprintln(stdout, "  книги не перечитываются; куски, векторы и граф не затрагиваются")
+	if dry {
+		fmt.Fprintln(stdout, "\n--kb-dry-run: ничего не сделано.")
+		return nil
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	pl := progressPrinter()
+	defer pl.stop()
+	res, err := coll.Reanalyze(ctx, pl.update)
+	pl.stop()
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("пересборка прервана, прежний индекс остался на месте: %w", err)
+		}
+		return err
+	}
+	fmt.Fprintf(stdout, "индекс коллекции %s пересобран за %s\n", name, res.Elapsed.Round(time.Second))
+	fmt.Fprintf(stdout, "  правила разбора: %s → %s\n", res.From, res.To)
+	fmt.Fprintf(stdout, "  кусков: %d (без изменений)\n", res.Chunks)
+	fmt.Fprintf(stdout, "  сегментов: %d → %d\n", res.SegmentsBefore, res.SegmentsAfter)
+	fmt.Fprintf(stdout, "  термов: %d → %d\n", res.TermsBefore, res.TermsAfter)
+	return nil
+}
+
 // Embed считает векторы(смыслы) коллекции без запуска интерфейса.
 //
 // Работа долгая, поэтому ей самое место под nohup. Ctrl+C безопасен:

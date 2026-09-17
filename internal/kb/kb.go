@@ -334,6 +334,7 @@ func (b *Base) Open(name string) (*Collection, error) {
 	// Прерванное уплотнение доводится до конца прежде, чем читать meta.json:
 	// каталога коллекции в этот момент может не быть вовсе.
 	recoverCompaction(b, name, dir)
+	recoverReanalyze(dir)
 	var meta Meta
 	if err := readJSON(filepath.Join(dir, "meta.json"), &meta); err != nil {
 		if os.IsNotExist(err) {

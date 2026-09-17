@@ -297,6 +297,8 @@ func (c *Collection) writeCompacted(tmp string, kept []BookRec, chunks int, stat
 	// привела бы не туда.
 	meta := c.meta
 	meta.NextSeg = 2
+	// Сегмент только что построен нынешними правилами разбора.
+	meta.Analyzer = AnalyzerVersion
 	meta.Updated = time.Now()
 	meta.State = state
 	if err := writeJSON(filepath.Join(tmp, "meta.json"), meta); err != nil {

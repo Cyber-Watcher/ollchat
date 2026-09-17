@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -202,14 +201,22 @@ func QueueDoubtsTSV(graphDir string, r io.Reader) (queued int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	cr := csv.NewReader(r)
-	cr.Comma = '\t'
-	cr.LazyQuotes = true
-	cr.FieldsPerRecord = -1
-	head, err := cr.Read()
-	if err != nil {
-		return 0, fmt.Errorf("заголовок TSV: %w", err)
+	// Строки режутся по табуляции, без разбора кавычек. Пишет этот файл
+	// скрипт разбора двойников простым соединением через табуляцию, а читать
+	// его разбором CSV нельзя: «причина» — свободный текст модели, и стоит ей
+	// (или имени понятия) начаться с кавычки, как разбор принимает весь
+	// остаток файла за одно поле в кавычках. Команда тогда падала уже после
+	// склейки, но до записи реестра разобранного, и следующей ночью те же
+	// пары шли арбитру заново (аудит 17.09.2026).
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return 0, fmt.Errorf("заголовок TSV: %w", err)
+		}
+		return 0, fmt.Errorf("заголовок TSV: файл пуст")
 	}
+	head := strings.Split(strings.TrimRight(sc.Text(), "\r"), "\t")
 	col := map[string]int{}
 	for i, h := range head {
 		col[strings.TrimSpace(strings.TrimPrefix(h, "\ufeff"))] = i
@@ -226,14 +233,12 @@ func QueueDoubtsTSV(graphDir string, r io.Reader) (queued int, err error) {
 		}
 		return strings.TrimSpace(row[i])
 	}
-	for line := 2; ; line++ {
-		row, err := cr.Read()
-		if err == io.EOF {
-			break
+	for line := 2; sc.Scan(); line++ {
+		text := strings.TrimRight(sc.Text(), "\r")
+		if strings.TrimSpace(text) == "" {
+			continue
 		}
-		if err != nil {
-			return queued, fmt.Errorf("строка %d: %w", line, err)
-		}
+		row := strings.Split(text, "\t")
 		if field(row, "вердикт") != LinkDoubt {
 			continue
 		}
@@ -268,6 +273,9 @@ func QueueDoubtsTSV(graphDir string, r io.Reader) (queued int, err error) {
 			return queued, err
 		}
 		queued++
+	}
+	if err := sc.Err(); err != nil {
+		return queued, fmt.Errorf("чтение TSV: %w", err)
 	}
 	return queued, nil
 }

@@ -38,6 +38,9 @@ type extractor struct {
 	unmapped int
 	shown    int
 	depth    int
+	// spans — открытые блоки размеченного содержимого (см. marked.go). Общие
+	// на страницу: форма, вызванная изнутри блока с ActualText, тоже молчит.
+	spans []mcSpan
 }
 
 // pageImage — картинка, нарисованная на странице. Порядок отрисовки важен:
@@ -57,6 +60,7 @@ func newExtractor(d *Document) *extractor {
 func (e *extractor) page(page Dict) string {
 	e.frags = e.frags[:0]
 	e.images = e.images[:0]
+	e.spans = e.spans[:0]
 	content := e.doc.contentOf(page)
 	res, _ := e.doc.Resolve(page["Resources"]).(Dict)
 	e.run(content, res)
@@ -84,6 +88,16 @@ func (e *extractor) run(content []byte, res Dict) {
 	ctm := identity
 	st := state{tm: identity, tlm: identity, hscale: 1}
 
+	// Блоки, открытые в этом потоке и не закрытые им же (повреждённый файл),
+	// закрываются на выходе: иначе незакрытый ActualText заглушил бы весь
+	// остаток страницы.
+	spanBase := len(e.spans)
+	defer func() {
+		for len(e.spans) > spanBase {
+			e.closeSpan()
+		}
+	}()
+
 	// pos возвращает текущее положение пера и кегль в единицах страницы.
 	pos := func() (float64, float64, float64) {
 		trm := st.tm.mul(ctm)
@@ -108,7 +122,14 @@ func (e *extractor) run(content []byte, res Dict) {
 		tx := (sh.width/1000*st.fontSize +
 			float64(sh.glyphs)*st.charSp +
 			float64(sh.spaces)*st.wordSp) * st.hscale
-		if sh.text != "" {
+		if outer := e.replacing(); outer >= 0 && sh.text != "" {
+			// Внутри блока с ActualText нарисованное в текст не идёт:
+			// запоминаем только место, замену положит closeSpan.
+			scale := math.Hypot(st.tm.mul(ctm).a, st.tm.mul(ctm).b)
+			if w := tx * scale; finite(x) && finite(y) && finite(w) && finite(size) {
+				e.noteShown(outer, x, y, w, size, sh.text)
+			}
+		} else if sh.text != "" {
 			e.shown += len([]rune(sh.text))
 			scale := math.Hypot(st.tm.mul(ctm).a, st.tm.mul(ctm).b)
 			// Координаты берутся из файла и у повреждённого документа бывают
@@ -236,6 +257,20 @@ func (e *extractor) run(content []byte, res Dict) {
 					x, y, _ := pos()
 					e.xobject(res, name, ctm, x, y)
 				}
+			}
+		case "BMC":
+			e.openSpan(nil)
+		case "BDC":
+			var props Dict
+			if len(operands) >= 2 {
+				props = e.spanProps(res, operands[len(operands)-1])
+			}
+			e.openSpan(props)
+		case "EMC":
+			// Закрывать можно только своё: блок, открытый вызвавшим потоком,
+			// форме не принадлежит.
+			if len(e.spans) > spanBase {
+				e.closeSpan()
 			}
 		case "BI":
 			// Встроенное изображение: пропускаем до EI, иначе двоичные данные

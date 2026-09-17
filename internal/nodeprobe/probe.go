@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -289,6 +290,17 @@ func (r *Report) GPUUtil() int {
 	return n
 }
 
+// apiRequest — строка журнала службы о запросе к модели.
+//
+// Настоящая строка GIN выглядит так:
+//
+//	[GIN] 2026/08/22 - 17:29:47 | 200 | 2m12s | 127.0.0.1 | POST     "/api/chat"
+//
+// — несколько пробелов и кавычка. До 17.09.2026 искалась подстрока
+// «POST /api/», которой в такой строке нет: сторож всегда видел ноль запросов,
+// а тест проверял выдуманный формат.
+var apiRequest = regexp.MustCompile(`POST\s+"?/api/`)
+
 // Snapshot снимает состояние машины по указанным разделам.
 //
 // Ошибки не возвращаются: снимок — это то, что удалось увидеть, а неудача
@@ -397,7 +409,7 @@ func (r *Report) collectJournal(ctx context.Context, o Opts) {
 		if line = strings.TrimSpace(line); line == "" {
 			continue
 		}
-		if strings.Contains(line, "POST /api/") {
+		if apiRequest.MatchString(line) {
 			r.Requests++
 		}
 		if kind := journalKind(line); kind != "" {

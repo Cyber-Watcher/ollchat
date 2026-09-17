@@ -2,7 +2,6 @@ package graph
 
 import (
 	"math/rand"
-	"strings"
 )
 
 // Целостность провенанса: у каждой ли связи есть живой кусок-источник.
@@ -83,9 +82,9 @@ func (g *Graph) Provenance(src Chunks, sample int, seed int64) ProvenanceReport 
 			rep.addExample("нет куска " + ed.Evidence.String() + ": " + e.Name + " → " + dst.Name)
 			continue
 		}
-		low := strings.ToLower(ci.Text)
-		a := g.nameSeen(low, e)
-		b := g.nameSeen(low, dst)
+		joined, hyphened := MatchText(ci.Text)
+		a := g.nameSeen(joined, hyphened, e)
+		b := g.nameSeen(joined, hyphened, dst)
 		switch {
 		case a && b:
 			rep.Both++
@@ -102,14 +101,23 @@ func (g *Graph) Provenance(src Chunks, sample int, seed int64) ProvenanceReport 
 
 // nameSeen — встречается ли понятие в тексте под своим именем или синонимом.
 //
-// Синонимы короче трёх знаков не проверяются: «ML» или «БД» найдутся внутри
-// случайного слова и дадут ложное «связь подтверждена».
-func (g *Graph) nameSeen(lowText string, e Entity) bool {
-	if strings.Contains(lowText, strings.ToLower(e.Name)) {
+// Сверка идёт общей функцией SeenInText: фразой целиком, по границам слов,
+// с поправкой на запись текста (переносы, лигатуры, невидимые знаки). Прежняя
+// сверка подстрокой ошибалась в обе стороны: «Go» находилось внутри «google»,
+// а «Abuse Existing Functionality» не находилось в «Func‐\ntionality»; замер
+// 17.09.2026 на одной выборке в 3 000 связей: «ни одного имени» 3,27% → 2,67%.
+//
+// Имя короче трёх знаков («C», «R», «Go») сверяется только по границам слова
+// и только как имя: короткие синонимы не проверяются вовсе.
+func (g *Graph) nameSeen(joined, hyphened string, e Entity) bool {
+	if SeenInText(joined, hyphened, e.Name) {
+		return true
+	}
+	if n := MatchName(e.Name); len([]rune(n)) < 3 && containsWord(joined, n) {
 		return true
 	}
 	for _, al := range g.ents.DisplayAliases(e) {
-		if len([]rune(al)) >= 3 && strings.Contains(lowText, strings.ToLower(al)) {
+		if SeenInText(joined, hyphened, al) {
 			return true
 		}
 	}

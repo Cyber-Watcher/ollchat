@@ -445,7 +445,7 @@ func (m *Model) kbUseCmd(arg string) tea.Cmd {
 	st := coll.Stats()
 	text := fmt.Sprintf("модель будет искать в коллекции %s (книг %d, кусков %d)", name, st.Indexed, st.Chunks)
 	if st.Stale {
-		text += "\n  правила разбора изменились с прошлой сборки — стоит пересобрать: /kb add " + name + " <путь>"
+		text += "\n  правила разбора изменились с прошлой сборки — стоит пересобрать индекс: ollchat --kb-reanalyze " + name
 	}
 	m.addBlock(block{kind: blockNotice, text: text})
 	return nil
@@ -537,7 +537,7 @@ func kbStatsText(coll *kb.Collection, kbCfg config.KB) string {
 	fmt.Fprintf(&b, "  на диске: %.1f МБ\n", float64(st.Bytes)/1e6)
 	fmt.Fprintf(&b, "  правила разбора: %s\n", st.Analyzer)
 	if st.Stale {
-		b.WriteString("  ВНИМАНИЕ: правила изменились с прошлой сборки, стоит пересобрать\n")
+		b.WriteString("  ВНИМАНИЕ: правила изменились с прошлой сборки, стоит пересобрать индекс: ollchat --kb-reanalyze\n")
 	}
 	if len(meta.Roots) > 0 {
 		fmt.Fprintf(&b, "  собрана из: %s\n", strings.Join(meta.Roots, ", "))

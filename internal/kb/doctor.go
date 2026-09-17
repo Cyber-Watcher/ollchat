@@ -365,7 +365,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		}
 	}
 	if st.Stale {
-		fmt.Fprintf(&b, "\nПравила разбора изменились (%s → %s): стоит пересобрать коллекцию.\n",
+		fmt.Fprintf(&b, "\nПравила разбора изменились (%s → %s): стоит пересобрать словесный индекс.\n",
 			st.Analyzer, AnalyzerVersion)
 	}
 	if len(gone)+len(scans)+len(broken)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
@@ -416,8 +416,11 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		todo = append(todo, line)
 	}
 	if st.Stale {
+		// Именно пересборка индекса, а не --kb-reindex: перечитанная книга
+		// получает новый номер, и граф теряет ссылки на её куски.
 		todo = append(todo, fmt.Sprintf(
-			"ollchat --kb-reindex %s <путь>   — перечитать книги новыми правилами разбора", c.Name()))
+			"ollchat --kb-reanalyze %s   — пересобрать словесный индекс новыми правилами разбора\n"+
+				"      (книги не перечитываются; куски, векторы и граф не затрагиваются)", c.Name()))
 	}
 	if len(todo) > 0 {
 		b.WriteString("\nЧто сделать:\n")

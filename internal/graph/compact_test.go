@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +136,47 @@ func TestCompactSurvivesTornTail(t *testing.T) {
 	}
 	if st.RecordsAfter != 1 {
 		t.Fatalf("оборванная запись попала в реестр: %d", st.RecordsAfter)
+	}
+}
+
+// Уплотнение с подменой не идёт под живой сборкой и не оставляет признака.
+//
+// Сборка держит реестр открытым на дозапись: подмени файл под ней, и её
+// новые понятия уйдут в копию «.bak-…» (аудит обвязки 17.09.2026, S1).
+func TestCompactRefusesUnderLiveBuild(t *testing.T) {
+	coll := writeRegistry(t, []string{
+		`{"id":1,"name":"Go","norm":"go","type":"технология","docs":1,"count":1,"at":1}`,
+		`{"id":1,"name":"Go","norm":"go","type":"технология","docs":7,"count":90,"at":3}`,
+	})
+	dir := filepath.Join(coll, DirFor(""))
+	lock := filepath.Join(dir, lockFile)
+	// Признак живой сборки: процесс теста заведомо жив.
+	body := fmt.Sprintf("pid %d, начато 2026-09-17T12:00:00+03:00\n", os.Getpid())
+	if err := os.WriteFile(lock, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Compact(coll, "", false, false)
+	var locked *LockedError
+	if !errors.As(err, &locked) {
+		t.Fatalf("под живой сборкой ожидался отказ LockedError, получено: %v", err)
+	}
+	if baks, _ := filepath.Glob(filepath.Join(dir, entitiesFile+".bak-*")); len(baks) != 0 {
+		t.Fatalf("реестр подменён под живой сборкой: %v", baks)
+	}
+	// Проверка без подмены под сборкой допустима: она ничего не пишет.
+	if _, err := Compact(coll, "", true, false); err != nil {
+		t.Fatalf("проверка под сборкой: %v", err)
+	}
+
+	// Признак от мёртвого процесса снимается, а после работы своего не остаётся.
+	if err := os.WriteFile(lock, []byte("pid 999999999, начато 2026-09-17T12:00:00+03:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Compact(coll, "", false, false)
+	if err != nil || !st.Applied {
+		t.Fatalf("после мёртвого хозяина уплотнение обязано пройти: %+v, %v", st, err)
+	}
+	if _, err := os.Stat(lock); err == nil {
+		t.Fatal("уплотнение оставило за собой признак сборки")
 	}
 }

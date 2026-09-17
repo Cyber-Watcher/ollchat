@@ -303,12 +303,120 @@ func TestTokensJoinsHyphenWrap(t *testing.T) {
 	}
 }
 
-// Обычный дефис переносом не считается: он бывает частью слова.
+// Обычный дефис внутри строки — часть слова, а не перенос.
 func TestTokensKeepsPlainHyphen(t *testing.T) {
 	got := termsOf("подход out-of-the-box работает")
 	if !hasTerm(got, "out-of-the-box") {
 		t.Fatalf("составное слово с обычным дефисом разорвано: %v", got)
 	}
+}
+
+// Обычный дефис на конце строки — тоже перенос (правила v3).
+//
+// Версия v2 склеивала только U+00AD и U+2010. Перепись всей библиотеки
+// 17.09.2026 показала, что это меньшая часть: обычным дефисом переносит
+// большинство вёрсток — 311 тысяч переносов в 27% кусков против 94 тысяч
+// у «типографских» знаков. Случаи ниже взяты из книг дословно.
+func TestTokensJoinsAsciiHyphenWrap(t *testing.T) {
+	cases := []struct {
+		text string
+		want []string
+	}{
+		{"искусст-\n      венные нейроны", []string{"искусствен", "нейрон"}},
+		{"overwhelming at first; how-\never, upon", []string{"howev", "how", "ever"}},
+		{"микро- и наносе-\n  кунды", []string{"наносекунд"}},
+		{"коли\u00ad\n                         чество раз", []string{"количеств"}},
+		{"сло-\r\nво", []string{"слов"}},
+		// Составное слово на границе строки: части обязаны остаться.
+		{"well-\nknown fact", []string{"well", "known"}},
+		// Несколько переносов в одном слове: находится и целое, и середина.
+		{"между-\nнарод-\nный", []string{"международн", "народ"}},
+	}
+	for _, c := range cases {
+		got := termsOf(c.text)
+		for _, w := range c.want {
+			if !hasTerm(got, w) {
+				t.Errorf("%q: нет терма %q в %v", c.text, w, got)
+			}
+		}
+	}
+}
+
+// Что переносом НЕ считается: разные алфавиты, цифра перед знаком, заглавная
+// после обычного дефиса, тире между словами.
+func TestTokensWrapRejects(t *testing.T) {
+	cases := []struct {
+		text string
+		bad  string
+	}{
+		{"руководство по AI-\nассистенту", "aiассистент"},
+		{"в 2020-\nгоду", "2020год"},
+		{"Embry-\nRiddle Aeronautical", "embryriddl"},
+		{"тире -\nслово", "тиреслов"},
+	}
+	for _, c := range cases {
+		for _, tk := range termsOf(c.text) {
+			if strings.HasPrefix(tk, c.bad) {
+				t.Errorf("%q: склеено лишнее: %v", c.text, termsOf(c.text))
+			}
+		}
+	}
+	// Часть слова приводится к основе по своим признакам, а не по признакам
+	// целого: «году» после «2020» — обычное слово.
+	if got := termsOf("в 2020‐\nгоду"); !hasTerm(got, "год") {
+		t.Errorf("часть не приведена к основе: %v", got)
+	}
+}
+
+// Частота слова в куске не завышается: терм на одной позиции кладётся один раз.
+func TestTokensWrapNoDuplicateTerms(t *testing.T) {
+	seen := map[string]int{}
+	for _, tk := range Tokens("клиент-сер‐\nверной архитектуры", nil) {
+		if tk.Pos == 0 {
+			seen[tk.Term]++
+		}
+	}
+	for term, n := range seen {
+		if n > 1 {
+			t.Errorf("терм %q положен %d раза на одну позицию", term, n)
+		}
+	}
+}
+
+// Лигатуры, ударения, разложенные буквы и невидимые знаки слово не портят.
+func TestTokensFoldsTypography(t *testing.T) {
+	cases := []struct{ text, want string }{
+		{"con\ufb01gured", "configur"},       // ﬁ
+		{"o\ufb04ine mode", "offlin"},        // ﬄ
+		{"Docker\ufb01le", "dockerfil"},      // имя файла с лигатурой
+		{"замка\u0301ми", "замк"},            // ударение
+		{"и\u0306од", "йод"},                 // разложенная «й»
+		{"е\u0308ж", "еж"},                   // разложенная «ё» сводится к «е»
+		{"пул\u00adреквесты", "реквест"},     // мягкий перенос как дефис (PDF)
+		{"алго\u00adритмы", "алгоритм"},      // невидимый мягкий перенос (EPUB)
+		{"five\u2010step saga", "five-step"}, // типографский дефис = дефис
+		{"cloud.\u200bgoogle.\u200bcom", "cloud.google.com"},
+	}
+	for _, c := range cases {
+		if got := termsOf(c.text); !hasTerm(got, c.want) {
+			t.Errorf("%q: нет терма %q в %v", c.text, c.want, got)
+		}
+	}
+}
+
+// Границы слова в тексте: у склеенного слова они охватывают обе половины.
+func TestTokensSpans(t *testing.T) {
+	text := "про алго-\n   ритмы тут"
+	r := []rune(text)
+	for _, tk := range Tokens(text, nil) {
+		if tk.Term == "алгоритм" {
+			if got := string(r[tk.Start:tk.End]); got != "алго-\n   ритмы" {
+				t.Fatalf("границы слова: %q", got)
+			}
+			return
+		}
+	}
+	t.Fatal("склеенного слова нет")
 }
 
 // Пустая строка после переноса — конец абзаца, склеивать нечего.

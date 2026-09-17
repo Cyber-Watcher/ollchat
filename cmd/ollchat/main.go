@@ -70,6 +70,7 @@ type cliFlags struct {
 	kbDoctor              *string
 	kbQuick               *bool
 	kbYears               *string
+	kbReanalyze           *string
 	kbFlagTOC             *string
 	kbEmbedPlain          *bool
 	graphForgetTOC        *string
@@ -238,6 +239,7 @@ func parseFlags() *cliFlags {
 	f.kbDoctor = flag.String("kb-doctor", "", "проверить коллекцию: пропавшие книги, сканы, повторы (\"all\" — все)")
 	f.kbQuick = flag.Bool("kb-quick", false, "с --kb-doctor: без сверки книг по содержимому — быстрее, но повторы не найдутся")
 	f.kbYears = flag.String("kb-years", "", "проставить книгам коллекции год издания")
+	f.kbReanalyze = flag.String("kb-reanalyze", "", "пересобрать словесный индекс коллекции новыми правилами разбора, не перечитывая книг")
 	f.graphForgetTOC = flag.String("graph-forget-toc", "",
 		"убрать из графа упоминания и связи, извлечённые из служебных кусков — оглавлений, списков литературы, выходных данных (после --kb-flag-toc): --graph-forget-toc books; с --kb-dry-run — только посчитать")
 	f.kbFlagTOC = flag.String("kb-flag-toc", "",
@@ -493,6 +495,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, flag.Args())
 	case *f.kbYears != "":
 		return true, kmaint.Years(os.Stdout, cfg, *f.kbYears, *f.kbRecnt)
+	case *f.kbReanalyze != "":
+		return true, kmaint.Reanalyze(os.Stdout, cfg, *f.kbReanalyze, *f.kbDry)
 	case *f.kbFlagTOC != "":
 		return true, kmaint.FlagTOC(os.Stdout, cfg, *f.kbFlagTOC, *f.kbDry)
 	case *f.kbMerge != "":
@@ -929,7 +933,7 @@ func sessionDir() string {
 // Вынесено в постоянную, потому что это обещание пользователю: перечисленные
 // здесь команды обязаны ничего не менять при --kb-dry-run. Проверяется тестом.
 const dryRunFlagHelp = "только показать, что будет сделано: " +
-	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase"
+	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `ollchat %s — TUI-клиент и агент для Ollama
@@ -955,6 +959,7 @@ func usage() {
   ollchat --kb-index go /mnt/books/Go   собрать коллекцию (можно под nohup)
   ollchat --kb-sync go                  доиндексировать новое, убрать пропавшее
   ollchat --kb-years go                 проставить книгам год издания
+  ollchat --kb-reanalyze go             пересобрать словесный индекс после смены правил разбора
   ollchat --kb-reindex go /путь/к/книге  перечитать книгу заново
   ollchat --kb-merge go                 уплотнить: выбросить удалённое с диска
   ollchat --kb-embed go --kb-dry-run    оценить работу по смыслам

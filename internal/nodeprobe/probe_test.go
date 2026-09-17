@@ -347,7 +347,9 @@ func TestSnapshotNoProcsWithoutNvidiaSmi(t *testing.T) {
 // Запросы к службе считаются, а не хранятся: их тысячи, а нужно одно число.
 func TestSnapshotCountsRequests(t *testing.T) {
 	f := baseRun()
-	f.out["journalctl -u"] = "ollama[1]: [GIN] POST /api/chat 200\n" +
+	// Первая строка — дословно из журнала стенда: колонки GIN, несколько
+	// пробелов после метода и путь в кавычках.
+	f.out["journalctl -u"] = "ollama[1]: [GIN] 2026/08/22 - 17:29:47 | 200 |         2m12s |       127.0.0.1 | POST     \"/api/chat\"\n" +
 		"ollama[1]: [GIN] GET /api/tags 200\n" +
 		"ollama[1]: [GIN] POST /api/generate 200\n" +
 		"ollama[1]: WARN CUDA error: out of memory\n"

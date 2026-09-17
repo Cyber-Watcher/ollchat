@@ -152,55 +152,80 @@ func TestLayoutSurvivesBrokenCoordinates(t *testing.T) {
 	}
 }
 
-// Точки, нарисованные вместо пробелов, становятся пробелами (этап 104, П6.6).
+// Отдельно нарисованная точка остаётся точкой (этап 104, П6.6).
 //
-// Встречаются PDF, где пробел между словами нарисован отдельной точкой:
-// строка состоит из кусков «Систему», «.», «Java». Наш разбор читал
-// нарисованное, и текст выходил как «Систему.Java» — а такой текст ломает
-// поиск по словам, извлечение понятий и векторы разом. Замер 17.09.2026:
-// так испорчено 0,65% кусков библиотеки, в трёх книгах — от 67% до 89%.
-func TestJoinLineDotSpacersBecomeSpaces(t *testing.T) {
-	// Кегль 10.2, точки шириной 2.7 — как в «Java для опытных разработчиков».
-	line := []frag{
-		{x: 56.7, w: 42.3, size: 10.2, text: "Систему"},
-		{x: 99.0, w: 2.7, size: 10.2, text: "."},
-		{x: 102.3, w: 20.7, size: 10.2, text: "Java"},
-		{x: 123.0, w: 2.7, size: 10.2, text: "."},
-		{x: 126.3, w: 81.0, size: 10.2, text: "регламентируют"},
+// 17.09.2026 раскладка один день превращала в пробел любую узкую точку,
+// пришедшую отдельным куском, — так лечились книги, где пробел нарисован
+// глифом-точкой. Признак оказался ложным: точка в любом шрифте у́же трети
+// кегля (0,25–0,28), а отдельным куском она приходит всякий раз, когда перед
+// ней стоит кернинг или текст выводится по знаку. Замер на десяти книгах:
+// в «Artificial Intelligence: A Modern Approach» из ~11 тысяч точек на 225
+// страницах уцелело бы 230. Настоящая причина тех книг — ActualText, она
+// разобрана в marked.go; здесь закреплено, что раскладка точек не трогает.
+func TestJoinLineKeepsLoneDots(t *testing.T) {
+	cases := []struct {
+		name string
+		line []frag
+		want string
+	}{
+		{"конец предложения после кернинга", []frag{
+			{x: 10, w: 40, size: 10, text: "Hello wor"},
+			{x: 50, w: 5, size: 10, text: "d"},
+			{x: 55, w: 2.78, size: 10, text: "."},
+		}, "Hello word."},
+		{"десятичное число", []frag{
+			{x: 10, w: 5.5, size: 10, text: "3"},
+			{x: 15.5, w: 2.78, size: 10, text: "."},
+			{x: 18.3, w: 11, size: 10, text: "14"},
+		}, "3.14"},
+		{"имя файла", []frag{
+			{x: 10, w: 11, size: 10, text: "go"},
+			{x: 21, w: 2.78, size: 10, text: "."},
+			{x: 23.8, w: 17, size: 10, text: "mod"},
+		}, "go.mod"},
 	}
-	got := joinLine(line, 56.7, 5.1)
-	if strings.Contains(got, ".") {
-		t.Fatalf("точка-заменитель осталась: %q", got)
-	}
-	for _, w := range []string{"Систему", "Java", "регламентируют"} {
-		if !strings.Contains(got, w) {
-			t.Fatalf("слово %q потеряно: %q", w, got)
+	for _, c := range cases {
+		if got := joinLine(c.line, 10, 5, wordGapMax); got != c.want {
+			t.Errorf("%s: получено %q, ожидалось %q", c.name, got, c.want)
 		}
-	}
-	// Слова не должны слипнуться: выбрасывать точку мало, на её место нужен
-	// пробел — иначе выходит «языкасредуобщегоназначения» (поймано 17.09.2026).
-	if strings.Contains(got, "СистемуJava") || strings.Contains(got, "Javaрегламентируют") {
-		t.Fatalf("слова слиплись: %q", got)
 	}
 }
 
-// Настоящая точка не трогается: в конце предложения она приклеена к слову
-// и приходит одним куском с ним, а отдельная широкая точка — не заменитель.
-func TestJoinLineKeepsRealDots(t *testing.T) {
-	line := []frag{
-		{x: 56.7, w: 32.6, size: 10.1, text: "циями."},
-		{x: 95.0, w: 20.0, size: 10.1, text: "Дальше"},
+// Порог пробела между словами выбирается по странице (этап 104, П6.10).
+//
+// gapPage собирает страницу из строк по десять слов; внутри слова куски стоят
+// с разрывом inner, между словами — с разрывом outer (в долях кегля).
+func gapPage(inner, outer float64) []frag {
+	const size = 10.0
+	var out []frag
+	for row := 0; row < 8; row++ {
+		x := 50.0
+		for w := 0; w < 10; w++ {
+			for part := 0; part < 2; part++ {
+				out = append(out, frag{x: x, y: 700 - float64(row)*14, w: 12, size: size, text: "ab"})
+				x += 12 + inner*size
+			}
+			x += (outer - inner) * size
+		}
 	}
-	if got := joinLine(line, 56.7, 5.05); !strings.Contains(got, "циями.") {
-		t.Fatalf("точка в конце слова убрана: %q", got)
+	return out
+}
+
+func TestWordGapFollowsPage(t *testing.T) {
+	// Вёрстка TeX: кернинг до 0,03 кегля, пробел ужат до 0,12. Прежний жёсткий
+	// порог 0,2 склеивал такие слова в одно.
+	tex := layout(gapPage(0.03, 0.12))
+	if strings.Contains(tex, "abababab") || !strings.Contains(tex, "abab abab") {
+		t.Fatalf("слова слиплись: %q", strings.SplitN(tex, "\n", 2)[0])
 	}
-	// Широкая точка — не заменитель пробела: у заменителя ширина около
-	// четверти кегля, здесь она в кегль.
-	wide := []frag{
-		{x: 10, w: 10, size: 10, text: "."},
-		{x: 25, w: 20, size: 10, text: "конец"},
+	// Буквы по одной с шагом 0,08 кегля, пробел 0,32: долины под 0,2 нет,
+	// и рвать слова на куски нельзя.
+	spaced := layout(gapPage(0.08, 0.32))
+	if strings.Contains(spaced, "ab ab ab") || !strings.Contains(spaced, "abab abab") {
+		t.Fatalf("слова разорваны: %q", strings.SplitN(spaced, "\n", 2)[0])
 	}
-	if got := joinLine(wide, 10, 5); !strings.Contains(got, ".") {
-		t.Fatalf("широкая точка убрана как заменитель: %q", got)
+	// Мало данных — прежнее поведение.
+	if got := wordGapOf(gapPage(0.03, 0.12)[:6], 4); got != wordGapMax {
+		t.Fatalf("порог по шести кускам: %v", got)
 	}
 }

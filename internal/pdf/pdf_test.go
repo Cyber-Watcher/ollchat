@@ -505,3 +505,91 @@ func TestDropIndexAnchors(t *testing.T) {
 		t.Fatal("правило тронуло обычный текст")
 	}
 }
+
+const helvetica = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+
+// ActualText заменяет нарисованное: пробел, нарисованный глифом-точкой.
+//
+// Дословно повторяет устройство страницы 40 книги «Java для опытных
+// разработчиков» (этап 104, П6.6): между словами стоит блок
+// /Span <</ActualText<FEFF0020>>> BDC … EMC с глифом, который по таблице
+// шрифта читается точкой. До 17.09.2026 выходило «Hello.World».
+func TestActualTextReplacesDrawnGlyph(t *testing.T) {
+	doc := docWith("/F1 5 0 R",
+		"BT /F1 12 Tf 72 720 Td (Hello) Tj "+
+			"/Span <</ActualText<FEFF0020>>> BDC (.) Tj EMC "+
+			"(World.) Tj ET",
+		helvetica)
+	if got := extract(t, doc); got != "Hello World." {
+		t.Fatalf("получено %q, ожидалось %q", got, "Hello World.")
+	}
+}
+
+// Свойства блока могут быть записаны именем из раздела Properties ресурсов,
+// а строка — в однобайтовой кодировке без метки UTF-16.
+func TestActualTextFromProperties(t *testing.T) {
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << " +
+			"/Font << /F1 5 0 R >> /Properties << /P0 << /ActualText (fi) >> >> >> /Contents 4 0 R >>",
+		stream("", "BT /F1 12 Tf 72 720 Td (con) Tj /Span /P0 BDC (X) Tj EMC (gure) Tj ET"),
+		helvetica,
+	}
+	if got := extract(t, build(objs...)); got != "configure" {
+		t.Fatalf("получено %q, ожидалось %q", got, "configure")
+	}
+}
+
+// Пустой ActualText означает «украшение, в текст не брать»; блок без
+// ActualText и простой BMC текста не меняют; вложенный блок подчиняется
+// внешнему.
+func TestActualTextEdgeCases(t *testing.T) {
+	cases := []struct{ name, content, want string }{
+		// Украшение место на строке занимает, поэтому на его месте разрыв.
+		{"пустая замена", "(ab) Tj /Span <</ActualText ()>> BDC (ZZ) Tj EMC (cd) Tj", "ab  cd"},
+		{"блок без замены", "/Span <</MCID 7>> BDC (ab) Tj EMC /Artifact BMC (cd) Tj EMC", "abcd"},
+		{"вложенный блок", "/Span <</ActualText (one)>> BDC (x) Tj /Span <</ActualText (two)>> BDC (y) Tj EMC EMC", "one"},
+		// Ошибка разметки Apress: нарисовано три буквы, «читать» велено одну.
+		{"замена короче нарисованного", "(Con) Tj /Span <</ActualText (t)>> BDC (TEN) Tj EMC", "ConTEN"},
+		// Точки-выноски оглавления, помеченные управляющим знаком, — отбивка.
+		{"управляющий знак", "(Chapter) Tj /Span <</ActualText <FEFF0008>>> BDC (.....) Tj EMC (15) Tj", "Chapter 15"},
+		{"капитель", "(C) Tj /Span <</ActualText (ontents)>> BDC (ONTENTS) Tj EMC", "Contents"},
+		// Листинг Apress: пробельная замена накрывает отступ вместе со скобкой.
+		{"скобка под пробельной заменой", "(try) Tj /Span <</ActualText <FEFF00A000A0>>> BDC (  {) Tj EMC", "try  {"},
+		// Капитель с пробелом на конце: пробел между словами обязан уцелеть.
+		{"пробел на краю замены", "(Marketin) Tj /Span <</ActualText (g)>> BDC (G ) Tj EMC (sidekick) Tj", "Marketing sidekick"},
+		{"замена глотает скобку", "(attack ) Tj /Span <</ActualText (ATPA)>> BDC (\\(atpa\\):) Tj EMC", "attack (atpa):"},
+		// Неразрывный пробел, нарисованный глифом, который читается буквой.
+		{"буква под пробельной заменой", "(one) Tj /Span <</ActualText <FEFF00A0>>> BDC (z) Tj EMC (two) Tj", "one two"},
+		{"лишний EMC", "EMC (ab) Tj EMC", "ab"},
+		{"незакрытый блок не глушит страницу молча", "/Span <</ActualText (ok)>> BDC (x) Tj", "ok"},
+	}
+	for _, c := range cases {
+		doc := docWith("/F1 5 0 R", "BT /F1 12 Tf 72 720 Td "+c.content+" ET", helvetica)
+		if got := extract(t, doc); got != c.want {
+			t.Errorf("%s: получено %q, ожидалось %q", c.name, got, c.want)
+		}
+	}
+}
+
+// Блок, открытый страницей, форма закрыть не может — и наоборот: незакрытый
+// блок формы не заглушает остаток страницы.
+func TestActualTextDoesNotLeakAcrossForm(t *testing.T) {
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << " +
+			"/Font << /F1 5 0 R >> /XObject << /Fm0 6 0 R >> >> /Contents 4 0 R >>",
+		stream("", "BT /F1 12 Tf 72 720 Td (before) Tj ET /Fm0 Do BT /F1 12 Tf 72 680 Td (after) Tj ET"),
+		helvetica,
+		stream("<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> >>",
+			"BT /F1 12 Tf 72 700 Td /Span <</ActualText (form)>> BDC (x) Tj ET"),
+	}
+	got := extract(t, build(objs...))
+	for _, w := range []string{"before", "form", "after"} {
+		if !strings.Contains(got, w) {
+			t.Fatalf("потеряно %q: %q", w, got)
+		}
+	}
+}

@@ -63,6 +63,22 @@ func Compact(collDir, name string, check, force bool) (CompactStats, error) {
 	}
 	st.BytesBefore = fi.Size()
 
+	// Уплотнение с подменой идёт под тем же признаком, что и сборка, и берёт
+	// его ДО чтения реестра. Сборка держит реестр открытым на дозапись весь
+	// заход: подмени файл под ней — и все её новые понятия уйдут в копию
+	// «.bak-…», а связи будут ссылаться на понятия, которых в реестре нет;
+	// записи, дописанные после чтения, пропали бы точно так же. До 17.09.2026
+	// уплотнение ставило лишь WORK-<pid>, которого сборка не спрашивает
+	// (аудит обвязки, находка S1). Проверка без подмены замка не берёт:
+	// она ничего не пишет.
+	if !check {
+		release, err := holdBuildLock(dir)
+		if err != nil {
+			return st, err
+		}
+		defer release()
+	}
+
 	last, order, count, err := lastPerID(path)
 	if err != nil {
 		return st, err
@@ -116,6 +132,33 @@ func Compact(collDir, name string, check, force bool) (CompactStats, error) {
 	syncDir(dir)
 	st.Applied = true
 	return st, nil
+}
+
+// holdBuildLock занимает признак сборки графа на время работы, которая
+// подменяет файлы реестра. Формат и правила — те же, что у Graph.Lock:
+// живой хозяин — отказ, признак от мёртвого процесса снимается.
+func holdBuildLock(dir string) (release func(), err error) {
+	path := filepath.Join(dir, lockFile)
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+			f.Close()
+			return func() { os.Remove(path) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		owner := readLock(path)
+		if owner.alive() {
+			return nil, &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			return nil, fmt.Errorf("остался признак сборки от неживого процесса, "+
+				"и его не удалось убрать: %w", rmErr)
+		}
+	}
+	return nil, &LockedError{Path: path}
 }
 
 // lastPerID читает реестр и оставляет последнюю запись на каждый номер.

@@ -240,3 +240,33 @@ func TestQueueDoubtsTSV(t *testing.T) {
 		t.Fatalf("причина не обрезана до 120 знаков: %d", got)
 	}
 }
+
+// Кавычка в начале причины или имени не ломает чтение TSV арбитра.
+//
+// Файл пишется простым соединением через табуляцию, и разбор CSV принимал
+// строку с кавычкой за начало поля в кавычках, глотая весь остаток файла.
+func TestQueueDoubtsTSVQuotes(t *testing.T) {
+	dir := t.TempDir()
+	tsv := "вердикт\tимя_a\tid_a\tid_b\tимя_b\tcos\tпричина\n" +
+		"?\tGo\t2\t1\tgolang\t0.91\t\"Go\" шире, чем golang\n" +
+		"?\t\"smart\" pointer\t4\t3\tsmart pointer\t0.95\tкавычки в имени\n" +
+		"?\tKV cache\t6\t5\tKV-кэш\t0.88\tобычная строка после кавычек\n"
+	n, err := QueueDoubtsTSV(dir, strings.NewReader(tsv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("в очередь %d пар, ожидалось 3", n)
+	}
+	l, err := openLinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	why := map[string]string{}
+	for _, r := range l.Queue() {
+		why[r.Name] = r.Why
+	}
+	if len(why) != 3 || why["Go"] != "\"Go\" шире, чем golang" || why["\"smart\" pointer"] != "кавычки в имени" {
+		t.Fatalf("очередь: %+v", why)
+	}
+}

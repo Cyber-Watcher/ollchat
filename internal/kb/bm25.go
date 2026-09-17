@@ -442,57 +442,46 @@ func Snippet(text, query string, maxRunes int) string {
 	// Иначе выигрывает окно, которое начинается задолго до совпадения и лишь
 	// краем задевает его, — а после отступа назад совпадение вовсе выпадает
 	// за конец цитаты.
-	words, offsets := wordPositions(runes)
-	if len(words) == 0 {
-		return strings.TrimSpace(string(runes[:maxRunes])) + "…"
-	}
-	hitAt := make([]bool, len(words))
-	var anchors []int
-	for i, w := range words {
-		for _, t := range Tokens(w, nil) {
-			if wanted[t.Term] {
-				hitAt[i] = true
-				anchors = append(anchors, i)
-				break
-			}
+	//
+	// Слова берутся тем же разбором, которым строился индекс, с границами
+	// в тексте. Отдельная нарезка «по пробелам» расходилась с ним на словах
+	// с переносом: «алго-\nритмы» индекс знал как `алгоритм`, а выдержка видела
+	// `алго` и `ритмы`, совпадения не находила и показывала начало куска.
+	var hits []Token
+	for _, t := range Tokens(text, nil) {
+		if wanted[t.Term] {
+			hits = append(hits, t)
 		}
 	}
-	if len(anchors) == 0 {
+	if len(hits) == 0 {
 		return strings.TrimSpace(string(runes[:maxRunes])) + "…"
 	}
 
 	// Небольшой зачин перед совпадением: цитата, начинающаяся ровно с искомого
 	// слова, читается плохо.
 	lead := maxRunes / 6
-	best, bestScore := anchors[0], -1
-	for _, a := range anchors {
-		start := offsets[a] - lead
+	best, bestScore := hits[0].Start, -1
+	for _, a := range hits {
+		start := a.Start - lead
 		if start < 0 {
 			start = 0
 		}
 		seen := map[string]bool{}
-		for j := 0; j < len(words); j++ {
-			if offsets[j] < start {
+		for _, h := range hits {
+			if h.Start < start {
 				continue
 			}
-			if offsets[j]+len([]rune(words[j])) > start+maxRunes {
+			if h.End > start+maxRunes {
 				break
 			}
-			if !hitAt[j] {
-				continue
-			}
-			for _, t := range Tokens(words[j], nil) {
-				if wanted[t.Term] {
-					seen[t.Term] = true
-				}
-			}
+			seen[h.Term] = true
 		}
 		if len(seen) > bestScore {
-			best, bestScore = a, len(seen)
+			best, bestScore = a.Start, len(seen)
 		}
 	}
 
-	start := offsets[best] - lead
+	start := best - lead
 	if start < 0 {
 		start = 0
 	}
@@ -511,31 +500,6 @@ func Snippet(text, query string, maxRunes int) string {
 		out += "…"
 	}
 	return out
-}
-
-// wordPositions возвращает слова и позиции их начал.
-func wordPositions(runes []rune) ([]string, []int) {
-	var words []string
-	var offs []int
-	start := -1
-	for i, r := range runes {
-		if isWordRune(r) || isConnector(r) {
-			if start < 0 {
-				start = i
-			}
-			continue
-		}
-		if start >= 0 {
-			words = append(words, string(runes[start:i]))
-			offs = append(offs, start)
-			start = -1
-		}
-	}
-	if start >= 0 {
-		words = append(words, string(runes[start:]))
-		offs = append(offs, start)
-	}
-	return words, offs
 }
 
 // wordStart сдвигает границу к началу слова, чтобы цитата не начиналась
