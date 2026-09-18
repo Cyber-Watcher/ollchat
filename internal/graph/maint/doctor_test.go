@@ -34,9 +34,27 @@ func TestRepartitionDue(t *testing.T) {
 // Дефект 15.09.2026: обход по All() после склейки 15 311 пар показал
 // 33 059 понятий вне тем вместо 12 530 и звал пересчитывать разметку.
 func TestCountUncoveredSkipsMerged(t *testing.T) {
-	// 1 и 2 в теме, 3 — беспризорное. Поглощённых здесь нет вовсе: Live()
-	// их уже не отдаёт, и функция обязана считать ровно то, что получила.
-	live := []graph.Entity{{ID: 1}, {ID: 2}, {ID: 3}}
+	// Настоящий граф: понятие 4 поглощено склейкой понятием 1 и в темах не
+	// числится — вне тем оно считаться не должно. До 18.09.2026 тест собирал
+	// список понятий руками и проверял функцию на её же входе (тавтология,
+	// аудит Б17); теперь список берётся у Live() настоящего графа.
+	g, err := graph.Create(t.TempDir(), "проба", 100, graph.Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	for _, n := range []string{"один", "два", "три", "четыре"} {
+		if _, _, err := g.Entities().Add(n, graph.TypeConcept); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.Merges().Add([]graph.MergeRec{{From: 4, To: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	live := g.Entities().Live()
+	if len(live) != 3 {
+		t.Fatalf("живых понятий %d, ожидалось 3 (четвёртое поглощено)", len(live))
+	}
 	inTopic := map[uint32]bool{1: true, 2: true}
 
 	if got := countUncovered(live, inTopic); got != 1 {

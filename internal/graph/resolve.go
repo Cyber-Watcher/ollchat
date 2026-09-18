@@ -503,15 +503,22 @@ func resolveKey(name string) string {
 	// Слова исходного имени нужны до приведения регистра: аббревиатуру от
 	// обычного слова отличает именно регистр.
 	raw := strings.Fields(Normalize(name))
-	orig := strings.FieldsFunc(name, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '-' || r == '_' || r == '/'
-	})
+	// Исходное слово ищется по написанию в нижнем регистре, а не по номеру
+	// в строке: Normalize и разбиение по знакам режут имя по разным правилам
+	// (неразрывный пробел, перевод строки), и по номеру проверялось бы
+	// соседнее слово (аудит 17.09.2026, Б17).
+	orig := map[string]string{}
+	for _, o := range strings.FieldsFunc(name, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '+' && r != '#' && r != '.'
+	}) {
+		orig[strings.ToLower(o)] = o
+	}
 
 	words := make([]string, 0, len(raw))
-	for i, w := range raw {
+	for _, w := range raw {
 		src := w
-		if i < len(orig) {
-			src = orig[i]
+		if o, ok := orig[w]; ok {
+			src = o
 		}
 		if keepAsIs(src) {
 			words = append(words, w)

@@ -171,6 +171,16 @@ func rewriteBinary(path string, size int, stamp string, dry bool, keep func([]by
 // изменилась ли она; записи не удаляются. Для rewriteBinary «изменилась» —
 // значит «удалить».
 func rewriteBinaryMap(path string, size int, stamp string, dry bool, change func([]byte) bool) (rewriteResult, error) {
+	// Изменённые записи выбрасываются у всех журналов, кроме отметок разбора:
+	// там запись правится на месте (судьба куска), а не убирается.
+	return rewriteBinaryWith(path, size, stamp, dry, change, filepath.Base(path) != progressFile)
+}
+
+// rewriteBinaryWith — общий переписыватель двоичного журнала с записями
+// фиксированной длины: change правит запись в буфере и говорит, менялась ли она;
+// deleting — изменённые записи не переписывать (чистка), иначе — переписать
+// правленными (перенос номеров книг, bookmap.go).
+func rewriteBinaryWith(path string, size int, stamp string, dry bool, change func([]byte) bool, deleting bool) (rewriteResult, error) {
 	var res rewriteResult
 	src, err := os.Open(path)
 	if os.IsNotExist(err) {
@@ -180,7 +190,6 @@ func rewriteBinaryMap(path string, size int, stamp string, dry bool, change func
 		return res, err
 	}
 	defer src.Close()
-	deleting := filepath.Base(path) != progressFile
 
 	tmp := path + ".tmp-" + stamp
 	var dst *os.File

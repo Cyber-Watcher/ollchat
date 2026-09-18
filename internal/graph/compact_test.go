@@ -180,3 +180,61 @@ func TestCompactRefusesUnderLiveBuild(t *testing.T) {
 		t.Fatal("уплотнение оставило за собой признак сборки")
 	}
 }
+
+// Уплотнение с выбрасыванием мёртвых понятий (этап 90, п. 3): понятие без
+// упоминаний, связей и склеек уходит из реестра, остальные и их номера — нет;
+// проверка ничего не подменяет, но говорит, сколько было бы выброшено.
+func TestCompactDropsDeadEntities(t *testing.T) {
+	g := newGraphWith(t, "живое", "мёртвое", "связанное", "поглощающее", "поглощённое")
+	live, dead, linked, keep, gone := uint32(1), uint32(2), uint32(3), uint32(4), uint32(5)
+	if err := g.Mentions().Add(live, ChunkKey{Doc: 1, Ord: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Edges().Add(Edge{Src: live, Dst: linked, Type: RelUses, Weight: 1, Evidence: ChunkKey{Doc: 1, Ord: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Merges().Add([]MergeRec{{From: gone, To: keep}}); err != nil {
+		t.Fatal(err)
+	}
+	got := g.DeadEntities()
+	if len(got) != 1 || got[0] != dead {
+		t.Fatalf("мёртвыми названы %v, ожидалось только %d", got, dead)
+	}
+	drop := map[uint32]bool{dead: true}
+	collDir := filepath.Dir(g.dir)
+	g.Close()
+
+	st, err := CompactDrop(collDir, "", true, false, drop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Applied || st.Dropped != 1 {
+		t.Fatalf("проверка: подменено %v, выброшено %d", st.Applied, st.Dropped)
+	}
+	st, err = CompactDrop(collDir, "", false, false, drop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Applied || st.Dropped != 1 || st.RecordsAfter != 4 {
+		t.Fatalf("уплотнение: подменено %v, выброшено %d, записей %d", st.Applied, st.Dropped, st.RecordsAfter)
+	}
+	g2, err := Open(collDir, 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	if _, ok := g2.Entities().Get(dead); ok {
+		t.Fatal("мёртвое понятие осталось в реестре")
+	}
+	for _, id := range []uint32{live, linked, keep} {
+		if _, ok := g2.Entities().Get(id); !ok {
+			t.Fatalf("живое понятие %d пропало", id)
+		}
+	}
+	if g2.Merges().Resolve(gone) != keep {
+		t.Fatal("склейка потеряна")
+	}
+	if e, ok := g2.Entities().Get(linked); !ok || e.ID != linked {
+		t.Fatal("номера сдвинулись — векторы указали бы не туда")
+	}
+}

@@ -70,6 +70,7 @@ type cliFlags struct {
 	kbDoctor              *string
 	kbQuick               *bool
 	kbYears               *string
+	kbHash                *string
 	kbReanalyze           *string
 	kbFlagTOC             *string
 	kbEmbedPlain          *bool
@@ -79,6 +80,8 @@ type cliFlags struct {
 	graphForgetSkip       *bool
 	graphDenyAliases      *string
 	graphUnmerge          *string
+	graphRebaseBooks      *string
+	graphRecordBooks      *string
 	graphUnmergeFile      *string
 	graphUnmergeWhy       *string
 	graphDenyFile         *string
@@ -167,6 +170,7 @@ type cliFlags struct {
 	graphCompact          *string
 	graphCompactCheck     *bool
 	graphCompactForce     *bool
+	graphCompactDropDead  *bool
 	graphMergeDry         *bool
 	graphResolve          *string
 	graphResolveFull      *bool
@@ -249,6 +253,7 @@ func parseFlags() *cliFlags {
 	f.kbDoctor = flag.String("kb-doctor", "", "проверить коллекцию: пропавшие книги, сканы, повторы (\"all\" — все)")
 	f.kbQuick = flag.Bool("kb-quick", false, "с --kb-doctor: без сверки книг по содержимому — быстрее, но повторы не найдутся")
 	f.kbYears = flag.String("kb-years", "", "проставить книгам коллекции год издания")
+	f.kbHash = flag.String("kb-hash", "", "проставить книгам коллекции хеш содержимого (ключ книги для переноса графа): --kb-hash books; с --kb-recount — пересчитать всем")
 	f.kbReanalyze = flag.String("kb-reanalyze", "", "пересобрать словесный индекс коллекции новыми правилами разбора, не перечитывая книг")
 	f.graphForgetChunks = flag.String("graph-forget-chunks", "",
 		"убрать из графа извлечённое из кусков по списку: --graph-forget-chunks books --graph-forget-file список.txt (с --kb-dry-run — только посчитать)")
@@ -257,6 +262,10 @@ func parseFlags() *cliFlags {
 		"с --graph-forget-chunks: куски больше не разбирать (мусор); без ключа следующая сборка разберёт их заново")
 	f.graphDenyAliases = flag.String("graph-deny-aliases", "",
 		"запретить понятиям ложные синонимы по списку: --graph-deny-aliases books --graph-deny-file список.tsv (с --kb-dry-run — только показать)")
+	f.graphRebaseBooks = flag.String("graph-rebase-books", "",
+		"перенести граф на новую нумерацию книг коллекции по хешам содержимого: --graph-rebase-books books (с --kb-dry-run — только показать)")
+	f.graphRecordBooks = flag.String("graph-record-books", "",
+		"записать карту книг графа (номер → хеш содержимого) без переноса: --graph-record-books books")
 	f.graphUnmerge = flag.String("graph-unmerge", "",
 		"снять отдельные склейки по списку: --graph-unmerge books --graph-unmerge-file список.tsv (с --kb-dry-run — только показать)")
 	f.graphUnmergeFile = flag.String("graph-unmerge-file", "", "с --graph-unmerge: файл «поглощённое<TAB>выживший<TAB>причина» или перепись со столбцами from и to")
@@ -412,6 +421,8 @@ func parseFlags() *cliFlags {
 		"уплотнить реестр понятий графа: --graph-compact books")
 	f.graphCompactCheck = flag.Bool("graph-compact-check", false,
 		"с --graph-compact: только сличить словари и рассказать, ничего не подменяя")
+	f.graphCompactDropDead = flag.Bool("graph-compact-drop-dead", false,
+		"с --graph-compact: выбросить из реестра мёртвые понятия — без упоминаний, связей и склеек (после чистки или отброшенных книг); прежний файл сохраняется")
 	f.graphCompactForce = flag.Bool("graph-compact-force", false,
 		"с --graph-compact: подменить реестр даже при расхождении словарей")
 	f.graphMergeDry = flag.Bool("graph-merge-dry", false,
@@ -519,6 +530,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, kmaint.Index(os.Stdout, cfg, *f.kbSync, nil, true, *f.kbDry)
 	case *f.kbReindex != "":
 		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, flag.Args())
+	case *f.kbHash != "":
+		return true, kmaint.Hashes(os.Stdout, cfg, *f.kbHash, *f.kbRecnt)
 	case *f.kbYears != "":
 		return true, kmaint.Years(os.Stdout, cfg, *f.kbYears, *f.kbRecnt)
 	case *f.kbReanalyze != "":
@@ -552,6 +565,10 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
+	case *f.graphRebaseBooks != "":
+		return true, gmaint.RebaseBooks(os.Stdout, cfg, *f.graphRebaseBooks, false, *f.kbDry)
+	case *f.graphRecordBooks != "":
+		return true, gmaint.RebaseBooks(os.Stdout, cfg, *f.graphRecordBooks, true, false)
 	case *f.graphUnmerge != "":
 		if *f.graphUnmergeFile == "" {
 			return true, fmt.Errorf("--graph-unmerge требует список: --graph-unmerge-file <файл>")
@@ -633,7 +650,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.DropBook(os.Stdout, cfg, *f.graphDropBook, *f.graphBookName, gmaint.DropRun{Restore: *f.graphRestoreBook, Apply: *f.graphDropApply})
 
 	case *f.graphCompact != "":
-		return true, gmaint.Compact(os.Stdout, cfg, *f.graphCompact, *f.graphCompactCheck, *f.graphCompactForce)
+		return true, gmaint.Compact(os.Stdout, cfg, *f.graphCompact, *f.graphCompactCheck, *f.graphCompactForce, *f.graphCompactDropDead)
 
 	case *f.graphMerge != "":
 		return true, gmaint.Merge(os.Stdout, cfg, *f.graphMerge, *f.graphMergeFile, *f.graphMergeLevel,
@@ -976,7 +993,7 @@ func sessionDir() string {
 // Вынесено в постоянную, потому что это обещание пользователю: перечисленные
 // здесь команды обязаны ничего не менять при --kb-dry-run. Проверяется тестом.
 const dryRunFlagHelp = "только показать, что будет сделано: " +
-	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases, --graph-unmerge"
+	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases, --graph-unmerge, --graph-rebase-books"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `ollchat %s — TUI-клиент и агент для Ollama

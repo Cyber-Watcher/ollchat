@@ -125,6 +125,7 @@ func dedupe(files []candidate, known []BookRec, hashOf func(string) (string, err
 			continue
 		}
 		seen[h] = f.path
+		f.hash = h // отпечаток уже посчитан — он же ключ книги в реестре
 		out = append(out, f)
 	}
 	return out, dupes

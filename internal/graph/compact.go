@@ -46,6 +46,9 @@ type CompactStats struct {
 	// 700 на тысячу — это разные решения.
 	Keys, KeysDiff   int
 	Stems, StemsDiff int
+
+	// Dropped — сколько мёртвых понятий выброшено из реестра (см. CompactDrop).
+	Dropped int
 }
 
 // Compact уплотняет реестр понятий коллекции.
@@ -53,6 +56,24 @@ type CompactStats struct {
 // check — только сличить и рассказать, ничего не подменяя.
 // force — подменить даже при расхождении словарей.
 func Compact(collDir, name string, check, force bool) (CompactStats, error) {
+	return CompactDrop(collDir, name, check, force, nil)
+}
+
+// CompactDrop — то же уплотнение, ещё и без понятий из drop.
+//
+// **Зачем.** Уплотнение оставляет «столько же понятий, по одной записи»:
+// понятие, у которого не осталось ни одного упоминания — книга отброшена,
+// куски забыты чисткой, — лежит в реестре вечно, со своими ключами и
+// вектором, и оплачивается при каждом открытии графа (этап 90, п. 3).
+// Какие понятия мёртвые, решает вызывающий (Graph.DeadEntities: ни упоминаний,
+// ни связей, ни склеек); здесь они лишь не переписываются в новый файл.
+// Номера не перенумеровываются — вектор понятия лежит по номеру, и место
+// остаётся пустым. Прежний файл сохраняется, так что шаг обратим.
+//
+// Словари сличаются на реестре БЕЗ выбрасывания: уплотнение дубликатов должно
+// быть тождественным, а пропажа ключей мёртвых понятий — ожидаемое действие,
+// а не расхождение.
+func CompactDrop(collDir, name string, check, force bool, drop map[uint32]bool) (CompactStats, error) {
 	dir := filepath.Join(collDir, DirFor(name))
 	path := filepath.Join(dir, entitiesFile)
 
@@ -113,10 +134,29 @@ func Compact(collDir, name string, check, force bool) (CompactStats, error) {
 	st.StemsDiff = countIndexDiff(before.byStem, after.byStem)
 
 	if check {
+		st.Dropped = countDrop(order, drop)
 		return st, nil
 	}
 	if len(st.Diffs) > 0 && !force {
 		return st, nil
+	}
+	if len(drop) > 0 {
+		// Итоговый файл — без мёртвых понятий; сличение выше их не касалось.
+		kept := order[:0:0]
+		for _, id := range order {
+			if drop[id] {
+				st.Dropped++
+				continue
+			}
+			kept = append(kept, id)
+		}
+		if err := writeRecords(tmp, last, kept); err != nil {
+			return st, err
+		}
+		st.RecordsAfter = len(kept)
+		if fi, err := os.Stat(tmp); err == nil {
+			st.BytesAfter = fi.Size()
+		}
 	}
 
 	st.Backup = path + ".bak-" + time.Now().Format("20060102-150405")
@@ -132,6 +172,42 @@ func Compact(collDir, name string, check, force bool) (CompactStats, error) {
 	syncDir(dir)
 	st.Applied = true
 	return st, nil
+}
+
+func countDrop(order []uint32, drop map[uint32]bool) int {
+	n := 0
+	for _, id := range order {
+		if drop[id] {
+			n++
+		}
+	}
+	return n
+}
+
+// DeadEntities — понятия, которых в графе больше ничто не держит: ни одного
+// упоминания (упоминания из отброшенных книг не в счёт), ни одной связи в обе
+// стороны, и они не участвуют в склейках ни поглощённым, ни выжившим.
+// Их выбрасывает уплотнение с CompactDrop; прочее, что может быть пустым
+// «по ошибке модели» (есть упоминания, но нет связей), здесь не трогается.
+func (g *Graph) DeadEntities() []uint32 {
+	var dead []uint32
+	for _, e := range g.ents.Live() {
+		if g.merges.Gone(e.ID) || len(g.merges.Absorbed(e.ID)) > 0 {
+			continue
+		}
+		alive := false
+		for _, k := range g.Mentions().Of(e.ID) {
+			if !g.dropped.Dropped(k.Doc) {
+				alive = true
+				break
+			}
+		}
+		if alive || len(g.edge.Of(e.ID)) > 0 || len(g.edge.incoming(e.ID)) > 0 {
+			continue
+		}
+		dead = append(dead, e.ID)
+	}
+	return dead
 }
 
 // holdBuildLock занимает признак сборки графа на время работы, которая

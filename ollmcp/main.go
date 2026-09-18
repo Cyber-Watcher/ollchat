@@ -23,6 +23,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -128,14 +129,12 @@ func serveOn(mux *http.ServeMux, addr, token string) error {
 }
 
 func firstLine(s string) string {
-	for i, r := range s {
-		if r == '\n' {
-			return s[:i]
-		}
-		_ = i
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
 	}
-	if len(s) > 100 {
-		return s[:100] + "…"
+	// По рунам, а не по байтам: срез s[:100] рвал русскую букву пополам.
+	if r := []rune(s); len(r) > 100 {
+		return string(r[:100]) + "…"
 	}
 	return s
 }

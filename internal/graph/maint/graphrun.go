@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -286,6 +287,15 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 		RedoEmpty:         redoEmpty,
 	}, graphProgress(logPath, poolLine(pool, named)))
 	fmt.Fprintln(os.Stderr)
+	// Карта книг графа — в конце каждого захода, даже прерванного: по ней граф
+	// переносится на новую нумерацию книг (`--graph-rebase-books`, bookmap.go).
+	// Книги без хеша (проиндексированы до 18.09.2026) в карту не попадают —
+	// их проставляет `--kb-hash`.
+	if n, rerr := graph.RecordBooks(g.Dir(), knownBooks(coll)); rerr != nil {
+		fmt.Fprintf(stdout, "карта книг графа не записана: %v\n", rerr)
+	} else if n > 0 {
+		fmt.Fprintf(stdout, "карта книг графа: записано %d\n", n)
+	}
 	if err != nil {
 		return err
 	}
@@ -2212,7 +2222,7 @@ func share(part, whole int) float64 {
 // Команда осторожна нарочно: реестр — это недели работы видеокарты. Прежний
 // файл остаётся рядом, а подмена происходит только если словари поиска обоих
 // реестров совпали до последнего ключа.
-func Compact(stdout io.Writer, cfg *config.Config, name string, check, force bool) error {
+func Compact(stdout io.Writer, cfg *config.Config, name string, check, force, dropDead bool) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -2231,8 +2241,24 @@ func Compact(stdout io.Writer, cfg *config.Config, name string, check, force boo
 		}
 		defer unmark()
 	}
+	// Мёртвые понятия ищутся по открытому графу (упоминания, связи, склейки),
+	// а само уплотнение работает с файлом реестра — граф к тому моменту закрыт.
+	var drop map[uint32]bool
+	if dropDead {
+		g, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules())
+		if err != nil {
+			return err
+		}
+		dead := g.DeadEntities()
+		g.Close()
+		drop = make(map[uint32]bool, len(dead))
+		for _, id := range dead {
+			drop[id] = true
+		}
+		fmt.Fprintf(stdout, "мёртвых понятий (ни упоминаний, ни связей, ни склеек): %d\n", len(dead))
+	}
 	fmt.Fprintf(stdout, "коллекция %s: читаю реестр понятий, сличаю словари — это минута-две…\n", name)
-	st, err := graph.Compact(coll.Dir(), cfg.Graph.Name, check, force)
+	st, err := graph.CompactDrop(coll.Dir(), cfg.Graph.Name, check, force, drop)
 	if err != nil {
 		return err
 	}
@@ -2254,6 +2280,13 @@ func Compact(stdout io.Writer, cfg *config.Config, name string, check, force boo
 		}
 	}
 
+	if dropDead {
+		verb := "выброшено"
+		if check {
+			verb = "было бы выброшено"
+		}
+		fmt.Fprintf(stdout, "мёртвых понятий %s: %d (номера не перенумеровываются, места остаются пустыми)\n", verb, st.Dropped)
+	}
 	switch {
 	case st.Applied:
 		fmt.Fprintf(stdout, "реестр уплотнён. Прежний файл: %s\n", st.Backup)
@@ -2508,6 +2541,82 @@ func markWork(g *graph.Graph, what string) (func(), error) {
 		return nil, fmt.Errorf("%s: %w", what, err)
 	}
 	return unmark, nil
+}
+
+// knownBooks — живые книги коллекции с хешами, как их помнит граф.
+func knownBooks(coll *kb.Collection) []graph.KnownBook {
+	var out []graph.KnownBook
+	for _, b := range coll.MatchingDocs(kb.ChunkFilter{}) {
+		if b.Hash == "" {
+			continue
+		}
+		out = append(out, graph.KnownBook{ID: b.ID, Hash: b.Hash, Name: filepath.Base(b.Path), Chunks: b.Chunks})
+	}
+	return out
+}
+
+// RebaseBooks — перенос графа на новую нумерацию книг коллекции по хешам
+// содержимого (`--graph-rebase-books`); record — только записать карту.
+func RebaseBooks(stdout io.Writer, cfg *config.Config, name string, record, dry bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	dir := cfg.Graph.Rules().Dir(coll.Dir())
+	books := knownBooks(coll)
+	all := coll.MatchingDocs(kb.ChunkFilter{})
+	if len(books) < len(all) {
+		fmt.Fprintf(stdout, "книг без хеша содержимого: %d из %d — проставьте: ollchat --kb-hash %s\n",
+			len(all)-len(books), len(all), name)
+	}
+	if record {
+		n, err := graph.RecordBooks(dir, books)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "карта книг графа: записей добавлено или обновлено %d (книг с хешем %d)\n", n, len(books))
+		return nil
+	}
+	if !dry {
+		unmark, err := graph.MarkWork(dir, "перенос номеров книг")
+		if err != nil {
+			return err
+		}
+		defer unmark()
+	}
+	st, err := graph.RebaseBooks(dir, books, dry)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "карта книг графа: %d книг; на тех же номерах %d, переехало %d, в коллекции больше нет %d, перечитано с другой нарезкой %d (не переносятся)\n",
+		st.Mapped, st.Same, st.Moved, st.Unknown, st.Reread)
+	for i, mv := range st.SortedMoves() {
+		if i >= 40 {
+			fmt.Fprintf(stdout, "  …и ещё %d\n", st.Moved-40)
+			break
+		}
+		fmt.Fprintf(stdout, "  %d → %d\n", mv[0], mv[1])
+	}
+	switch {
+	case st.Collision != "":
+		fmt.Fprintf(stdout, "ПЕРЕНОС НЕВОЗМОЖЕН: %s — разберитесь с коллекцией, граф не тронут\n", st.Collision)
+	case st.Moved == 0:
+		fmt.Fprintln(stdout, "переносить нечего: нумерация книг графа совпадает с коллекцией")
+	case dry:
+		fmt.Fprintln(stdout, "сухой прогон: ничего не записано")
+	case st.Applied:
+		for f, n := range st.Files {
+			fmt.Fprintf(stdout, "  %s: записей переписано %d\n", f, n)
+		}
+		fmt.Fprintf(stdout, "перенесено; прежние файлы: %d копий .bak-… рядом с графом\n", len(st.Backups))
+		fmt.Fprintf(stdout, "дальше: ollchat --graph-doctor %s\n", name)
+	}
+	return nil
 }
 
 // EmbedStale — пересчитать векторы понятий, чей текст изменился после счёта.

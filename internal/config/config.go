@@ -783,6 +783,10 @@ type Graph struct {
 	// по графу. 0 — умолчание (3). Замер 03.09.2026: понятие «ИИ» лежало
 	// в указателе под основой «и» и приходило в 60 вопросов из 60.
 	StemMinLen int `toml:"stem_min_len"`
+	// SharedAliasLimit — синоним, стоящий у стольких и более понятий, ключом
+	// реестра не служит: «api» у 138 понятий не должно вести все упоминания
+	// «API» в одно из них. 0 — умолчание (3), -1 — выключить.
+	SharedAliasLimit int `toml:"shared_alias_limit"`
 
 	// StemMinBooks — сколько книг должно знать понятие, чтобы оно годилось
 	// в ответ на совпадение по ОСНОВЕ слова (догадка о форме). 0 — умолчание (2).
@@ -1647,6 +1651,7 @@ func (g Graph) Rules() graph.Rules {
 	return graph.Rules{
 		Name:             g.Name,
 		StemMinLen:       g.StemMinLen,
+		SharedAliasLimit: g.SharedAliasLimit,
 		StemMinBooks:     g.StemMinBooks,
 		EntryStopWords:   g.EntryStopWords,
 		SenseTie:         g.SenseTie,

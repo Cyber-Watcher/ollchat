@@ -116,6 +116,21 @@ type Entities struct {
 	// с арбитром и с обратным ходом, а не сборка вслепую.
 	strictKeys bool
 
+	// sharedLimit — синоним, стоящий у стольких (и более) понятий, ключом
+	// не служит; ноль — правило выключено. Rules.SharedAliasLimit.
+	//
+	// Перепись 18.09.2026 (`privatescripts/sharedalias.py`): 7 836 синонимов
+	// принадлежат трём и более понятиям, «api» — 138, «pipeline» — 72,
+	// «канал» — 18. Ключ достаётся одному владельцу по правилу владения,
+	// и каждое упоминание «api» в книгах уходит в это одно понятие — воронка
+	// того же рода, что ложный синоним (aliasdeny.go), только не ложный,
+	// а общий. Собственное имя ключом остаётся всегда: «API» найдётся,
+	// если есть понятие «API».
+	sharedLimit int
+	// aliasOwners — сколько понятий несут синоним-ключ (по нормализованному
+	// написанию); считается по последней записи каждого понятия.
+	aliasOwners map[string]int
+
 	// deny — запрещённые синонимы по понятиям (см. aliasdeny.go): читается
 	// из журнала рядом с реестром при каждой загрузке. extraDeny — запреты,
 	// которых в журнале ещё нет: ими DenyAliases считает последствия до записи.
@@ -145,7 +160,13 @@ func openEntities(dir string, stemMinLen int) (*Entities, error) {
 
 // strictKeys — правило формата 2: аббревиатура ключом не служит (см. put).
 func openEntitiesWith(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool) (*Entities, error) {
+	return openEntitiesShared(dir, stemMinLen, cb, strictKeys, 0)
+}
+
+// openEntitiesShared — то же с правилом общего синонима (sharedLimit).
+func openEntitiesShared(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool, sharedLimit int) (*Entities, error) {
 	e := &Entities{path: filepath.Join(dir, entitiesFile), stemMinLen: stemMinLen, strictKeys: strictKeys,
+		sharedLimit: sharedLimit, aliasOwners: map[string]int{},
 		byKey: map[string]uint32{}, byStem: map[string]uint32{}}
 	if err := e.load(cb); err != nil {
 		return nil, err
@@ -239,9 +260,32 @@ func (e *Entities) put(ent Entity) {
 	for uint32(len(e.list)) < ent.ID {
 		e.list = append(e.list, Entity{})
 	}
+	// Счёт владельцев синонима ведётся по последней записи понятия: прежние
+	// синонимы этого же понятия из счёта уходят, нынешние приходят.
+	if e.sharedLimit > 0 {
+		for _, k := range e.aliasKeys(e.list[ent.ID-1]) {
+			e.aliasOwners[k]--
+		}
+	}
 	e.list[ent.ID-1] = ent
 	e.claimKey(ent.Norm, ent.ID)
 	e.putStem(ent.Norm, ent.ID)
+	for _, k := range e.aliasKeys(ent) {
+		if e.sharedLimit > 0 {
+			e.aliasOwners[k]++
+			if e.aliasOwners[k] >= e.sharedLimit {
+				e.dropSharedKey(k)
+				continue
+			}
+		}
+		e.claimKey(k, ent.ID)
+		e.putStem(k, ent.ID)
+	}
+}
+
+// aliasKeys — синонимы понятия, годные в ключи, нормализованными.
+func (e *Entities) aliasKeys(ent Entity) []string {
+	out := make([]string, 0, len(ent.Aliases))
 	for _, a := range ent.Aliases {
 		k := Normalize(a)
 		if k == "" || !usableAlias(ent.Norm, k) {
@@ -250,8 +294,16 @@ func (e *Entities) put(ent Entity) {
 		if e.strictKeys && isAcronymPair(ent.Norm, k) {
 			continue
 		}
-		e.claimKey(k, ent.ID)
-		e.putStem(k, ent.ID)
+		out = append(out, k)
+	}
+	return out
+}
+
+// dropSharedKey снимает ключ общего синонима, если он держится за синоним,
+// а не за собственное имя владельца.
+func (e *Entities) dropSharedKey(k string) {
+	if cur, ok := e.byKey[k]; ok && e.rawAt(cur).Norm != k {
+		delete(e.byKey, k)
 	}
 }
 
@@ -271,6 +323,11 @@ func (e *Entities) put(ent Entity) {
 // записей в файле, ни от того, сколько раз запись переписывалась. Это и делает
 // уплотнение реестра (см. compact.go) тождественным по построению.
 func (e *Entities) claimKey(key string, id uint32) {
+	// Общий синоним (sharedLimit владельцев и больше) ключом не берётся —
+	// кроме случая, когда это собственное имя претендента.
+	if e.sharedLimit > 0 && e.aliasOwners[key] >= e.sharedLimit && e.rawAt(id).Norm != key {
+		return
+	}
 	cur, taken := e.byKey[key]
 	if !taken || e.strongerName(key, id, cur) {
 		e.byKey[key] = id

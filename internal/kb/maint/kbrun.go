@@ -805,6 +805,36 @@ func Years(stdout io.Writer, cfg *config.Config, name string, force bool) error 
 	return nil
 }
 
+// Hashes проставляет книгам хеш содержимого — ядро `--kb-hash`.
+func Hashes(stdout io.Writer, cfg *config.Config, name string, force bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	started := time.Now()
+	res, err := coll.RefreshHashes(ctx, force, func(p kb.HashProgress) {
+		fmt.Fprintf(os.Stderr, "\r\033[K%d/%d книг · проставлено %d · пропущено %d · не прочитано %d · %s",
+			p.Done, p.Total, p.Set, p.Skipped, p.Failed, textx.Shorten(p.Book, 40+1))
+	})
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "коллекция %s: хеш проставлен %d книгам из %d за %s (пропущено %d, не прочитано %d)\n",
+		name, res.Set, res.Total, time.Since(started).Round(time.Second), res.Skipped, res.Failed)
+	if res.Failed > 0 {
+		fmt.Fprintln(stdout, "  не прочитанные книги — пропали с диска или недоступны: --kb-doctor покажет какие")
+	}
+	return nil
+}
+
 // FlagTOC ставит признак оглавления кускам уже проиндексированных книг
 // (этап 99): без перенарезки, переписывается только поле признаков индекса.
 func FlagTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) error {

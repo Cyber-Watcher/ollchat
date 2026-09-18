@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -84,5 +85,50 @@ func TestDenyAliasesRejectsTypos(t *testing.T) {
 	}
 	if deny := loadAliasDeny(dir); len(deny) != 0 {
 		t.Fatalf("отказ оставил записи в журнале: %v", deny)
+	}
+}
+
+// Общий синоним — у трёх и более понятий — ключом реестра не служит (этап 104,
+// Ж1.7): иначе имя «api» из ответа модели уходило бы в одно из 138 понятий,
+// у которых «api» стоит синонимом. Собственное имя ключом остаётся.
+func TestSharedAliasIsNotAKey(t *testing.T) {
+	g, err := Create(t.TempDir(), "проба", 100, Rules{SharedAliasLimit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	a, _, _ := g.Entities().Add("Kubernetes API", TypeTech, "api")
+	b, _, _ := g.Entities().Add("REST API", TypeTech, "api")
+	if id, ok := g.Entities().Lookup("api"); !ok || (id.ID != a && id.ID != b) {
+		t.Fatalf("у двух владельцев синоним ещё ключ: %v %v", id, ok)
+	}
+	g.Entities().Add("OpenAI API", TypeTech, "api")
+	if id, ok := g.Entities().Lookup("api"); ok {
+		t.Fatalf("синоним трёх понятий остался ключом и ведёт к %q", id.Name)
+	}
+	// Собственное имя — ключ при любом числе чужих синонимов.
+	own, _, _ := g.Entities().Add("API", TypeTech)
+	if id, ok := g.Entities().Lookup("api"); !ok || id.ID != own {
+		t.Fatalf("собственное имя «API» не находится: %v %v", id, ok)
+	}
+	// Правило переживает повторное открытие: счёт владельцев считается при загрузке.
+	dir := g.dir
+	g.Close()
+	g2, err := Open(filepath.Dir(dir), 100, Rules{SharedAliasLimit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	if id, ok := g2.Entities().Lookup("api"); !ok || id.ID != own {
+		t.Fatalf("после открытия ключ «api» у %v (%v), ожидалось собственное имя", id, ok)
+	}
+	// Выключатель: с -1 прежнее поведение — синоним ключ.
+	g3, err := Open(filepath.Dir(dir), 100, Rules{SharedAliasLimit: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g3.Close()
+	if _, ok := g3.Entities().Lookup("api"); !ok {
+		t.Fatal("с выключенным правилом синоним должен остаться ключом")
 	}
 }

@@ -301,6 +301,9 @@ func (r *Report) GPUUtil() int {
 // а тест проверял выдуманный формат.
 var apiRequest = regexp.MustCompile(`POST\s+"?/api/`)
 
+// oomWord — «oom» целым словом: подстрока совпадала с bloom и room (аудит, Б17).
+var oomWord = regexp.MustCompile(`(^|[^a-z])oom([^a-z]|$)`)
+
 // Snapshot снимает состояние машины по указанным разделам.
 //
 // Ошибки не возвращаются: снимок — это то, что удалось увидеть, а неудача
@@ -428,7 +431,7 @@ func journalKind(line string) string {
 		return "parallel"
 	case strings.Contains(low, "cuda error"), strings.Contains(low, "cudamalloc"):
 		return "cuda"
-	case strings.Contains(low, "out of memory"), strings.Contains(low, "oom"):
+	case strings.Contains(low, "out of memory"), oomWord.MatchString(low):
 		return "oom"
 	case strings.Contains(low, "unloading model"), strings.Contains(low, "evicting"):
 		return "unload"

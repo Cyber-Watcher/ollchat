@@ -220,6 +220,7 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 type candidate struct {
 	path string
 	info os.FileInfo
+	hash string // sha256 содержимого, если уже посчитан (поиск повторов)
 }
 
 // collect обходит пути и отбирает то, что стоит индексировать.
@@ -372,6 +373,7 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 		rec := BookRec{
 			Path: p.cand.path, Size: p.cand.info.Size(),
 			ModTime: p.cand.info.ModTime().UnixNano(), At: time.Now().Unix(),
+			Hash: p.cand.hash,
 		}
 		switch {
 		case p.err != nil:

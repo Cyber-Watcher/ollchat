@@ -29,8 +29,6 @@ func Doctor(stdout io.Writer, cfg *config.Config, name string) error {
 	return DoctorTo(stdout, os.Stderr, cfg, name)
 }
 
-// DoctorTo — то же с явным стоком для хода работы: интерфейсу, который рисует
-// экран сам, нужен io.Discard, иначе строки хода лягут поверх ленты.
 // Числа выборки провенанса. Три тысячи — замер 16.09.2026: секунды чтения,
 // и одна битая ссылка на тысячу дала бы в выборке три. Зерно постоянное,
 // чтобы два запуска доктора подряд давали одни числа и разница означала
@@ -40,6 +38,8 @@ const (
 	provenanceSeed   = 20260916
 )
 
+// DoctorTo — то же с явным стоком для хода работы: интерфейсу, который рисует
+// экран сам, нужен io.Discard, иначе строки хода лягут поверх ленты.
 func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
@@ -134,6 +134,23 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	}
 	if p := g.Descriptions().Problem(); p != "" {
 		fmt.Fprintf(stdout, "  описания понятий: %s\n", p)
+	}
+	// Карта книг: переживёт ли граф переиндексацию коллекции.
+	books := knownBooks(coll)
+	if mapped, same, moved, unknown, err := graph.BookMapReport(g.Dir(), books); err != nil {
+		fmt.Fprintf(stdout, "  карта книг графа: НЕТ (%v) — граф не переживёт переиндексацию коллекции; записать: --graph-record-books\n",
+			err)
+	} else {
+		fmt.Fprintf(stdout, "  карта книг графа: %d книг, на своих номерах %d, переехало %d, в коллекции больше нет %d",
+			mapped, same, moved, unknown)
+		if moved > 0 {
+			fmt.Fprintf(stdout, " — НУМЕРАЦИЯ СМЕНИЛАСЬ: ollchat --graph-rebase-books %s --kb-dry-run", name)
+		}
+		fmt.Fprintln(stdout)
+	}
+	if all := coll.MatchingDocs(kb.ChunkFilter{}); len(books) < len(all) {
+		fmt.Fprintf(stdout, "  книг без хеша содержимого: %d из %d — ollchat --kb-hash %s (карта книг без них неполна)\n",
+			len(all)-len(books), len(all), name)
 	}
 
 	// 3. Векторы кусков самой коллекции.

@@ -22,8 +22,11 @@ type Rules struct {
 	Name string
 
 	// Словесный вход: длина основы и число книг, см. DefaultStemMinLen.
-	StemMinLen   int
-	StemMinBooks int
+	StemMinLen int
+	// SharedAliasLimit — синоним у стольких и более понятий ключом не служит
+	// (этап 104, Ж1.7); 0 — умолчание, отрицательное — выключить.
+	SharedAliasLimit int
+	StemMinBooks     int
 
 	// EntryStopWords — слова, которые сами по себе входом в граф не бывают,
 	// см. DefaultEntryStopWords. nil — умолчание; пустой список — правило
@@ -130,6 +133,12 @@ func (r Rules) Normalized() Rules { return r.norm() }
 func (r Rules) norm() Rules {
 	if r.StemMinLen <= 0 {
 		r.StemMinLen = DefaultStemMinLen
+	}
+	switch {
+	case r.SharedAliasLimit == 0:
+		r.SharedAliasLimit = DefaultSharedAliasLimit
+	case r.SharedAliasLimit < 0:
+		r.SharedAliasLimit = 0 // выключено
 	}
 	if r.EntryStopWords == nil {
 		r.EntryStopWords = DefaultEntryStopWords

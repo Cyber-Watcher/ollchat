@@ -565,7 +565,7 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 			cb(OpenProgress{Stage: stage})
 		}
 	}
-	if g.ents, err = openEntitiesWith(dir, g.rules.StemMinLen, cb, m.Version >= FormatV2); err != nil {
+	if g.ents, err = openEntitiesShared(dir, g.rules.StemMinLen, cb, m.Version >= FormatV2, g.rules.SharedAliasLimit); err != nil {
 		return nil, err
 	}
 	step("упоминания")

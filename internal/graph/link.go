@@ -123,6 +123,11 @@ func openLinks(dir string) (*Links, error) {
 		}
 		l.apply(r)
 	}
+	if err := sc.Err(); err != nil {
+		// Строка длиннее мегабайта или сбой диска: молча оборванный журнал
+		// вернул бы очередь человеку короче, чем она есть (аудит, Б17).
+		return nil, fmt.Errorf("%s: %w", linksFile, err)
+	}
 	return l, nil
 }
 
