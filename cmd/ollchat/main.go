@@ -719,11 +719,7 @@ func run() error {
 		return nil
 	}
 
-	path := *f.cfgPath
-	if path == "" {
-		path = config.DefaultPath()
-	}
-	path = config.ExpandPath(path)
+	path := configPath(*f.cfgPath, os.Getenv("OLLCHAT_CONFIG"))
 
 	if *f.initConfig {
 		if err := config.WriteTemplate(path); err != nil {
@@ -1045,4 +1041,19 @@ func usage() {
   ollchat --kb-doctor go                проверка: пропавшие книги, сканы, повторы
   ollchat --kb-doctor all --kb-quick    то же по всем коллекциям, без сверки содержимого
 `)
+}
+
+// configPath — путь к настройкам: ключ -c, иначе переменная OLLCHAT_CONFIG,
+// иначе умолчание. Переменная нужна обвязке графа: её скрипты зовут ./ollchat
+// десятками команд без ключей, и опытный граф на своей коллекции ведётся
+// отдельным файлом настроек, не трогая настроек владельца (18.09.2026).
+func configPath(flagValue, envValue string) string {
+	path := flagValue
+	if path == "" {
+		path = envValue
+	}
+	if path == "" {
+		path = config.DefaultPath()
+	}
+	return config.ExpandPath(path)
 }

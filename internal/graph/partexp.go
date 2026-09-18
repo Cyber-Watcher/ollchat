@@ -30,6 +30,18 @@ type PartitionExperiment struct {
 
 	// Assign — понятие → номер сообщества; только при KeepAssignment.
 	Assign map[uint32]uint32
+
+	// Modularity — модулярность разметки (с тем же γ); у Лейдена — нижнего
+	// уровня, ModularityTop — верхнего (с ним и сравнивать Лувен: нижний
+	// уровень мельче по построению). Disconnected — сколько тем несвязны
+	// внутри себя (Лейден обещает ноль, Лувен — не обещает).
+	Modularity    float64
+	ModularityTop float64
+	Disconnected  int
+	// LevelThemes — тем на каждом уровне иерархии Лейдена, снизу вверх;
+	// у Лувена — один уровень. Levels — разметки по уровням при KeepAssignment.
+	LevelThemes []int
+	Levels      []map[uint32]uint32
 }
 
 // PartitionOpts — условия опыта с разбиением.
@@ -61,6 +73,10 @@ type PartitionOpts struct {
 	// KeepAssignment — вернуть разбиение по узлам (Assign), а не только размеры:
 	// нужно, чтобы сравнить опытное разбиение с рабочим по составу тем.
 	KeepAssignment bool
+
+	// Leiden — разбивать Лейденом (leiden.go) вместо Лувена: уточнение даёт
+	// связные темы и иерархию уровней; сравнение — этап 90, третий граф.
+	Leiden bool
 
 	// OnceFactor — множитель веса для пар, подтверждённых ровно один раз:
 	// мягкая замена порогу. 0 — не трогать.
@@ -158,7 +174,26 @@ func (g *Graph) ExperimentPartition(o PartitionOpts) PartitionExperiment {
 	if resolution <= 0 {
 		resolution = DefaultResolution
 	}
-	comm := louvain(adj, order, resolution)
+	var comm map[uint32]uint32
+	if o.Leiden {
+		lr := leiden(adj, order, resolution)
+		comm = lr.Bottom
+		out.Modularity = modularity(adj, order, lr.Bottom, resolution)
+		out.ModularityTop = lr.Modularity
+		for lvl := 0; lvl < lr.Levels(); lvl++ {
+			at := lr.At(lvl)
+			out.LevelThemes = append(out.LevelThemes, distinctCount(at))
+			if o.KeepAssignment {
+				out.Levels = append(out.Levels, at)
+			}
+		}
+	} else {
+		comm = louvain(adj, order, resolution)
+		out.Modularity = modularity(adj, order, comm, resolution)
+		out.ModularityTop = out.Modularity
+		out.LevelThemes = []int{distinctCount(comm)}
+	}
+	out.Disconnected = disconnectedCommunities(adj, order, comm)
 
 	sizes := map[uint32]int{}
 	for _, c := range comm {
@@ -239,4 +274,13 @@ func weakenOnce(adj map[uint32]map[uint32]float64, conf map[uint32]map[uint32]in
 		}
 	}
 	return n
+}
+
+// distinctCount — сколько разных сообществ в разметке.
+func distinctCount(m map[uint32]uint32) int {
+	seen := make(map[uint32]bool, len(m))
+	for _, c := range m {
+		seen[c] = true
+	}
+	return len(seen)
 }

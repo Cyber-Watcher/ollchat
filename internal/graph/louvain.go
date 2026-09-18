@@ -38,27 +38,44 @@ import "sort"
 // слипается всё, что упоминалось рядом. Дроблению это не поддаётся,
 // разрешению — поддаётся.
 func louvain(adj map[uint32]map[uint32]float64, order []uint32, resolution float64) map[uint32]uint32 {
+	comm := make(map[uint32]uint32, len(order))
+	for _, id := range order {
+		comm[id] = id
+	}
+	moveNodes(adj, order, resolution, comm)
+	return renumber(comm, order)
+}
+
+// moveNodes — фаза локальных перемещений: начиная с разметки comm, узлы
+// по очереди перекладываются в соседнее сообщество с наибольшим приростом
+// модулярности, пока хоть что-то двигается. Правит comm на месте и сообщает,
+// сдвинулся ли хоть один узел. Общая для Лувена (старт с одиночек) и Лейдена
+// (старт с разметки предыдущего уровня, см. leiden.go).
+//
+// Петля узла (adj[id][id], у свёрнутого графа Лейдена) в вес связей
+// с сообществом не входит: она остаётся при узле, куда бы он ни переехал,
+// и учитывать её значило бы без причины удерживать узел на месте.
+func moveNodes(adj map[uint32]map[uint32]float64, order []uint32, resolution float64, comm map[uint32]uint32) bool {
 	if resolution <= 0 {
 		resolution = 1
 	}
-	comm := make(map[uint32]uint32, len(order))
 	degree := make(map[uint32]float64, len(order))
 	var m2 float64 // удвоенный вес всех связей
 	for _, id := range order {
-		comm[id] = id
 		for _, w := range adj[id] {
 			degree[id] += w
 			m2 += w
 		}
 	}
 	if m2 == 0 {
-		return comm
+		return false
 	}
 
 	sumTot := make(map[uint32]float64, len(order))
 	for _, id := range order {
-		sumTot[id] = degree[id]
+		sumTot[comm[id]] += degree[id]
 	}
+	movedAny := false
 
 	// Проходов немного: разбиение устаканивается за единицы итераций,
 	// а предел спасает от бесконечного качания на симметричных графах.
@@ -72,6 +89,9 @@ func louvain(adj map[uint32]map[uint32]float64, order []uint32, resolution float
 			// Вес связей узла с каждым соседним сообществом.
 			toComm := map[uint32]float64{}
 			for nb, w := range adj[id] {
+				if nb == id {
+					continue
+				}
 				toComm[comm[nb]] += w
 			}
 
@@ -94,13 +114,14 @@ func louvain(adj map[uint32]map[uint32]float64, order []uint32, resolution float
 			if best != cur {
 				comm[id] = best
 				moved = true
+				movedAny = true
 			}
 		}
 		if !moved {
 			break
 		}
 	}
-	return renumber(comm, order)
+	return movedAny
 }
 
 // renumber перенумеровывает сообщества подряд, в порядке первого появления

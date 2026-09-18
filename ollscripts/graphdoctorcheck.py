@@ -5,12 +5,19 @@
 # Смысл: доктор — это суждение о состоянии, и верить ему на слово нельзя.
 # Если два независимых счёта расходятся, виноват один из них, и это надо знать.
 #
-#   ollscripts/graphdoctorcheck.py [коллекция]
+#   ollscripts/graphdoctorcheck.py [коллекция] [имя графа]
+# Второй аргумент — именованный граф рядом с рабочим (lab → каталог graph-lab).
 import json, pathlib, struct, sys, collections
 
 name = sys.argv[1] if len(sys.argv) > 1 else "books"
+gname = sys.argv[2] if len(sys.argv) > 2 else ""
 base = pathlib.Path.home()/".local/share/ollchat/kb/collections"/name
-gdir = base/"graph"
+gdir = base/("graph-" + gname if gname else "graph")
+if not gname and not gdir.exists():
+    # У коллекции только именованный граф (lab → graph-lab): берём его, если он один.
+    named = sorted(base.glob("graph-*"))
+    if len(named) == 1:
+        gdir = named[0]
 
 # --- понятия: живые номера и их число -----------------------------------------
 ents, merged, broken = {}, set(), 0
