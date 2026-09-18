@@ -98,6 +98,11 @@ type Part struct {
 	Number int    // номер страницы или раздела, начиная с 1
 	Title  string // заголовок раздела; у PDF пусто
 	Text   string
+	// Service — раздел служебный: оглавление или указатель книги EPUB
+	// (epub.Section.Service). Нарезка помечает его куски служебными:
+	// в оглавлении EPUB нет номеров страниц, и по строению куска его
+	// не отличить от списка (18.09.2026).
+	Service bool
 }
 
 // Image — картинка из документа.
@@ -241,7 +246,7 @@ func Parts(path string, maxBytes int64) (*Doc, []Part, error) {
 		}
 		parts := make([]Part, 0, len(res.Sections))
 		for _, sec := range res.Sections {
-			parts = append(parts, Part{Number: sec.Number, Title: sec.Title, Text: sec.Text})
+			parts = append(parts, Part{Number: sec.Number, Title: sec.Title, Text: sec.Text, Service: sec.Service})
 		}
 		d := &Doc{
 			Kind: KindEPUB, Title: res.Title, Author: res.Author,
@@ -251,6 +256,31 @@ func Parts(path string, maxBytes int64) (*Doc, []Part, error) {
 		return d, parts, nil
 	}
 	return nil, nil, errors.New("формат файла не распознан")
+}
+
+// ServiceUnits — номера служебных единиц документа: у книги EPUB это разделы
+// с оглавлением и указателем (epub.Section.Service). У PDF и текстовых файлов
+// таких нет: там оглавление узнаётся по строению куска при нарезке.
+// Нужен проходу по уже проиндексированным книгам, где разделы не помечены.
+func ServiceUnits(path string, maxBytes int64) ([]int, error) {
+	kind, data, err := load(path, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if kind != KindEPUB {
+		return nil, nil
+	}
+	res, err := epub.Extract(data, epub.Options{})
+	if err != nil {
+		return nil, describe(err)
+	}
+	var out []int
+	for _, sec := range res.Sections {
+		if sec.Service {
+			out = append(out, sec.Number)
+		}
+	}
+	return out, nil
 }
 
 // Probe быстро определяет, годится ли документ для чтения: формат, метаданные

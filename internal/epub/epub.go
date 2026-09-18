@@ -36,6 +36,17 @@ type Section struct {
 	Number int
 	Title  string
 	Text   string
+	// Href — путь файла главы внутри архива: по нему видно, что глава —
+	// оглавление («toc.xhtml») или указатель («index.xhtml»), когда
+	// заголовка у неё нет.
+	Href string
+	// Nav — глава объявлена в манифесте навигационным документом
+	// (properties="nav"): это оглавление книги, а не её текст.
+	Nav bool
+	// Service — глава служебная: оглавление или предметный указатель
+	// (serviceSection). Такую главу читают по прямой ссылке, но в поиск
+	// и в граф она не идёт.
+	Service bool
 }
 
 // Result — итог извлечения.
@@ -174,7 +185,7 @@ func Extract(data []byte, opt Options) (res *Result, err error) {
 		href := pkg.spine[i]
 		raw, err := b.read(href)
 		if err != nil {
-			res.Sections = append(res.Sections, Section{Number: i + 1})
+			res.Sections = append(res.Sections, Section{Number: i + 1, Href: href})
 			continue
 		}
 		doc := parseHTML(raw, i+1)
@@ -185,7 +196,11 @@ func Extract(data []byte, opt Options) (res *Result, err error) {
 		if title == "" {
 			title = pkg.titles[href]
 		}
-		res.Sections = append(res.Sections, Section{Number: i + 1, Title: title, Text: doc.text})
+		nav := href == pkg.nav
+		res.Sections = append(res.Sections, Section{
+			Number: i + 1, Title: title, Text: doc.text, Href: href, Nav: nav,
+			Service: serviceSection(href, title, doc.text, nav),
+		})
 	}
 	if nonEmpty == 0 {
 		return nil, ErrNoText

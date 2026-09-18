@@ -27,6 +27,7 @@ type pkgInfo struct {
 	spine  []string          // пути к главам в порядке чтения
 	titles map[string]string // путь главы → заголовок из оглавления
 	base   string            // каталог, относительно которого считаются пути
+	nav    string            // путь к навигационному документу (properties="nav"); пусто — нет
 }
 
 // readPackage находит и разбирает файл OPF.
@@ -114,6 +115,7 @@ func (b *book) readPackage() (*pkgInfo, error) {
 			ncxHref = href
 		}
 	}
+	info.nav = navHref
 	b.readTOC(info, navHref, ncxHref)
 	return info, nil
 }

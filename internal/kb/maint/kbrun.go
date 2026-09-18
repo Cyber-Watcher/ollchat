@@ -850,7 +850,8 @@ func FlagTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) error 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	started := time.Now()
-	res, err := coll.FlagTOC(ctx, dry, func(done, total int) {
+	maxBytes := int64(cfg.KB.MaxBookMB) * 1024 * 1024
+	res, err := coll.FlagTOC(ctx, maxBytes, dry, func(done, total int) {
 		fmt.Fprintf(os.Stderr, "\r\033[K%d/%d кусков", done, total)
 	})
 	fmt.Fprintln(os.Stderr)
@@ -865,6 +866,10 @@ func FlagTOC(stdout io.Writer, cfg *config.Config, name string, dry bool) error 
 		name, res.Total, what, res.Flagged, 100*float64(res.Flagged)/float64(max(res.Total, 1)),
 		res.FlaggedRefs, 100*float64(res.FlaggedRefs)/float64(max(res.Total, 1)),
 		res.Was, res.Changed, time.Since(started).Round(time.Second))
+	if res.EPUBRead+res.EPUBMissing > 0 {
+		fmt.Fprintf(stdout, "  по служебным разделам книг EPUB (оглавление и указатель без номеров страниц): %d кусков; книг прочитано %d, не найдено на диске %d\n",
+			res.FlaggedUnits, res.EPUBRead, res.EPUBMissing)
+	}
 	if res.WorstN > 0 {
 		title := fmt.Sprintf("книга %d", res.WorstDoc)
 		if b, ok := coll.Book(res.WorstDoc); ok && b.Title != "" {

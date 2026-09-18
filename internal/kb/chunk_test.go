@@ -299,3 +299,63 @@ func TestNoOffsetWhenNoPageNumbers(t *testing.T) {
 		t.Fatal("смещение определено там, где номеров страниц нет")
 	}
 }
+
+// Колонтитулы, пережившие нарезку у 8 из 250 PDF (перепись 18.09.2026):
+// растянутые пробелами до 100–130 знаков, стоящие третьими от края под
+// водяным знаком и меткой рисунка, колонтитул главы на 36 страницах книги
+// в 749 страниц (одной меньше двадцатой части). Скобки кода на краях
+// страниц колонтитулом не считаются.
+func TestRunningHeadsStretchedThirdFromEdgeAndRare(t *testing.T) {
+	var parts []document.Part
+	for i := 1; i <= 200; i++ {
+		// Первая глава — 8 страниц из 200 (4 %): при пороге в двадцатую
+		// часть её колонтитул проходил в куски.
+		head := "Chapter 1   Jailbreaking llMs and its seCurity iMpliCations"
+		if i > 8 {
+			head = "Chapter 2   LLM Security Infrastructure"
+		}
+		stretched := fmt.Sprintf("Version: 2023-09-04     |     Licensed under CC BY-NC-ND 4.0.     |     learning.lpi.org                     |     %d", i)
+		text := head + "\n\n" + para(fmt.Sprintf("содержимое страницы %d", i), 500) +
+			"\n{\n" + stretched + "\nMade in Morocco\n[рисунок 1.1: 10×10]"
+		parts = append(parts, page(i, text))
+	}
+	chunks := Split(parts, DefaultChunkOpts())
+	all := ""
+	for _, c := range chunks {
+		all += c.Text + "\n"
+	}
+	for _, bad := range []string{"learning.lpi.org", "Made in Morocco", "seCurity iMpliCations", "LLM Security Infrastructure"} {
+		if strings.Contains(all, bad) {
+			t.Errorf("колонтитул %q попал в куски", bad)
+		}
+	}
+	if !strings.Contains(all, "содержимое страницы") {
+		t.Error("вместе с колонтитулами вырезано содержимое")
+	}
+	if strings.Count(all, "\n{\n") < 100 {
+		t.Errorf("скобка кода на краю страницы вырезана как колонтитул: осталось %d из 200", strings.Count(all, "\n{\n"))
+	}
+	if strings.Count(all, "[рисунок 1.1") < 100 {
+		t.Error("метка рисунка вырезана как колонтитул")
+	}
+}
+
+// Отточие шрифтом без таблицы Unicode приходит знаком замены U+FFFD:
+// такая строка — строка оглавления, а страница из них — оглавление.
+func TestTOCWithReplacementLeaders(t *testing.T) {
+	toc := "Contents\n\n" +
+		"Chapter 1: Teamwork: The Architecture Behind the Architecture ������ 3\n" +
+		"Chapter 2: Choosing a Programming Language ������� 25\n" +
+		"Chapter 3: Introducing Go �������� 51\n" +
+		"Chapter 4: Designing and Deploying LLMs for Enterprise Use����101\n" +
+		"Chapter 5: Security ���������� 140\n"
+	if !LooksLikeTOC(toc) {
+		t.Error("оглавление с отточием U+FFFD не опознано")
+	}
+	parts := []document.Part{page(3, toc), page(4, para("настоящий текст книги", 600))}
+	for _, c := range Split(parts, DefaultChunkOpts()) {
+		if c.UnitFrom == 3 {
+			t.Fatalf("страница оглавления с отточием U+FFFD попала в куски: %.60q", c.Text)
+		}
+	}
+}

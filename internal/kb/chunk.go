@@ -92,15 +92,29 @@ func Split(parts []document.Part, opt ChunkOpts) []Chunk {
 
 	drop := repeatedLines(parts)
 	offset, hasOffset := pageNumberOffset(parts)
+	// Служебный раздел (оглавление или указатель EPUB) пакуется отдельно
+	// от соседей: иначе кусок, начатый в оглавлении и законченный в первой
+	// главе, стал бы служебным целиком и унёс бы начало главы из поиска.
+	var out []Chunk
 	var pieces []piece
+	service := false
+	flush := func() {
+		out = append(out, pack(pieces, opt)...)
+		pieces = pieces[:0]
+	}
 	for _, p := range parts {
+		if p.Service != service && len(pieces) > 0 {
+			flush()
+		}
+		service = p.Service
 		printed := 0
 		if hasOffset {
 			printed = p.Number + offset
 		}
 		pieces = append(pieces, split(p, drop, printed, opt)...)
 	}
-	return pack(pieces, opt)
+	flush()
+	return out
 }
 
 // piece — минимальная неделимая часть: абзац, блок кода или строка таблицы.
@@ -112,7 +126,9 @@ type piece struct {
 }
 
 // tocLine ловит строку оглавления: текст, отточие, номер страницы.
-var tocLine = regexp.MustCompile(`[.·•\x{2024}\x{2027}]{4,}\s*\d+\s*$`)
+// U+FFFD — отточие шрифтом без таблицы Unicode: разбор PDF отдаёт его
+// знаком замены («Chapter 1: Teamwork ���������� 3», перепись 18.09.2026).
+var tocLine = regexp.MustCompile(`[.·•\x{2024}\x{2027}\x{FFFD}]{4,}\s*\d+\s*$`)
 
 // split разбирает одну страницу на неделимые части. printed — печатный номер
 // этой страницы, если его удалось определить; 0 — если нет.
@@ -148,6 +164,9 @@ func split(p document.Part, drop map[string]bool, printed int, opt ChunkOpts) []
 		bufFlags = 0
 		if !worthIndexing(text) {
 			return
+		}
+		if p.Service {
+			f |= FlagTOC // оглавление или указатель EPUB: без номеров страниц LooksLikeTOC его не узнает
 		}
 		out = append(out, piece{text: text, unit: p.Number, flags: f | langFlags(text), runes: len([]rune(text))})
 	}
@@ -363,6 +382,10 @@ func langFlags(text string) ChunkFlags {
 	return f
 }
 
+// RepeatedLines отдаёт колонтитулы книги (нормализованные строки), которые
+// нарезка выбросит: нужен переписям, чтобы мерить ложные срабатывания.
+func RepeatedLines(parts []document.Part) map[string]bool { return repeatedLines(parts) }
+
 // repeatedLines находит колонтитулы: строки, повторяющиеся на многих страницах.
 //
 // Без этого «Chapter 7 | Concurrency» и адрес издательства становятся одними
@@ -372,41 +395,59 @@ func repeatedLines(parts []document.Part) map[string]bool {
 		return nil
 	}
 	count := map[string]int{}
+	chapter := map[string]bool{} // строка вида «Chapter 3 …» — заголовок главы
 	for _, p := range parts {
 		lines := strings.Split(p.Text, "\n")
 		seen := map[string]bool{}
 		// Смотрим только края страницы: колонтитул стоит сверху или снизу.
 		for _, idx := range edgeIndexes(len(lines)) {
-			raw := strings.TrimSpace(lines[idx])
 			// Длинная строка колонтитулом не бывает: там название главы
-			// или адрес сайта, а не абзац.
-			if len([]rune(raw)) > 90 {
+			// или адрес сайта, а не абзац. Длина меряется у нормализованной
+			// строки: раскладка PDF растягивает колонтитул пробелами до
+			// 100–130 знаков («JANUARY 2019 … 1»), и по сырой длине он
+			// проходил в куски (перепись 18.09.2026, 8 книг из 250).
+			l := normalizeLine(lines[idx])
+			if l == "" || tooLongForHead(l) || seen[l] {
 				continue
 			}
-			l := normalizeLine(raw)
-			if l == "" || seen[l] {
-				continue
+			// Строка без единой буквы — скобка кода или тире, а не колонтитул:
+			// «{» и «}» стоят на краях половины страниц любой книги по C#
+			// (перепись 18.09.2026: 383 таких строки в 209 книгах).
+			if !strings.ContainsFunc(l, unicode.IsLetter) || strings.HasPrefix(l, "[рисунок") {
+				continue // и метка рисунка: без номеров они все одинаковы
 			}
 			seen[l] = true
 			count[l]++
+			if chapterHead.MatchString(strings.TrimSpace(lines[idx])) {
+				chapter[l] = true
+			}
 		}
 	}
 	// Порог намеренно низкий. Колонтитул меняется от главы к главе
 	// («Глава 7. Доступ к файлам», «Глава 8. Веб-приложения»), поэтому каждый
 	// отдельный вариант встречается лишь на десятой части страниц книги — при
 	// пороге в треть они все проходили в индекс. Найдено на живой книге.
-	need := len(parts) / 20
+	// Сороковая часть, а не двадцатая: у книги на 749 страниц с двадцатью
+	// главами колонтитул первой главы стоит на 36 страницах — на одну меньше
+	// двадцатой части, и он целиком уходил в куски (перепись 18.09.2026).
+	need := len(parts) / 40
 	if need < 4 {
 		need = 4
 	}
 	out := map[string]bool{}
 	for l, n := range count {
-		if n >= need {
+		// Заголовок главы с номером, повторённый на краю четырёх страниц, —
+		// колонтитул при любой доле: у книги в 900 страниц глава на 20 страниц
+		// не набирает и сороковой части (перепись 18.09.2026).
+		if n >= need || (chapter[l] && n >= 4) {
 			out[l] = true
 		}
 	}
 	return out
 }
+
+// chapterHead — начало строки-заголовка главы: «Chapter 3», «Глава 12.», «Part II».
+var chapterHead = regexp.MustCompile(`(?i)^(chapter|глава|part|часть)\s+(\d+|[ivx]+)\b`)
 
 // pageNumberOffset выясняет, на сколько печатный номер страницы отличается от
 // порядкового: у книг вначале идут титул и оглавление, поэтому «страница 122»
@@ -426,7 +467,7 @@ func pageNumberOffset(parts []document.Part) (int, bool) {
 		lines := strings.Split(p.Text, "\n")
 		for _, idx := range edgeIndexes(len(lines)) {
 			l := strings.TrimSpace(lines[idx])
-			if l == "" || len([]rune(l)) > 90 {
+			if l == "" || tooLongForHead(normalizeLine(l)) {
 				continue
 			}
 			for _, n := range edgeNumbers(l) {
@@ -481,7 +522,7 @@ func atoiSmall(s string) (int, bool) {
 // isRunningHead сообщает, что строка на краю страницы — колонтитул: она коротка
 // и содержит с краю печатный номер этой самой страницы.
 func isRunningHead(line string, printed int) bool {
-	if len([]rune(line)) > 90 {
+	if tooLongForHead(normalizeLine(line)) {
 		return false
 	}
 	for _, n := range edgeNumbers(line) {
@@ -492,18 +533,27 @@ func isRunningHead(line string, printed int) bool {
 	return false
 }
 
+// edgeIndexes — номера строк у краёв страницы: по три сверху и снизу.
+// Три, а не две: под колонтитулом нередко стоят ещё водяной знак и метка
+// рисунка («Made in Morocco», «[рисунок 3.2]»), и колонтитул оказывается
+// третьим от края (перепись 18.09.2026: PEN-200, «C# 9.0. Карманный
+// справочник»). Лишняя строка не вредит: повторяемость всё равно нужна.
 func edgeIndexes(n int) []int {
+	const edge = 3
 	var idx []int
-	for i := 0; i < 2 && i < n; i++ {
+	for i := 0; i < edge && i < n; i++ {
 		idx = append(idx, i)
 	}
-	for i := n - 2; i < n; i++ {
-		if i >= 2 {
+	for i := n - edge; i < n; i++ {
+		if i >= edge {
 			idx = append(idx, i)
 		}
 	}
 	return idx
 }
+
+// tooLongForHead — нормализованная строка длиннее колонтитула.
+func tooLongForHead(normalized string) bool { return len([]rune(normalized)) > 90 }
 
 // normalizeLine убирает из строки номера страниц, чтобы колонтитул опознавался
 // одинаково на всех страницах: «Глава 7 · 154» и «Глава 7 · 155» — одно и то же.

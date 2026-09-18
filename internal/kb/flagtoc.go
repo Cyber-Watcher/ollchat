@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/Cyber-Watcher/ollchat/internal/document"
 	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
@@ -36,6 +37,14 @@ type FlagTOCResult struct {
 	// FlaggedRefs — сколько кусков помечено списком литературы или выходными
 	// данными. В Flagged не входит: тот считает только оглавления.
 	FlaggedRefs int
+
+	// FlaggedUnits — сколько кусков помечено оглавлением по служебному разделу
+	// книги EPUB (document.ServiceUnits), а не по строению текста; входит
+	// в Flagged. EPUBRead — сколько книг EPUB для этого прочитано с диска,
+	// EPUBMissing — сколько не удалось (нет файла): их разделы не помечены.
+	FlaggedUnits int
+	EPUBRead     int
+	EPUBMissing  int
 }
 
 // FlagTOC ставит признаки СЛУЖЕБНОГО текста: оглавление (LooksLikeTOC) и
@@ -43,7 +52,12 @@ type FlagTOCResult struct {
 // этап 101). Снимает их там, где эвристика больше не срабатывает (она может
 // уточняться). dry — только посчитать, файл не трогать. Повторный проход
 // ничего не меняет.
-func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, total int)) (FlagTOCResult, error) {
+//
+// Оглавление и указатель EPUB по строению не узнаются — номеров страниц
+// в них нет, — поэтому книги EPUB перечитываются с диска и их служебные
+// разделы (document.ServiceUnits) дают признак кускам целиком внутри них.
+// maxBytes — предел размера файла (sandbox.max_pdf_mb); 0 — без предела.
+func (c *Collection) FlagTOC(ctx context.Context, maxBytes int64, dry bool, progress func(done, total int)) (FlagTOCResult, error) {
 	var res FlagTOCResult
 	if c.store == nil {
 		return res, fmt.Errorf("коллекция %q без хранилища кусков", c.name)
@@ -54,6 +68,7 @@ func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, 
 		}
 		defer c.unlock()
 	}
+	units := c.serviceUnits(ctx, maxBytes, &res)
 
 	recs := c.store.Recs()
 	res.Total = len(recs)
@@ -85,7 +100,12 @@ func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, 
 			f &^= uint16(FlagTOC | FlagRefs)
 			pd := perDoc[recs[i].Doc]
 			pd[0]++
-			if LooksLikeTOC(texts[i]) {
+			if inServiceUnits(recs[i], units) {
+				f |= uint16(FlagTOC)
+				res.Flagged++
+				res.FlaggedUnits++
+				pd[1]++
+			} else if LooksLikeTOC(texts[i]) {
 				f |= uint16(FlagTOC)
 				res.Flagged++
 				pd[1]++
@@ -128,4 +148,46 @@ func (c *Collection) FlagTOC(ctx context.Context, dry bool, progress func(done, 
 	}
 	c.mu.Unlock()
 	return res, nil
+}
+
+// serviceUnits собирает служебные разделы книг EPUB коллекции: книга → раздел.
+// Книга, которой нет на диске, пропускается и считается в res.EPUBMissing.
+func (c *Collection) serviceUnits(ctx context.Context, maxBytes int64, res *FlagTOCResult) map[uint32]map[uint16]bool {
+	out := map[uint32]map[uint16]bool{}
+	for _, b := range c.LiveBooks() {
+		if b.Format != string(document.KindEPUB) || ctx.Err() != nil {
+			continue
+		}
+		nums, err := document.ServiceUnits(b.Path, maxBytes)
+		if err != nil {
+			res.EPUBMissing++
+			continue
+		}
+		res.EPUBRead++
+		if len(nums) == 0 {
+			continue
+		}
+		set := make(map[uint16]bool, len(nums))
+		for _, n := range nums {
+			set[clampUint16(n)] = true
+		}
+		out[b.ID] = set
+	}
+	return out
+}
+
+// inServiceUnits — лежит ли кусок целиком в служебных разделах книги.
+// Кусок, начатый в оглавлении и законченный в главе (нарезка до 18.09.2026),
+// служебным не считается: с ним ушло бы начало главы.
+func inServiceUnits(r ChunkRec, units map[uint32]map[uint16]bool) bool {
+	set := units[r.Doc]
+	if set == nil {
+		return false
+	}
+	for u := r.UnitFrom; u <= r.UnitTo; u++ {
+		if !set[u] {
+			return false
+		}
+	}
+	return true
 }

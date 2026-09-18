@@ -63,7 +63,7 @@ func TestFlagTOCAtIndexingAndPass(t *testing.T) {
 	}
 
 	// Проход по уже помеченной коллекции: ничего не меняется.
-	res, err := coll.FlagTOC(context.Background(), false, nil)
+	res, err := coll.FlagTOC(context.Background(), 0, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestFlagTOCAtIndexingAndPass(t *testing.T) {
 	for i := range coll.store.recs {
 		coll.store.recs[i].Flags &^= uint16(FlagTOC)
 	}
-	dry, err := coll.FlagTOC(context.Background(), true, nil)
+	dry, err := coll.FlagTOC(context.Background(), 0, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestFlagTOCAtIndexingAndPass(t *testing.T) {
 	if again, _ := os.ReadFile(idx); string(again) != string(raw) {
 		t.Fatal("сухой проход переписал индекс")
 	}
-	wet, err := coll.FlagTOC(context.Background(), false, nil)
+	wet, err := coll.FlagTOC(context.Background(), 0, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -58,18 +58,17 @@ func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, d
 			unknown = append(unknown, k.String())
 		}
 	}
-	// Книга целиком («12#*»): нужна перед перечитыванием книги — её прежние
-	// куски получат статус удалённых, и извлечённое из них обязано уйти из графа.
+	// Книга целиком («12#*»): нужна перед перечитыванием книги и после её
+	// удаления. По живым кускам её не развернуть — у удалённой книги их нет,
+	// а в графе её след остался; поэтому книга сверяется с реестром
+	// коллекции (живые и удалённые), а куски отбираются по номеру книги
+	// прямо в журналах графа.
+	known := map[uint32]bool{}
+	for _, b := range coll.Books() {
+		known[b.ID] = true
+	}
 	for doc := range wholeDocs {
-		found := false
-		if err := coll.EachChunkRef(kb.ChunkFilter{Docs: []uint32{doc}}, func(r kb.ChunkRef) error {
-			found = true
-			keys[graph.ChunkKey{Doc: r.Doc, Ord: r.Ord}.Pack()] = true
-			return nil
-		}); err != nil {
-			return err
-		}
-		if !found {
+		if !known[doc] {
 			unknown = append(unknown, fmt.Sprintf("%d#*", doc))
 		}
 	}
@@ -79,7 +78,7 @@ func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, d
 			shown = shown[:8]
 		}
 		return fmt.Errorf("в коллекции %s нет кусков: %s (всего таких %d из %d) — список не от этой коллекции?",
-			name, strings.Join(shown, ", "), len(unknown), len(keys))
+			name, strings.Join(shown, ", "), len(unknown), len(keys)+len(wholeDocs))
 	}
 
 	dir := cfg.Graph.Rules().Dir(coll.Dir())
@@ -100,7 +99,8 @@ func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, d
 		mark, fate = graph.MarkSkipped, "больше разбираться не будут"
 	}
 	started := time.Now()
-	st, err := graph.ForgetChunksAs(dir, func(k graph.ChunkKey) bool { return keys[k.Pack()] }, mark, dry)
+	drop := func(k graph.ChunkKey) bool { return keys[k.Pack()] || wholeDocs[k.Doc] }
+	st, err := graph.ForgetChunksAs(dir, drop, mark, dry)
 	if err != nil {
 		return err
 	}
@@ -108,8 +108,8 @@ func ForgetList(stdout io.Writer, cfg *config.Config, name, file string, skip, d
 	if dry {
 		what = "было бы убрано"
 	}
-	fmt.Fprintf(stdout, "%s (%s): кусков в списке %d; %s; за %s\n",
-		what, name, len(keys), st, time.Since(started).Round(time.Second))
+	fmt.Fprintf(stdout, "%s (%s): кусков в списке %d, книг целиком %d; %s; за %s\n",
+		what, name, len(keys), len(wholeDocs), st, time.Since(started).Round(time.Second))
 	fmt.Fprintf(stdout, "  судьба кусков: %s\n", fate)
 	for _, b := range st.Backups {
 		fmt.Fprintf(stdout, "  прежний журнал: %s\n", b)

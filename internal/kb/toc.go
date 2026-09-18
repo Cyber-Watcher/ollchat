@@ -54,7 +54,8 @@ func endsWithPageNumber(l string) bool {
 	head := l[:i]
 	switch {
 	case strings.HasSuffix(head, " "), strings.HasSuffix(head, "\t"),
-		strings.HasSuffix(head, "."), strings.HasSuffix(head, "…"):
+		strings.HasSuffix(head, "."), strings.HasSuffix(head, "…"),
+		strings.HasSuffix(head, "\uFFFD"): // отточие шрифтом без Unicode (18.09.2026)
 	default:
 		return false
 	}
