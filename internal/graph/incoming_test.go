@@ -73,3 +73,38 @@ func TestSearchKeepsRelationDirection(t *testing.T) {
 		t.Errorf("подтверждение потеряно: %+v", r.Evidence)
 	}
 }
+
+// Связь между двумя понятиями вопроса печатается один раз, а не дважды —
+// исходящей у одного и входящей у другого (замечено 18.09.2026).
+func TestSearchPrintsRelationBetweenSeedsOnce(t *testing.T) {
+	g, err := Create(t.TempDir(), "проба", 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	gor, _, _ := g.Entities().Add("горутина", "понятие")
+	ch, _, _ := g.Entities().Add("канал", "понятие")
+	mu, _, _ := g.Entities().Add("мьютекс", "понятие")
+	for _, e := range []Edge{
+		{Src: gor, Dst: ch, Type: RelUses, Weight: 1, Evidence: ChunkKey{Doc: 1, Ord: 1}},
+		{Src: gor, Dst: mu, Type: RelUses, Weight: 1, Evidence: ChunkKey{Doc: 1, Ord: 2}},
+	} {
+		if err := g.Edges().Add(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := g.Search("горутина и канал", SearchOpts{TopEntities: 3, TopNeighbors: 5})
+	n := 0
+	for _, r := range res.Relations {
+		if r.Src == "горутина" && r.Dst == "канал" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("связь «горутина → канал» напечатана %d раз, ожидался один: %+v", n, res.Relations)
+	}
+	if len(res.Relations) != 2 {
+		t.Fatalf("связей %d, ожидалось 2 (вторая — с мьютексом): %+v", len(res.Relations), res.Relations)
+	}
+}

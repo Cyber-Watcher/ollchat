@@ -268,6 +268,14 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 			res.Relations = append(res.Relations, rel)
 		}
 	}
+	// Одна связь — одна строка. Когда ОБА конца связи найдены по вопросу, она
+	// собирается дважды: у первого понятия как исходящая, у второго как входящая —
+	// и печатается в настоящую сторону оба раза, то есть двумя одинаковыми
+	// строками. С подъёмом связей между понятиями вопроса (promoteSeeds) обе
+	// копии ещё и вставали первыми, занимая два места из двенадцати. Замечено
+	// 18.09.2026 пробником карты понятий: 5 вопросов из 14 с повторами.
+	res.Relations = uniqueRelations(res.Relations)
+
 	// Связи между найденными понятиями — вперёд, они прямее отвечают на вопрос.
 	sort.SliceStable(res.Relations, func(i, j int) bool {
 		mi := inSeeds[idOf(g, res.Relations[i].Dst)]
@@ -288,6 +296,23 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 		res.Chunks = g.evidence(seeds, opt.TopChunks)
 	}
 	return res
+}
+
+// uniqueRelations оставляет первую из одинаковых связей (те же концы в ту же
+// сторону и тот же тип), порядок сохраняет.
+func uniqueRelations(rels []FoundRelation) []FoundRelation {
+	type key struct{ src, dst, typ string }
+	seen := make(map[key]bool, len(rels))
+	out := rels[:0]
+	for _, r := range rels {
+		k := key{r.Src, r.Dst, r.Type}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, r)
+	}
+	return out
 }
 
 // linkEntities связывает вопрос с понятиями графа.
