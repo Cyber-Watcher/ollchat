@@ -3232,6 +3232,9 @@ ollchat --kb-eval my.toml
 ollchat --kb-eval my.toml --kb-eval-weight 1.5   вес смыслового списка
 ollchat --kb-eval my.toml --kb-eval-only слияние  мерить один режим — втрое быстрее
 ollchat --kb-eval my.toml --kb-eval-rerank        добавить вторую ступень
+ollchat --kb-eval my.toml --kb-eval-expand 3      расширять вопрос именами понятий графа,
+                                                  как делают kb_search и подмешивание
+                                                  (kb.expand_limit; 0 — без расширения)
 ```
 
 Так и выбран нынешний вес слияния: перебором по обоим наборам сразу. Значение 1.5

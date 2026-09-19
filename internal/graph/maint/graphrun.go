@@ -708,6 +708,7 @@ func Communities(stdout io.Writer, cfg *config.Config, name string, fresh bool, 
 		Resolution:      cfg.Graph.Resolution,
 		MaxSize:         cfg.Graph.MaxCommunity,
 		MaxDepth:        cfg.Graph.SplitDepth,
+		Algorithm:       cfg.Graph.Partition,
 		Fresh:           fresh,
 		CarrySimilarity: similarity,
 	})
@@ -1336,6 +1337,7 @@ func Drift(stdout io.Writer, cfg *config.Config, name string, similarity float64
 		MaxSize:    cfg.Graph.MaxCommunity,
 		MaxDepth:   cfg.Graph.SplitDepth,
 		Resolution: cfg.Graph.Resolution,
+		Algorithm:  cfg.Graph.Partition,
 	}
 	d, err := g.DriftOf(comms, opt, similarity)
 	if err != nil {

@@ -125,6 +125,7 @@ type cliFlags struct {
 	kbEvalRerank          *bool
 	kbEvalCands           *int
 	kbEvalSnippet         *bool
+	kbEvalExpand          *int
 	graphEmbedRecount     *bool
 	graphFindings         *string
 	graphFindingsRating   *int
@@ -347,6 +348,8 @@ func parseFlags() *cliFlags {
 		"с --kb-eval: добавить вторую ступень — переранжирование кросс-энкодером")
 	f.kbEvalCands = flag.Int("kb-eval-candidates", 0,
 		"с --kb-eval-rerank: сколько кусков отдавать второй ступени (по умолчанию 40)")
+	f.kbEvalExpand = flag.Int("kb-eval-expand", 0,
+		"с --kb-eval: расширять вопрос именами понятий графа, как делают kb_search и подмес (0 — без расширения, 3 — как в работе)")
 	f.kbEvalSnippet = flag.Bool("kb-eval-snippet", false,
 		"с --kb-eval-rerank: подавать выдержки вместо кусков целиком")
 	f.graphEmbedRecount = flag.Bool("graph-embed-recount", false,
@@ -618,7 +621,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			coll = cfg.KB.Default
 		}
 		return true, kmaint.Eval(os.Stdout, cfg, coll, *f.kbEval, *f.kbEvalK, *f.kbEvalWeight, *f.kbEvalRRFK, *f.kbEvalTable,
-			*f.kbEvalOnly, *f.kbEvalRerank, *f.kbEvalCands, *f.kbEvalSnippet)
+			*f.kbEvalOnly, *f.kbEvalRerank, *f.kbEvalCands, *f.kbEvalSnippet, *f.kbEvalExpand)
 	case *f.graphFindings != "":
 		return true, gmaint.Findings(os.Stdout, cfg, *f.graphFindings, *f.graphFindingsRating,
 			*f.graphFindingsMembers, *f.graphFindingsRedo, *f.graphFindingsDry)
@@ -851,6 +854,7 @@ func run() error {
 	registry, err := tools.NewRegistry(cfg.Agent.Tools, tools.Options{
 		GraphRules:           cfg.Graph.Rules(),
 		KBTableBoost:         cfg.KB.TableBoost,
+		KBExpandLimit:        cfg.KB.ExpandLimitOr(),
 		KBAbstainGap:         cfg.KB.AbstainGap,
 		KBAbstainScore:       cfg.KB.AbstainScore,
 		Live:                 live,

@@ -87,6 +87,12 @@ type Communities struct {
 	// на части (этап 101, Г1). Ноль — Louvain на этот раз собрал всё связно.
 	Split int `json:"split,omitempty"`
 
+	// Algorithm — чем считано разбиение (louvain | leiden); пусто в старых
+	// файлах — Лувен. LeidenLevels — сколько уровней дала лестница Лейдена
+	// (на диск ложатся два: темы и объединения).
+	Algorithm    string `json:"algorithm,omitempty"`
+	LeidenLevels int    `json:"leiden_levels,omitempty"`
+
 	// Carry — что дал перенос описаний с прежнего разбиения. Пусто, если
 	// переносить было не с чего или пересчёт делался начисто.
 	Carry CarryResult `json:"carry,omitempty"`
@@ -178,9 +184,30 @@ type CommunityOpts struct {
 	// Resolution — множитель штрафа за размер сообщества (γ). 0 — единица,
 	// обычная модулярность. Больше единицы — сообщества мельче сразу.
 	Resolution float64
+
+	// Algorithm — чем делить: AlgoLouvain (умолчание, рабочий граф) или
+	// AlgoLeiden (leiden.go: связные темы по построению и лестница уровней;
+	// этап 105, Б6). Нижний уровень у обоих дробится одинаково (MaxSize,
+	// MaxDepth), поэтому темы сравнимы; верхний уровень у Лейдена — его же
+	// второй круг, у Лувена — разбиение свёрнутого графа.
+	Algorithm string
+}
+
+// Алгоритмы разбиения (graph.partition в настройках).
+const (
+	AlgoLouvain = "louvain"
+	AlgoLeiden  = "leiden"
+)
+
+// KnownAlgorithm — допустимое ли имя алгоритма разбиения.
+func KnownAlgorithm(name string) bool {
+	return name == "" || name == AlgoLouvain || name == AlgoLeiden
 }
 
 func (o CommunityOpts) norm() CommunityOpts {
+	if o.Algorithm == "" {
+		o.Algorithm = AlgoLouvain
+	}
 	if o.MaxSize <= 0 {
 		o.MaxSize = 200
 	}
@@ -232,18 +259,39 @@ func (g *Graph) partition(opt CommunityOpts, save bool) (*Communities, error) {
 	// по тем же весам, иначе первый проход и досборка судили бы по-разному.
 	blend := g.blendBySense(adj, opt.Beta)
 
-	small := splitLarge(adj, order, louvain(adj, order, opt.Resolution),
-		opt.MaxSize, opt.MaxDepth, opt.Resolution)
-	// Второй уровень: сообщества первого сворачиваются в узлы, и разбиение
-	// повторяется на них.
-	rolled, rolledOrder := rollUp(adj, order, small)
-	big := louvain(rolled, rolledOrder, opt.Resolution)
+	var small, big map[uint32]uint32
+	leidenLevels := 0
+	if opt.Algorithm == AlgoLeiden {
+		lr := leiden(adj, order, opt.Resolution)
+		leidenLevels = lr.Levels()
+		small = splitLarge(adj, order, lr.Bottom, opt.MaxSize, opt.MaxDepth, opt.Resolution)
+		// Верхний уровень — второй круг Лейдена: у дроблёных частей тот же
+		// родитель, что у их прежней темы (дробление режет внутри темы).
+		if lr.Levels() > 1 {
+			level1 := lr.At(1)
+			big = make(map[uint32]uint32, len(small))
+			for id, c := range small {
+				big[c] = level1[id]
+			}
+		}
+	} else {
+		small = splitLarge(adj, order, louvain(adj, order, opt.Resolution),
+			opt.MaxSize, opt.MaxDepth, opt.Resolution)
+	}
+	if big == nil {
+		// Второй уровень: сообщества первого сворачиваются в узлы, и разбиение
+		// повторяется на них (Лувен; Лейден — когда его лестница в один уровень).
+		rolled, rolledOrder := rollUp(adj, order, small)
+		big = louvain(rolled, rolledOrder, opt.Resolution)
+	}
 
 	res := &Communities{
-		Built:    time.Now(),
-		Entities: g.Entities().Count(),
-		Edges:    g.Edges().Count(),
-		Blend:    blend,
+		Built:        time.Now(),
+		Entities:     g.Entities().Count(),
+		Edges:        g.Edges().Count(),
+		Blend:        blend,
+		Algorithm:    opt.Algorithm,
+		LeidenLevels: leidenLevels,
 	}
 	res.List = g.assemble(adj, order, small, big)
 	res.ByOrigins = g.rules.WeightsByOrigins

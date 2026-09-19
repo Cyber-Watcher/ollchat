@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/find"
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"io"
 	"os"
 	"os/signal"
@@ -31,8 +32,13 @@ type evalFile struct {
 	Case []kb.EvalCase `toml:"case"`
 }
 
+// expand > 0 — расширять вопрос именами понятий графа (как делают инструмент
+// kb_search и подмес, `find.Expand` с пределом 3), чтобы замерить, помогает
+// ли граф простому поиску факта или мешает (этап 105, Б1: «On simple fact
+// lookup, plain vector RAG edges out the best graph method»). 0 — как у
+// `/search`: без расширения.
 func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, weight, rrfk, tableBoost float64,
-	only string, rerank bool, candidates int, snippet bool) error {
+	only string, rerank bool, candidates int, snippet bool, expand int) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("набор %s: %w", path, err)
@@ -88,9 +94,21 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 	if rrfk > 0 {
 		opt.RRFK = rrfk
 	}
+	var g *graph.Graph
+	if expand > 0 {
+		if g, err = graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules()); err != nil {
+			return fmt.Errorf("расширение вопроса графом: %w", err)
+		}
+		defer g.Close()
+	}
 	// Замер идёт тем же ядром, что и работа: find.Books (этап 91, R2.9).
 	// Числа режима (слова / смысл / слияние) приходят из kb.searchOptsFor.
 	opt.Search = func(ctx context.Context, query string, so kb.SearchOpts, want int) ([]kb.Result, error) {
+		if g != nil {
+			// Тот же вход, что у подмеса: понятия с двумя и более упоминаниями.
+			res := g.Search(query, graph.SearchOpts{TopEntities: cfg.Mix.Entities, MinMentions: 2})
+			query = find.Expand(query, res.Entities, find.Opts{ExpandLimit: expand})
+		}
 		fo := find.Opts{
 			Mode: "eval", Collection: name, TopK: want, MaxPerBook: so.MaxPerDoc,
 			Semantic: so.Semantic, SemanticOnly: so.SemanticOnly,
@@ -116,6 +134,9 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 	}
 	if rrfk > 0 {
 		fmt.Fprintf(stdout, ", k слияния %.0f", rrfk)
+	}
+	if expand > 0 {
+		fmt.Fprintf(stdout, ", вопрос расширен именами понятий графа (до %d)", expand)
 	}
 	fmt.Fprintln(stdout)
 	if emb == nil {

@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -149,4 +150,73 @@ func distinct(m map[uint32]uint32) int {
 		seen[c] = true
 	}
 	return len(seen)
+}
+
+// Лейден как алгоритм разбиения графа: темы связны, объединения указаны,
+// алгоритм записан в разбиении; Лувен по умолчанию не тронут.
+func TestBuildCommunitiesWithLeiden(t *testing.T) {
+	g, err := Create(collection(t), "books", 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	// Восемь плотных сгустков по 6 понятий, пары сгустков связаны сильнее.
+	const size, groups = 6, 8
+	for c := 0; c < groups; c++ {
+		for i := 0; i < size; i++ {
+			if _, _, err := g.Entities().Add(fmt.Sprintf("понятие-%d-%d", c, i), TypeConcept); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	id := func(c, i int) uint32 { return uint32(c*size + i + 1) }
+	add := func(a, b uint32, w int) {
+		for k := 0; k < w; k++ {
+			if err := g.Edges().Add(Edge{Src: a, Dst: b, Type: RelUses, Weight: 1,
+				Evidence: ChunkKey{Doc: 1, Ord: uint32(k*1000 + int(a)*10 + int(b))}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for c := 0; c < groups; c++ {
+		for i := 0; i < size; i++ {
+			for j := i + 1; j < size; j++ {
+				add(id(c, i), id(c, j), 10)
+			}
+		}
+	}
+	for c := 0; c < groups; c += 2 {
+		for i := 0; i < 3; i++ {
+			add(id(c, i), id(c+1, i), 15)
+		}
+	}
+	res, err := g.PartitionOnly(CommunityOpts{Algorithm: AlgoLeiden, Resolution: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Algorithm != AlgoLeiden || res.LeidenLevels < 2 {
+		t.Fatalf("алгоритм %q, уровней %d — ожидался leiden с лестницей", res.Algorithm, res.LeidenLevels)
+	}
+	if n := len(res.Level(0)); n != groups {
+		t.Errorf("тем нижнего уровня %d, ожидалось %d", n, groups)
+	}
+	if n := len(res.Level(1)); n != groups/2 {
+		t.Errorf("объединений %d, ожидалось %d", n, groups/2)
+	}
+	for _, com := range res.Level(0) {
+		if com.Parent < 0 {
+			t.Errorf("тема %d без объединения", com.ID)
+		}
+	}
+	// Умолчание — Лувен, алгоритм так и записывается.
+	def, err := g.PartitionOnly(CommunityOpts{Resolution: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Algorithm != AlgoLouvain {
+		t.Errorf("умолчание записано как %q, ожидалось louvain", def.Algorithm)
+	}
+	if !KnownAlgorithm("") || !KnownAlgorithm("leiden") || KnownAlgorithm("kmeans") {
+		t.Error("KnownAlgorithm путает имена")
+	}
 }

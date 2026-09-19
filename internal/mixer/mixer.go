@@ -69,6 +69,7 @@ type Settings struct {
 	Semantic       bool
 	AnswerStyle    string
 	TableBoost     float64 // надбавка кускам-таблицам; 0 — умолчание
+	ExpandLimit    int     // сколькими именами понятий дополнять вопрос (kb.expand_limit, раскрытое); 0 — не расширять
 
 	// QueryTimeout — сколько ждать вектор вопроса; 0 — умолчание пакета kb.
 	QueryTimeout time.Duration
@@ -235,7 +236,11 @@ func Build(question string, d Deps, s Settings) Result {
 	}
 
 	if want > 0 {
-		if q := books(coll, find.Expand(question, res.Entities, find.Opts{ExpandLimit: 3}), question, want, d, s); !q.Empty() {
+		search := question
+		if s.ExpandLimit > 0 {
+			search = find.Expand(question, res.Entities, find.Opts{ExpandLimit: s.ExpandLimit})
+		}
+		if q := books(coll, search, question, want, d, s); !q.Empty() {
 			b.WriteString("\n")
 			b.WriteString(q.Text)
 			out.Chunks = q.Chunks
@@ -278,7 +283,7 @@ func books(coll kb.Source, search, question string, topK int, d Deps, s Settings
 		Semantic:       s.Semantic,
 		Rerank:         true,
 		RerankOpts:     s.RerankOpts,
-		ExpandLimit:    3,
+		ExpandLimit:    s.ExpandLimit,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -112,10 +112,11 @@ func (t *kbSearchTool) run(ctx context.Context, name, query, book string, topK i
 		QueryTimeout:   t.opts.QueryTimeout,
 		Rerank:         true,
 		RerankOpts:     t.opts.RerankOpts,
-		// Перевод запроса на язык библиотеки — тот же, что у подмешивания
-		// и у `/search`: три понятия графа и их синонимы. Замер 30.08.2026:
-		// на слово «горутина» приходили десять русских книг из десяти.
-		ExpandLimit: 3,
+		// Перевод запроса на язык библиотеки — тот же, что у подмешивания:
+		// имена понятий графа и их синонимы. Замер 30.08.2026: на слово
+		// «горутина» приходили десять русских книг из десяти. Число — настройка
+		// kb.expand_limit (этап 105, Б1: замер показал вред на точных терминах).
+		ExpandLimit: t.opts.KBExpandLimit,
 	}
 	if book != "" {
 		o.Docs = booksMatching(coll, book)
@@ -123,7 +124,10 @@ func (t *kbSearchTool) run(ctx context.Context, name, query, book string, topK i
 			return fmt.Sprintf("В коллекции %q нет книг, название которых содержит %q.", coll.Name(), book), nil
 		}
 	}
-	search := find.Expand(query, graphEntities(t.opts, name, query, 3), o)
+	search := query
+	if o.ExpandLimit > 0 {
+		search = find.Expand(query, graphEntities(t.opts, name, query, o.ExpandLimit), o)
+	}
 
 	// Одно ядро с /search (этап 91, R2.4): модель и человек видят одну выдачу.
 	// Ищется дополненным запросом, а переранжируется исходным: кросс-энкодер

@@ -442,6 +442,14 @@ type KB struct {
 	// терминов, и без потерь на переформулированных вопросах). 1.0 выключает.
 	TableBoost float64 `toml:"table_boost"`
 
+	// ExpandLimit — сколькими именами понятий графа дополнять вопрос перед
+	// поиском по книгам у инструмента kb_search и подмеса (перевод вопроса
+	// на язык библиотеки через синонимы понятий). 0 — умолчание кода
+	// (DefaultExpandLimit: не расширять), -1 — не расширять явно, N — N имён.
+	// Замер 18.09.2026 (этап 105, Б1): расширение ухудшало поиск на обоих
+	// наборах во всех режимах, сильнее всего на вопросах своими словами.
+	ExpandLimit int `toml:"expand_limit"`
+
 	Dir         string   `toml:"dir"`           // где держать индексы
 	Roots       []string `toml:"roots"`         // откуда разрешено брать книги
 	Default     string   `toml:"default"`       // коллекция по умолчанию
@@ -714,6 +722,11 @@ type Graph struct {
 	// Resolution — разрешение Louvain (γ): чем больше, тем мельче темы.
 	// 0 — значение по умолчанию, подобранное замером.
 	Resolution float64 `toml:"resolution"`
+
+	// Partition — алгоритм разбиения на темы: "louvain" (умолчание, рабочий
+	// граф) или "leiden" (связные темы по построению и лестница уровней;
+	// этап 105, Б6). Менять только с замером на копии графа.
+	Partition string `toml:"partition"`
 
 	// MaxCommunity — тема крупнее дробится заново. 0 — двести.
 	MaxCommunity int `toml:"max_community"`
@@ -1703,9 +1716,15 @@ func (c *Config) finalize() error {
 		return fmt.Errorf("graph.format = %d: в общем разделе допустим только формат 1; "+
 			"формат %d задаётся в разделе именованного графа, например [graph.lab]", f, graph.FormatV2)
 	}
+	if !graph.KnownAlgorithm(c.graphBase.Partition) {
+		return fmt.Errorf("graph.partition = %q: допустимо louvain или leiden", c.graphBase.Partition)
+	}
 	for name, g := range c.GraphNamed {
 		if g.Format != 0 && !graph.KnownVersion(g.Format) {
 			return fmt.Errorf("graph.%s.format = %d: неизвестный формат графа", name, g.Format)
+		}
+		if !graph.KnownAlgorithm(g.Partition) {
+			return fmt.Errorf("graph.%s.partition = %q: допустимо louvain или leiden", name, g.Partition)
 		}
 	}
 	// Узлы сборки: опечатка в имени или адресе должна быть ошибкой запуска,
@@ -2102,4 +2121,24 @@ func ParseTokens(s string) (int, error) {
 		return 0, fmt.Errorf("прибавка должна быть положительной, получено %d", n)
 	}
 	return n * mult, nil
+}
+
+// DefaultExpandLimit — умолчание kb.expand_limit: сколько имён понятий графа
+// дописывается к вопросу. Ноль — не расширять: замер 18.09.2026 (этап 105, Б1)
+// на двух наборах и в рабочем режиме (слияние + реранкер) — kb_golden recall@10
+// 0,333 → 0,243, MRR 0,277 → 0,198 с расширением; kb_terms 0,350 → 0,342.
+// Перевод вопроса на язык книг, ради которого расширение заводилось 30.08.2026
+// («горутина» → goroutine), с 09.09 делает смысловой поиск (bge-m3) сам.
+const DefaultExpandLimit = 0
+
+// ExpandLimitOr — действующее число имён для расширения вопроса: 0 — умолчание,
+// отрицательное — расширения нет (возвращает 0).
+func (k KB) ExpandLimitOr() int {
+	switch {
+	case k.ExpandLimit < 0:
+		return 0
+	case k.ExpandLimit == 0:
+		return DefaultExpandLimit
+	}
+	return k.ExpandLimit
 }

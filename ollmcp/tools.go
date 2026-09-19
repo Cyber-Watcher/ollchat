@@ -95,6 +95,7 @@ func build(cfg *config.Config, service bool) (*mcp.Server, kbserve.Opts, error) 
 	registry, err := tools.NewRegistry(enabled, tools.Options{
 		GraphRules:     cfg.Graph.Rules(),
 		KBTableBoost:   cfg.KB.TableBoost,
+		KBExpandLimit:  cfg.KB.ExpandLimitOr(),
 		KBAbstainGap:   cfg.KB.AbstainGap,
 		KBAbstainScore: cfg.KB.AbstainScore,
 		Sandbox:        sandbox,

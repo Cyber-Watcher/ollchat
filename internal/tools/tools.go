@@ -129,6 +129,9 @@ type Options struct {
 	GraphRules graph.Rules
 	// KBTableBoost — надбавка кускам-таблицам (kb.table_boost); 0 — умолчание.
 	KBTableBoost float64
+	// KBExpandLimit — сколькими именами понятий графа дополнять вопрос
+	// (kb.expand_limit, уже раскрытое: 0 — не расширять).
+	KBExpandLimit int
 	// KBAbstainGap — порог воздержания kb_search (kb.abstain_gap): разрыв
 	// первого и второго места ниже него — выдача помечается как неуверенная.
 	// 0 — не помечать.

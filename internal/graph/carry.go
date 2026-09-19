@@ -151,3 +151,19 @@ func carryDescriptions(old, fresh *Communities, threshold float64) CarryResult {
 	res.Lost = len(byID) - res.Carried
 	return res
 }
+
+// CarryPreview отвечает, сколько описаний старого разбиения перенеслось бы
+// на разметку assign (понятие → сообщество), не записывая ничего: цена
+// смены алгоритма разбиения в темах, которые пришлось бы описывать заново
+// (этап 105, А5). Порог сходства — рабочий, threshold ≤ 0 — умолчание.
+func CarryPreview(old *Communities, assign map[uint32]uint32, threshold float64) CarryResult {
+	members := map[uint32][]uint32{}
+	for id, c := range assign {
+		members[c] = append(members[c], id)
+	}
+	fresh := &Communities{}
+	for c, list := range members {
+		fresh.List = append(fresh.List, Community{ID: int(c), Level: 0, Parent: -1, Members: list})
+	}
+	return carryDescriptions(old, fresh, threshold)
+}

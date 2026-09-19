@@ -180,3 +180,30 @@ format = 2
 		}
 	}
 }
+
+// graph.partition: leiden у именованного графа, умолчание — пусто (Лувен),
+// опечатка отвергается при загрузке (этап 105, Б6).
+func TestGraphPartitionSetting(t *testing.T) {
+	cfg := writeCfg(t, baseCfg+`
+[graph.lab]
+partition = "leiden"
+`)
+	if cfg.Graph.Partition != "" {
+		t.Fatalf("у рабочего графа алгоритм должен остаться умолчанием, получено %q", cfg.Graph.Partition)
+	}
+	if err := cfg.UseGraph("lab"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Graph.Partition != "leiden" {
+		t.Fatalf("у графа lab алгоритм %q, ожидался leiden", cfg.Graph.Partition)
+	}
+	for _, body := range []string{"[graph]\npartition = \"kmeans\"\n", "[graph.lab]\npartition = \"Leiden \"\n"} {
+		p := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(p, []byte(baseCfg+"\n"+body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Load(p); err == nil {
+			t.Fatalf("конфиг с %q должен отвергаться", body)
+		}
+	}
+}

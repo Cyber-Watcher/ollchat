@@ -655,3 +655,15 @@ func TestStepsFileOverridesPatternAndMayBeAbsolute(t *testing.T) {
 		t.Fatal("абсолютный шаблон из настроек должен отклоняться")
 	}
 }
+
+// kb.expand_limit: 0 — умолчание кода, -1 — не расширять, N — N (этап 105, Б1).
+func TestKBExpandLimitOr(t *testing.T) {
+	for _, c := range []struct{ set, want int }{{0, DefaultExpandLimit}, {-1, 0}, {5, 5}, {1, 1}} {
+		if DefaultExpandLimit != 0 {
+			t.Fatal("умолчание расширения — ноль по замеру 18.09.2026; менять только новым замером")
+		}
+		if got := (KB{ExpandLimit: c.set}).ExpandLimitOr(); got != c.want {
+			t.Errorf("expand_limit = %d → %d, ожидалось %d", c.set, got, c.want)
+		}
+	}
+}

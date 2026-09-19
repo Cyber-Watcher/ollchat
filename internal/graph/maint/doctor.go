@@ -284,6 +284,9 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		// «пора пересчитать разметку», то есть дефект не только пугал,
 		// но и звал пересчитывать без повода (найдено 15.09.2026).
 		uncovered := countUncovered(g.Entities().Live(), inTopic)
+		if comms.Algorithm == graph.AlgoLeiden {
+			fmt.Fprintf(stdout, "  разбиение: Лейден, уровней в лестнице %d (на диске два)\n", comms.LeidenLevels)
+		}
 		fmt.Fprintf(stdout, "  темы: %d (нижнего уровня %d), с описанием %d из %d кандидатов\n",
 			len(comms.List), lvl0, described, cand)
 		if comms.Entities > 0 && st.Entities > comms.Entities {

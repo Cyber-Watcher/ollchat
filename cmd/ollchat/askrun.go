@@ -313,6 +313,7 @@ func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 		Chain:         cfg.Mix.Chain,
 		RelationYears: cfg.Mix.RelationYears,
 		TableBoost:    cfg.KB.TableBoost,
+		ExpandLimit:   cfg.KB.ExpandLimitOr(),
 		Entities:      cfg.Mix.Entities,
 		Neighbors:     cfg.Mix.Neighbors,
 		Rank: graph.NeighborRank{
