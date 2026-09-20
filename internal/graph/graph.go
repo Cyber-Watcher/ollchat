@@ -332,6 +332,7 @@ type Graph struct {
 	// (см. writeFacts). Правится под замком записи сборки.
 	skipped struct{ untyped, overlap, names, renamed int }
 	vecs    *EntityVectors // смысловой вход; пусто, пока векторы не посчитаны
+	evecs   *EdgeVectors   // вход по тройкам (edgevec.go); пусто, пока не посчитан
 
 	// alias — журнал синонимов с источником; есть только у формата 2,
 	// у формата 1 остаётся nil.
@@ -590,6 +591,7 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 	// Векторов может не быть — это обычное состояние, а не ошибка: граф
 	// работает и по написанию.
 	g.vecs = openEntityVectors(dir)
+	g.evecs = openEdgeVectors(dir)
 	step("склейки двойников")
 	if g.merges, err = openMerges(dir); err != nil {
 		return nil, err

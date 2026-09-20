@@ -132,6 +132,15 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 			fmt.Fprintln(stdout, "  векторы понятий не считались — смыслового входа в граф нет")
 		}
 	}
+	// Индекс троек — надстройка по желанию: печатается, только когда он есть
+	// или включён вход по нему без индекса.
+	if ei := g.EdgeVectorsInfo(); ei.Ready {
+		fmt.Fprintf(stdout, "  индекс троек: %d связей (%s)\n", ei.Count, ei.Model)
+	} else if ei.Problem != "" {
+		fmt.Fprintf(stdout, "  индекс троек на диске есть, но не принят: %s\n", ei.Problem)
+	} else if g.Rules().TripleLimit > 0 {
+		fmt.Fprintln(stdout, "  вход по тройкам включён (triple_limit), а индекса нет — посчитать: --graph-embed-edges")
+	}
 	if p := g.Descriptions().Problem(); p != "" {
 		fmt.Fprintf(stdout, "  описания понятий: %s\n", p)
 	}

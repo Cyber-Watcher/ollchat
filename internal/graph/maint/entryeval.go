@@ -172,7 +172,7 @@ func EntryEval(stdout io.Writer, cfg *config.Config, setPath string, o EntryEval
 		s entryScore
 	}
 	var rows []row
-	var both, one, none, skipped, foreign, foreignSense, total int
+	var both, one, none, skipped, foreign, foreignSense, total, hitTriple, foreignTriple int
 	// Кто именно лезет в выдачу чаще всего: по этому списку видно, что чинить.
 	type foreignStat struct {
 		name  string
@@ -213,6 +213,15 @@ func EntryEval(stdout io.Writer, cfg *config.Config, setPath string, o EntryEval
 		}
 		s := scoreEntryWithOrigin(want, got, bySense)
 		for i, e := range res.Entities {
+			// Вход по тройкам (этап 105, Б8) считается отдельно от смыслового:
+			// сколько названных понятий пришло им и сколько постороннего.
+			if e.Matched == "по связи" {
+				if e.ID == want[0] || e.ID == want[1] {
+					hitTriple++
+				} else {
+					foreignTriple++
+				}
+			}
 			if e.ID == want[0] || e.ID == want[1] {
 				continue
 			}
@@ -271,6 +280,9 @@ func EntryEval(stdout io.Writer, cfg *config.Config, setPath string, o EntryEval
 	if foreign > 0 {
 		fmt.Fprintf(stdout, "  из них смысловым входом: %d (%.0f%%) — соседи по предмету, словесным: %d\n",
 			foreignSense, 100*float64(foreignSense)/float64(foreign), foreign-foreignSense)
+	}
+	if hitTriple+foreignTriple > 0 {
+		fmt.Fprintf(stdout, "входом по тройкам:        названных понятий %d, постороннего %d\n", hitTriple, foreignTriple)
 	}
 	if skipped > 0 {
 		fmt.Fprintf(stdout, "пропущено вопросов:       %d (понятия нет в графе — это о полноте, не о входе)\n", skipped)

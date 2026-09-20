@@ -125,6 +125,13 @@ type Options struct {
 	GraphRelationSnippet int
 
 	GraphMinRating int
+
+	// Summarizer — модель для ленивых описаний тем (graph.summaries = lazy,
+	// этап 105 Б2): тема без описания, попавшая в обзор или запрошенная
+	// по имени, описывается тут же и кешируется в разбиении. nil — описания
+	// пишет только докатка. SummaryOpts — числа описания из конфига.
+	Summarizer  graph.Extractor
+	SummaryOpts graph.SummaryOpts
 	// GraphRules — правила открытия графа (имя, вход по слову и смыслу, группы).
 	GraphRules graph.Rules
 	// KBTableBoost — надбавка кускам-таблицам (kb.table_boost); 0 — умолчание.

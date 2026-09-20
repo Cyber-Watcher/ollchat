@@ -96,6 +96,8 @@ type cliFlags struct {
 	graphEntryEnts        *int
 	graphGroups           *string
 	graphName             *string
+	graphEmbedEdges       *string
+	graphSumForce         *bool
 	graphKind             *string
 	graphNote             *string
 	graphLimit            *int
@@ -320,6 +322,8 @@ func parseFlags() *cliFlags {
 		"разбить граф коллекции на сообщества: --graph-communities books")
 	f.graphSum = flag.String("graph-summaries", "",
 		"написать моделью резюме сообществ графа: --graph-summaries books")
+	f.graphSumForce = flag.Bool("graph-summaries-force", false,
+		"с --graph-summaries: описать все темы и при graph.summaries = lazy")
 	f.graphSumMin = flag.Int("graph-summaries-min", 0,
 		"с --graph-summaries: не описывать сообщества меньше стольких понятий (по умолчанию 5)")
 	f.kbEvalGen = flag.String("kb-eval-gen", "",
@@ -451,6 +455,8 @@ func parseFlags() *cliFlags {
 	f.graphQueueDoubts = flag.String("graph-queue-doubts", "",
 		"положить спорные вердикты разбора двойников в очередь человеку: --graph-queue-doubts books --graph-verdicts verdicts.tsv")
 	f.graphVerdicts = flag.String("graph-verdicts", "", "с --graph-queue-doubts: файл вердиктов арбитра (TSV)")
+	f.graphEmbedEdges = flag.String("graph-embed-edges", "",
+		"посчитать индекс троек — вход в граф по связи «X —тип→ Y»: --graph-embed-edges books (с --kb-dry-run — только сказать сколько)")
 	f.graphEmbedStale = flag.String("graph-embed-stale", "",
 		"пересчитать векторы понятий, чей текст изменился после счёта: --graph-embed-stale books (с --kb-dry-run — только сказать сколько)")
 	f.graphEmbedFollow = flag.String("graph-embed-follow", "",
@@ -606,7 +612,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		}
 		return true, gmaint.Find(os.Stdout, cfg, *f.graphColl, *f.graphFind, *f.graphJSON)
 	case *f.graphSum != "":
-		return true, gmaint.Summaries(os.Stdout, cfg, *f.graphSum, *f.graphSumMin)
+		return true, gmaint.Summaries(os.Stdout, cfg, *f.graphSum, *f.graphSumMin, *f.graphSumForce)
 	case *f.kbEvalGen != "":
 		coll := *f.kbEvalColl
 		if coll == "" {
@@ -668,6 +674,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.QueueDoubts(os.Stdout, cfg, *f.graphQueueDoubts, *f.graphVerdicts)
 	case *f.graphEmbedStale != "":
 		return true, gmaint.EmbedStale(os.Stdout, cfg, *f.graphEmbedStale, *f.kbDry)
+	case *f.graphEmbedEdges != "":
+		return true, gmaint.EmbedEdges(os.Stdout, cfg, *f.graphEmbedEdges, *f.kbDry)
 	case *f.graphEmbed != "":
 		return true, gmaint.Embed(os.Stdout, cfg, *f.graphEmbed, *f.graphEmbedRecount)
 	case *f.graphEmbedFollow != "":
@@ -850,6 +858,7 @@ func run() error {
 	// Кэш открытых графов один на программу: у инструментов модели и у поиска
 	// в интерфейсе он общий, иначе в памяти жили бы два одинаковых графа.
 	graphCache := gmaint.CacheFor(cfg, 5*time.Minute)
+	summarizer, summaryOpts := gmaint.LazySummarizer(cfg)
 
 	registry, err := tools.NewRegistry(cfg.Agent.Tools, tools.Options{
 		GraphRules:           cfg.Graph.Rules(),
@@ -866,6 +875,8 @@ func run() error {
 		KBDir:                cfg.KB.Dir,
 		KBDefault:            cfg.KB.Default,
 		GraphCache:           graphCache,
+		Summarizer:           summarizer,
+		SummaryOpts:          summaryOpts,
 		GraphNeighbors:       gmaint.NeighborRank(cfg),
 		GraphMinRating:       cfg.Graph.MinRating,
 		GraphRelationSnippet: cfg.Graph.RelationSnippet,

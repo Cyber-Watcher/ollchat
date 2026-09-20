@@ -312,6 +312,8 @@ func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 	s := mixer.Settings{
 		Chain:         cfg.Mix.Chain,
 		RelationYears: cfg.Mix.RelationYears,
+		MapPlain:      cfg.Mix.MapStyle == "plain",
+		MapPairOnly:   cfg.Mix.MapWhen == "pair",
 		TableBoost:    cfg.KB.TableBoost,
 		ExpandLimit:   cfg.KB.ExpandLimitOr(),
 		Entities:      cfg.Mix.Entities,

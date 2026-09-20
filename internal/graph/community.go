@@ -79,6 +79,10 @@ type Community struct {
 type Communities struct {
 	Built time.Time `json:"built"`
 
+	// loaded — отпечаток файла на момент загрузки (см. saveCommunitiesGuarded);
+	// на диск не пишется.
+	loaded string
+
 	// ByOrigins — разбиение считано на весах по источникам (graph.weights_by_origins).
 	// Записывается, чтобы смена настройки была видна доктору, а не молчала.
 	ByOrigins bool `json:"by_origins,omitempty"`
@@ -333,7 +337,32 @@ func (g *Graph) LoadCommunities() (*Communities, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("разбиение на сообщества не читается: %w", err)
 	}
+	c.loaded = communityStamp(filepath.Join(g.dir, CommunityFile))
 	return &c, nil
+}
+
+// communityStamp — отпечаток файла разбиения: размер и время. По нему
+// ленивый писатель узнаёт, что файл переписали после его загрузки.
+func communityStamp(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+}
+
+// saveCommunitiesGuarded пишет разбиение, только если файл на диске тот же,
+// что был загружен; иначе ErrCommunitiesChanged и ничего не тронуто.
+func (g *Graph) saveCommunitiesGuarded(c *Communities) error {
+	path := filepath.Join(g.dir, CommunityFile)
+	if c.loaded != "" && communityStamp(path) != c.loaded {
+		return ErrCommunitiesChanged
+	}
+	if err := g.saveCommunities(c); err != nil {
+		return err
+	}
+	c.loaded = communityStamp(path)
+	return nil
 }
 
 // PrevCommunityFile — прежнее разбиение, сохранённое перед перезаписью.

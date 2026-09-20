@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -53,7 +54,29 @@ type SummaryOpts struct {
 	// сколько при извлечении, и по той же причине — карта не успевает
 	// простаивать между запросами.
 	Workers int
+
+	// Only — описывать только темы с этими номерами (ленивые описания,
+	// этап 105 Б2: обзор описывает те темы, которые сейчас показывает).
+	// Пусто — все подходящие. Уровень темы при Only не проверяется:
+	// верхняя тема описывается по вложенным (см. askSummary).
+	Only []int
+
+	// Guard — писать разбиение на диск, только если файл не менялся с
+	// момента загрузки. Ленивый писатель живёт в службе и в диалоге, а
+	// докатка в это же время может пересчитать разбиение целиком; описание,
+	// сделанное поверх устаревшего разбиения, — не потеря, а его запись
+	// поверх свежего файла — потеря разметки. При изменившемся файле запись
+	// пропускается, ошибка ErrCommunitiesChanged.
+	Guard bool
+
+	// children — срез разбиения для описания верхних тем по вложенным;
+	// заполняет Summarize.
+	children []Community
 }
+
+// ErrCommunitiesChanged — разбиение на диске изменилось с загрузки, ленивое
+// описание не записано (SummaryOpts.Guard).
+var ErrCommunitiesChanged = errors.New("разбиение на диске изменилось, описание не записано")
 
 func (o SummaryOpts) norm() SummaryOpts {
 	if o.MinMembers <= 0 {
@@ -92,20 +115,38 @@ func (g *Graph) Summarize(ctx context.Context, ex Extractor, c *Communities,
 	opt SummaryOpts, report func(SummaryProgress)) error {
 
 	opt = opt.norm()
+	opt.children = c.List
 	levels := map[int]bool{}
 	for _, l := range opt.Levels {
 		levels[l] = true
 	}
 
+	only := map[int]bool{}
+	for _, id := range opt.Only {
+		only[id] = true
+	}
 	var work []int
 	for i, com := range c.List {
-		if !levels[com.Level] || com.Title != "" {
+		if com.Title != "" {
+			continue
+		}
+		if len(only) > 0 {
+			if !only[com.ID] {
+				continue
+			}
+		} else if !levels[com.Level] {
 			continue
 		}
 		if len(com.Members) < opt.MinMembers {
 			continue
 		}
 		work = append(work, i)
+	}
+	save := func() error {
+		if opt.Guard {
+			return g.saveCommunitiesGuarded(c)
+		}
+		return g.saveCommunities(c)
 	}
 
 	started := time.Now()
@@ -162,15 +203,15 @@ func (g *Graph) Summarize(ctx context.Context, ex Extractor, c *Communities,
 			snapshot := pr
 			// Запись пачками: терять при обрыве весь час работы нельзя,
 			// а писать после каждого ответа — лишние тысячи записей на диск.
-			save := done%20 == 0
+			flush := done%20 == 0
 			mu.Unlock()
 
 			if report != nil {
 				report(snapshot)
 			}
-			if save {
+			if flush {
 				mu.Lock()
-				err := g.saveCommunities(c)
+				err := save()
 				mu.Unlock()
 				if err != nil {
 					return
@@ -194,10 +235,32 @@ func (g *Graph) Summarize(ctx context.Context, ex Extractor, c *Communities,
 
 	if ctx.Err() != nil {
 		// Обрыв не повод потерять сделанное: пишем и уходим.
-		_ = g.saveCommunities(c)
+		_ = save()
 		return ctx.Err()
 	}
-	return g.saveCommunities(c)
+	return save()
+}
+
+// DescribeTopics описывает темы с данными номерами, у которых описания ещё
+// нет, — ленивые описания (этап 105, Б2). Разбиение читается с диска заново,
+// пишется под охраной (SummaryOpts.Guard): если за это время его пересчитала
+// докатка, описание не записывается. Возвращает число описанных тем.
+func (g *Graph) DescribeTopics(ctx context.Context, ex Extractor, ids []int, opt SummaryOpts) (int, error) {
+	if ex == nil || len(ids) == 0 {
+		return 0, nil
+	}
+	c, err := g.LoadCommunities()
+	if err != nil || c == nil {
+		return 0, err
+	}
+	opt.Only = ids
+	opt.Guard = true
+	if opt.Workers <= 0 {
+		opt.Workers = 1
+	}
+	done := 0
+	err = g.Summarize(ctx, ex, c, opt, func(p SummaryProgress) { done = p.Done })
+	return done, err
 }
 
 // askSummary задаёт модели один вопрос про одно сообщество.
@@ -205,6 +268,19 @@ func (g *Graph) askSummary(ctx context.Context, ex Extractor, com *Community,
 	opt SummaryOpts) (summaryOut, error) {
 
 	var b strings.Builder
+	// Верхняя тема (объединение) описывается по вложенным: их названия и
+	// описания заменяют перечисление понятий — рецепт «substitute
+	// subcommunity summaries for their elements» (этап 105, Б2). Вложенные
+	// без описания перечисляются понятиями, как обычная тема.
+	if com.Level > 0 {
+		if kids := describedChildren(opt.children, com.ID); len(kids) > 0 {
+			b.WriteString("Вложенные темы группы (название — описание):\n")
+			for _, k := range kids {
+				fmt.Fprintf(&b, "- %s — %s\n", k.Title, k.Summary)
+			}
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("Понятия группы (по убыванию частоты):\n")
 	names := map[uint32]string{}
 	for i, id := range com.Members {
@@ -272,6 +348,17 @@ func (g *Graph) askSummary(ctx context.Context, ex Extractor, com *Community,
 		Rating:  out.Rating,
 		Why:     strings.TrimSpace(out.Why),
 	}, nil
+}
+
+// describedChildren — описанные вложенные темы объединения parent.
+func describedChildren(list []Community, parent int) []Community {
+	var out []Community
+	for _, c := range list {
+		if c.Parent == parent && c.Level == 0 && c.Title != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // summaryOut — что модель сказала о сообществе.

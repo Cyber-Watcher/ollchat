@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"container/heap"
 	"math"
 	"sort"
 	"strings"
@@ -209,6 +210,7 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 
 	seeds := g.linkEntities(query, opt)
 	seeds = g.addSenseSeeds(seeds, opt)
+	seeds = g.addTripleSeeds(seeds, opt)
 	if len(seeds) == 0 {
 		res.Note = "в графе нет понятий из этого вопроса"
 		return res
@@ -793,6 +795,9 @@ func (g *Graph) Path(from, to string, maxHops int) ([]PathStep, bool) {
 	}
 
 	hubLimit := g.rules.ChainHubLimit
+	if g.rules.PathFlow {
+		return g.pathByFlow(a.ID, b.ID, maxHops, hubLimit)
+	}
 	visited := map[uint32]link{a.ID: {}}
 	queue := []uint32{a.ID}
 
@@ -836,6 +841,102 @@ func (g *Graph) Path(from, to string, maxHops int) ([]PathStep, bool) {
 	}
 	return nil, false
 }
+
+// pathByFlow — цепочка по потоку, а не по числу шагов (этап 105, Б5; приём
+// PathRAG). Из начала вытекает единица «ресурса»; на каждом узле он делится
+// между связями по их весу и затухает на pathFlowDecay за шаг. Путь — тот,
+// по которому до конца доходит больше всего: шаг через общее понятие («data»,
+// «graph») делит ресурс на сотни связей и почти ничего не доносит, шаг через
+// понятие с десятком связей доносит заметную долю. Так цепочка через
+// узкое понятие выигрывает у столь же короткой через общее, а лишний шаг
+// через узкое — у короткого через общее. Хабы по-прежнему запрещены
+// в середине: у них поток и так нулевой, а обход через них дорог.
+//
+// Обход — Дейкстра по стоимости −log(поток); у узла хранится лучший поток,
+// путь с большим числом шагов рассматривается, только если он лучше.
+func (g *Graph) pathByFlow(from, to uint32, maxHops, hubLimit int) ([]PathStep, bool) {
+	best := map[uint32]float64{from: 1}
+	visited := map[uint32]link{from: {}}
+	h := &flowHeap{{id: from, flow: 1}}
+	for h.Len() > 0 {
+		cur := heap.Pop(h).(flowState)
+		if cur.flow < best[cur.id] {
+			continue // устаревшая запись: узел уже достигнут полнее
+		}
+		if cur.id == to {
+			return buildPath(g, visited, from, to), true
+		}
+		if cur.hops >= maxHops {
+			continue
+		}
+		// Вес по соседям и общий вес узла: доля связи — её вес от суммы.
+		// Хаб в середине отсекается тем же обходом — по числу соседей,
+		// без отдельного Neighbors (он собирает карту с выделением памяти).
+		type arc struct {
+			edge Edge
+			back bool
+			w    float64
+		}
+		arcs := map[uint32]*arc{}
+		total := 0.0
+		for _, e := range g.edge.around(cur.id) {
+			other, back := e.Dst, false
+			if e.Dst == cur.id {
+				other, back = e.Src, true
+			}
+			w := float64(e.Weight)
+			if w <= 0 {
+				w = 1
+			}
+			total += w
+			a := arcs[other]
+			if a == nil {
+				a = &arc{edge: e, back: back}
+				arcs[other] = a
+			}
+			a.w += w
+		}
+		if total == 0 || (cur.id != from && hubLimit > 0 && len(arcs) >= hubLimit) {
+			continue
+		}
+		for other, a := range arcs {
+			flow := cur.flow * pathFlowDecay * a.w / total
+			if flow <= best[other] {
+				continue
+			}
+			best[other] = flow
+			visited[other] = link{prev: cur.id, edge: a.edge, back: a.back}
+			heap.Push(h, flowState{id: other, flow: flow, hops: cur.hops + 1})
+		}
+	}
+	return nil, false
+}
+
+// flowState — узел во фронте обхода по потоку.
+type flowState struct {
+	id   uint32
+	flow float64
+	hops int
+}
+
+// flowHeap — куча по убыванию потока; при равном потоке — по номеру узла,
+// чтобы один и тот же вопрос давал один и тот же путь.
+type flowHeap []flowState
+
+func (h flowHeap) Len() int { return len(h) }
+func (h flowHeap) Less(i, j int) bool {
+	if h[i].flow != h[j].flow {
+		return h[i].flow > h[j].flow
+	}
+	return h[i].id < h[j].id
+}
+func (h flowHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *flowHeap) Push(x any)   { *h = append(*h, x.(flowState)) }
+func (h *flowHeap) Pop() any     { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+
+// pathFlowDecay — затухание потока за шаг: 0.8, как θ у PathRAG. Меньше
+// единицы, чтобы при равной доле короткий путь выигрывал у длинного.
+const pathFlowDecay = 0.8
 
 // link — откуда пришли в узел при обходе.
 type link struct {
@@ -987,6 +1088,55 @@ func (g *Graph) addSenseSeeds(seeds []FoundEntity, opt SearchOpts) []FoundEntity
 			Books:       booksOf(g, c.hit.ID), Matched: "по смыслу",
 		})
 		room--
+	}
+	return seeds
+}
+
+// addTripleSeeds добавляет ко входу концы троек, близких к вопросу (этап 105,
+// Б8). Вопрос «как X влияет на Y» — о связи, и тройка «X —влияет→ Y» с
+// синонимами концов ближе к нему, чем вектор любого из понятий. Тройки берутся
+// тем же относительным отбором, что и понятия; их концы добавляются в хвост
+// входа, если их там ещё нет, с пометкой «по связи» — замер входа
+// (--graph-entry-eval) считает их отдельно от найденных по смыслу.
+// Работает только при Rules.TripleLimit > 0 и посчитанном индексе.
+func (g *Graph) addTripleSeeds(seeds []FoundEntity, opt SearchOpts) []FoundEntity {
+	limit := g.rules.TripleLimit
+	if limit <= 0 || len(opt.QueryVector) == 0 || g.evecs == nil || !g.evecs.Ready() {
+		return seeds
+	}
+	room := opt.TopEntities - len(seeds)
+	if max := opt.TopEntities / 2; room > max {
+		room = max
+	}
+	if room <= 0 {
+		return seeds
+	}
+	have := make(map[uint32]bool, len(seeds))
+	for _, s := range seeds {
+		have[s.ID] = true
+	}
+	for _, h := range g.evecs.linkBySense(opt.QueryVector, limit, g.rules.SenseMargin) {
+		for _, id := range []uint32{h.Key.Src, h.Key.Dst} {
+			if room <= 0 {
+				return seeds
+			}
+			ent, ok := g.ents.Get(g.merges.Resolve(id))
+			if !ok || have[ent.ID] {
+				continue
+			}
+			mentions := len(g.ment.Of(ent.ID))
+			if opt.MinMentions > 0 && mentions < opt.MinMentions {
+				continue
+			}
+			have[ent.ID] = true
+			seeds = append(seeds, FoundEntity{
+				Entity: ent, Mentions: mentions,
+				Aliases:     g.ents.DisplayAliases(ent),
+				AliasesSafe: g.ents.SafeAliases(ent),
+				Books:       booksOf(g, ent.ID), Matched: "по связи",
+			})
+			room--
+		}
 	}
 	return seeds
 }

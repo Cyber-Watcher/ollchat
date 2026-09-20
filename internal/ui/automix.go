@@ -91,6 +91,8 @@ func (m *Model) mixPlan() (mixJob, bool) {
 		set: mixer.Settings{
 			Chain:              m.cfg.Mix.Chain,
 			RelationYears:      m.cfg.Mix.RelationYears,
+			MapPlain:           m.cfg.Mix.MapStyle == "plain",
+			MapPairOnly:        m.cfg.Mix.MapWhen == "pair",
 			TableBoost:         m.cfg.KB.TableBoost,
 			ExpandLimit:        m.cfg.KB.ExpandLimitOr(),
 			Entities:           m.cfg.Mix.Entities,
@@ -230,6 +232,8 @@ func (m *Model) autoMix(question string) mixResult {
 		Neighbors:          m.cfg.Mix.Neighbors,
 		Chain:              m.cfg.Mix.Chain,
 		RelationYears:      m.cfg.Mix.RelationYears,
+		MapPlain:           m.cfg.Mix.MapStyle == "plain",
+		MapPairOnly:        m.cfg.Mix.MapWhen == "pair",
 		Rank:               m.live.Rank(),
 		TopK:               topK,
 		MaxPerBook:         maxPerBook,

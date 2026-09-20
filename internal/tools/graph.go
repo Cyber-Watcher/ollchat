@@ -336,6 +336,21 @@ func (t *graphPathTool) Plan(args map[string]any) (*Plan, error) {
 	}, nil
 }
 
+// lazyDescribeLimit — сколько тем без описания описывать за один обзор:
+// каждая — обращение к модели на секунды, и обзор ждёт их все.
+const lazyDescribeLimit = 3
+
+// undescribed — номера тем обзора без описания, не больше limit.
+func undescribed(res graph.OverviewResult, limit int) []int {
+	var ids []int
+	for _, t := range res.Topics {
+		if t.Title == "" && len(ids) < limit {
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids
+}
+
 // ── graph_overview ───────────────────────────────────────────────────────────
 
 type graphOverviewTool struct{ opts Options }
@@ -387,11 +402,23 @@ func (t *graphOverviewTool) Plan(args map[string]any) (*Plan, error) {
 			if err != nil {
 				return "", err
 			}
-			res := g.Overview(query, comms, graph.OverviewOpts{
+			oo := graph.OverviewOpts{
 				TopCommunities: topK,
 				QueryVector:    queryVector(ctx, t.opts, g, query),
 				MinRating:      t.opts.GraphMinRating,
-			})
+			}
+			res := g.Overview(query, comms, oo)
+			// Ленивые описания: темы обзора без описания описываются сейчас
+			// (не больше lazyDescribeLimit за вызов — обзор ждёт модель) и
+			// обзор собирается заново уже с ними. Сбой описания обзор
+			// не роняет: темы показываются «без названия», как прежде.
+			if ids := undescribed(res, lazyDescribeLimit); len(ids) > 0 && t.opts.Summarizer != nil {
+				if n, _ := g.DescribeTopics(ctx, t.opts.Summarizer, ids, t.opts.SummaryOpts); n > 0 {
+					if comms, err = g.LoadCommunities(); err == nil {
+						res = g.Overview(query, comms, oo)
+					}
+				}
+			}
 			out := graph.RenderOverview(res, bookName(coll))
 			return out + graphNote(g, coll), nil
 		},
@@ -472,6 +499,14 @@ func (t *graphTopicTool) Plan(args map[string]any) (*Plan, error) {
 				return "", fmt.Errorf("сообщества не размечены: ollchat --graph-communities")
 			}
 			com, ok := comms.Topic(topic)
+			if ok && com.Title == "" && t.opts.Summarizer != nil {
+				if n, _ := g.DescribeTopics(ctx, t.opts.Summarizer, []int{com.ID}, t.opts.SummaryOpts); n > 0 {
+					if fresh, err := g.LoadCommunities(); err == nil && fresh != nil {
+						comms = fresh
+						com, ok = comms.Topic(topic)
+					}
+				}
+			}
 			if !ok {
 				return fmt.Sprintf("темы %q в графе нет — посмотрите номера в %s",
 					topic, NameGraphOverview), nil

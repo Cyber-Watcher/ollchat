@@ -61,6 +61,15 @@ type RenderOpts struct {
 	// цитат в ней нет намеренно — за ними модель зовёт kb_search, — а возраст
 	// знания ей виден так же, как человеку в /search (этап 104, П10.3).
 	YearsOnly bool
+
+	// Plain — карта без чисел: у понятия не печатаются «упоминаний N в M
+	// книгах», у связи — «(подтверждений N)». Для модели (этап 105, Б1.б):
+	// судья 20.09.2026 на 20 вопросах предпочёл ответы БЕЗ карты 17:1, потому
+	// что `qwen3.8` пересказывала числа («в вашей карте: 17 подтверждений»)
+	// вместо ответа. Числа нужны человеку в /search, модели — нет. Год
+	// свежайшего подтверждения (YearsOnly) остаётся: он о возрасте знания,
+	// а не о карте.
+	Plain bool
 }
 
 func (o RenderOpts) norm() RenderOpts {
@@ -126,8 +135,12 @@ func Render(src Chunks, res SearchResult, opt RenderOpts) string {
 
 	b.WriteString("Понятия по вопросу:\n")
 	for _, e := range res.Entities {
-		fmt.Fprintf(&b, "  %s (%s) — упоминаний %d в %s\n",
-			e.Name, e.Type, e.Mentions, plural(e.Books, "книге", "книгах", "книгах"))
+		if opt.Plain {
+			fmt.Fprintf(&b, "  %s (%s)\n", e.Name, e.Type)
+		} else {
+			fmt.Fprintf(&b, "  %s (%s) — упоминаний %d в %s\n",
+				e.Name, e.Type, e.Mentions, plural(e.Books, "книге", "книгах", "книгах"))
+		}
 		same, near := aliasesFor(e, opt)
 		if len(same) > 0 {
 			fmt.Fprintf(&b, "      он же: %s\n", strings.Join(same, ", "))
@@ -158,7 +171,14 @@ func Render(src Chunks, res SearchResult, opt RenderOpts) string {
 			if y := newestYear(src, keys); y > 0 {
 				extra = fmt.Sprintf(", свежайшее %d г.", y)
 			}
-			fmt.Fprintf(&b, "  %s —%s→ %s (подтверждений %d%s)\n", r.Src, r.Type, r.Dst, r.Count, extra)
+			switch {
+			case opt.Plain && extra != "":
+				fmt.Fprintf(&b, "  %s —%s→ %s (%s)\n", r.Src, r.Type, r.Dst, strings.TrimPrefix(extra, ", "))
+			case opt.Plain:
+				fmt.Fprintf(&b, "  %s —%s→ %s\n", r.Src, r.Type, r.Dst)
+			default:
+				fmt.Fprintf(&b, "  %s —%s→ %s (подтверждений %d%s)\n", r.Src, r.Type, r.Dst, r.Count, extra)
+			}
 			if opt.RelationRunes > 0 && src != nil && !opt.YearsOnly {
 				if q := evidenceLine(src, r, opt.RelationRunes, opt.EvidenceFirst); q != "" {
 					fmt.Fprintf(&b, "      %s\n", q)

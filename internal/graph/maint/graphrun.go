@@ -909,7 +909,12 @@ func Recheck(stdout io.Writer, cfg *config.Config, name string, count, minMember
 // В отличие от сборки графа, работа тут короткая: один запрос на сообщество,
 // сотни запросов вместо сотен тысяч. Но карту она всё равно занимает, поэтому
 // запускается человеком отдельной командой, а не сама после разбиения.
-func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int) error {
+func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int, force bool) error {
+	if cfg.Graph.LazySummaries() && !force {
+		fmt.Fprintln(stdout, "graph.summaries = lazy: описания тем пишутся при обращении (graph_overview, graph_topic), "+
+			"докатка их не пишет; описать всё сейчас — --graph-summaries-force")
+		return nil
+	}
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -2677,6 +2682,107 @@ func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 		return err
 	}
 	fmt.Fprintf(stdout, "пересчитано векторов: %d за %s\n", fixed, time.Since(started).Round(time.Second))
+	return nil
+}
+
+// LazySummarizer — модель и числа для ленивых описаний тем (graph.summaries
+// = lazy, этап 105 Б2), какими их получают инструменты graph_overview и
+// graph_topic в диалоге и в службе MCP. nil — режим eager или модель
+// не настроена: описания пишет только докатка.
+func LazySummarizer(cfg *config.Config) (graph.Extractor, graph.SummaryOpts) {
+	opts := graph.SummaryOpts{
+		MinMembers:   cfg.Graph.SummaryMinMembers,
+		MaxMembers:   cfg.Graph.SummaryMaxMembers,
+		MaxRelations: cfg.Graph.SummaryMaxRelations,
+		Workers:      1,
+	}
+	if !cfg.Graph.LazySummaries() {
+		return nil, opts
+	}
+	ex := graphex.New(cfg.Graph.ExtractOptions(), cfg.EmbedFallback(), 2*time.Minute, nil)
+	if ex == nil {
+		return nil, opts
+	}
+	// Один поток: обзор ждёт описания, а модель на карте одна.
+	return ex.WithModel(cfg.Graph.SummaryModel, 1), opts
+}
+
+// EmbedEdges считает индекс троек (этап 105, Б8): векторы связей «X —тип→ Y»
+// с числом источников не ниже graph.triple_min_origins, рядом с графом.
+// Досчитывает недостающие и устаревшие, готовое не трогает; сухой прогон
+// только говорит, сколько троек в графе, скольких нет и сколько устарело.
+func EmbedEdges(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
+	base, err := kb.OpenBase(cfg.KB.Dir)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	coll, err := base.Open(name)
+	if err != nil {
+		return err
+	}
+	rules := cfg.Graph.Rules()
+	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules)
+	if err != nil {
+		return err
+	}
+	defer g.Close()
+
+	minOrigins := rules.TripleMinOrigins
+	if minOrigins <= 0 {
+		minOrigins = graph.DefaultTripleMinOrigins
+	}
+	want, missing, stale := g.StaleTriples(minOrigins)
+	info := g.EdgeVectorsInfo()
+	fmt.Fprintf(stdout, "граф %s: троек с источниками ≥ %d — %d; в индексе %d, недостающих %d, устаревших %d\n",
+		name, minOrigins, want, info.Count, missing, stale)
+	if p := info.Problem; p != "" {
+		fmt.Fprintf(stdout, "индекс на диске не принят: %s\n", p)
+	}
+	if dry {
+		if missing+stale > 0 {
+			fmt.Fprintln(stdout, "сухой прогон: посчитать —", "ollchat --graph-embed-edges", name)
+		}
+		return nil
+	}
+	if missing+stale == 0 && info.Problem == "" {
+		fmt.Fprintln(stdout, "индекс троек полон, считать нечего")
+		return nil
+	}
+	unmark, err := markWork(g, "векторы троек")
+	if err != nil {
+		return err
+	}
+	defer unmark()
+
+	fallback := cfg.EmbedFallback()
+	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
+	if emb == nil {
+		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	started := time.Now()
+	last := time.Now()
+	err = g.EmbedTriples(ctx, emb, minOrigins, graph.EmbedOpts{
+		Batch:   cfg.KB.EmbedBatch,
+		Workers: cfg.KB.EmbedWorkers,
+		OnWait:  embedWaitNote(),
+	}, func(p graph.EmbedProgress) {
+		if time.Since(last) < time.Second && p.Done < p.Total {
+			return
+		}
+		last = time.Now()
+		fmt.Fprintf(os.Stderr, "\r  %d/%d троек   ", p.Done, p.Total)
+	})
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return err
+	}
+	info = g.EdgeVectorsInfo()
+	fmt.Fprintf(stdout, "посчитано за %s: троек в индексе %d, размерность %d, модель %s\n",
+		time.Since(started).Round(time.Second), info.Count, info.Dim, info.Model)
 	return nil
 }
 

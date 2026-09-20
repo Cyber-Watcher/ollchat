@@ -619,6 +619,22 @@ type Mix struct {
 	// true с 18.09.2026 по замеру: вреда нет (kb_answers 11 из 11 против 10 из 11,
 	// «устаревшее без оговорки» 1 из 14 в обоих случаях), цена — десяток токенов.
 	RelationYears bool `toml:"relation_years"`
+	// MapStyle — как подавать карту модели: "counts" — с числами
+	// («упоминаний 12 в 4 книгах», «подтверждений 17»), как в /search;
+	// "plain" — без чисел и с запретом пересказывать карту. Этап 105, Б1.б:
+	// судья 20.09.2026 на 20 вопросах предпочёл ответы БЕЗ карты с числами
+	// 17:1 — `qwen3.8` пересказывала числа вместо ответа; карта без чисел
+	// выиграла у карты с числами 16:3 и сравнялась с ответом без карты (7:9).
+	// Умолчание — "plain" с 20.09.2026; пусто — то же.
+	MapStyle string `toml:"map_style"`
+	// MapWhen — когда класть карту: "always" — на всякий вопрос, связавшийся
+	// с графом; "pair" — только на вопрос о связи понятий (найдено не меньше
+	// двух и между ними есть связь или цепочка), вопрос об одном понятии
+	// получает только выдержки. Порядок Хуанга (этап 105, Б1): на точных
+	// терминах граф вредит. Умолчание — "always": замер 20.09.2026 на
+	// тематических вопросах выигрыша у "pair" не показал (8:7 против ответа
+	// без карты, 8 одинаковых из 20 против "plain").
+	MapWhen string `toml:"map_when"`
 	// Books — класть выдержки из книг к каждому вопросу (обычный RAG).
 	// По умолчанию выключено: восемь фрагментов это около двух тысяч токенов
 	// на вопрос, а модель с инструментами возьмёт их сама, когда они нужны.
@@ -742,6 +758,16 @@ type Graph struct {
 	// по-русски, и его можно доверить другой модели, не трогая извлечение.
 	SummaryModel string `toml:"summary_model"`
 
+	// Summaries — когда писать описания тем: "eager" — все новые темы описывает
+	// докатка (--graph-summaries), "lazy" — описание пишется при первом
+	// обращении к теме (graph_overview, graph_topic) и кешируется в разбиении,
+	// а --graph-summaries без --graph-summaries-force ничего не пишет.
+	// Этап 105, Б2: докатка описывала все темы подряд — минуты карты на книгу,
+	// а читаются единицы (перепись А1). Цена ленивости — первый обзор новой
+	// темы ждёт модель секунды. Слово владельца 20.09.2026: делать; умолчание
+	// пока "eager", включается после замера «тот же текст в обоих режимах».
+	Summaries string `toml:"summaries"`
+
 	// MinRating — не показывать в обзоре темы с оценкой ниже. 0 — пять.
 	// Столько же в MS GraphRAG: глобальный поиск отбирает сообщества
 	// по оценке (Essential GraphRAG, 2025, стр. 127).
@@ -843,6 +869,25 @@ type Graph struct {
 	// MaxEvidences — из скольких первых подтверждений связи выбирать выдержку,
 	// печатаемую под ней. 0 — умолчание (16).
 	MaxEvidences int `toml:"max_evidences"`
+
+	// PathFlow — цепочку «как связаны X и Y» искать по потоку (приём
+	// PathRAG, этап 105 Б5): ресурс от начала делится на узле между связями
+	// по весу и затухает за шаг, путь — по которому до конца доходит больше.
+	// Цепочка через общее понятие («data») почти ничего не доносит и
+	// проигрывает столь же короткой через узкое. false — прежний обход по
+	// числу шагов; включается по замеру (graphstats -chains до/после).
+	PathFlow bool `toml:"path_flow"`
+
+	// TripleLimit — вход в граф по тройкам (этап 105, Б8): сколько ближайших
+	// к вопросу связей «X —тип→ Y» добавлять во вход; их концы попадают в выдачу
+	// с пометкой «по связи». 0 — выключено, индекс троек не читается.
+	// Индекс лежит рядом с графом (edges.vec) и считается --graph-embed-edges.
+	// Умолчание 0: без выигрыша на замере (--graph-entry-eval) не включается.
+	TripleLimit int `toml:"triple_limit"`
+	// TripleMinOrigins — с какого числа источников связь попадает в индекс
+	// троек. 0 — умолчание (2): одиночные подтверждения — 83% связей графа
+	// и в основном шум разбора. Другой порог — другой индекс, счёт заново.
+	TripleMinOrigins int `toml:"triple_min_origins"`
 
 	// ChainHubLimit — с какого числа связей понятие считается «хабом», через
 	// который цепочка между двумя понятиями вопроса не идёт (этап 101, D1).
@@ -1334,6 +1379,8 @@ func Default() *Config {
 			Neighbors:          4,
 			QuotesWithoutTools: 3,
 			RelationYears:      true,
+			MapStyle:           "plain",
+			MapWhen:            "always",
 		},
 		Web: Web{Timeout: "20s"},
 		Sandbox: Sandbox{
@@ -1540,6 +1587,9 @@ func (k KB) RerankOptions() kbrerank.Options {
 	return kbrerank.Options{URL: k.RerankURL, Model: k.RerankModel, Timeout: k.RerankTimeoutDuration()}
 }
 
+// LazySummaries — описания тем пишутся при обращении, а не докаткой.
+func (g Graph) LazySummaries() bool { return g.Summaries == "lazy" }
+
 // ExtractOptions — настройки извлечения для graphex.New и graphex.NewPool.
 func (g Graph) ExtractOptions() graphex.Options {
 	return graphex.Options{URL: g.URL, Model: g.Model, KeepAlive: g.KeepAlive, Workers: g.Workers,
@@ -1672,6 +1722,9 @@ func (g Graph) Rules() graph.Rules {
 		VectorAliases:    g.VectorAliases,
 		VectorDesc:       g.VectorDesc,
 		MaxEvidences:     g.MaxEvidences,
+		PathFlow:         g.PathFlow,
+		TripleLimit:      g.TripleLimit,
+		TripleMinOrigins: g.TripleMinOrigins,
 		ChainHubLimit:    g.ChainHubLimit,
 		WeightsByOrigins: g.WeightsByOrigins,
 		RelatedWeight:    g.RelatedWeight,
@@ -1715,6 +1768,12 @@ func (c *Config) finalize() error {
 	if f := c.graphBase.Format; f != 0 && (!graph.KnownVersion(f) || f >= graph.FormatV2) {
 		return fmt.Errorf("graph.format = %d: в общем разделе допустим только формат 1; "+
 			"формат %d задаётся в разделе именованного графа, например [graph.lab]", f, graph.FormatV2)
+	}
+	// Пусто — eager (LazySummaries смотрит только на "lazy").
+	switch c.graphBase.Summaries {
+	case "", "eager", "lazy":
+	default:
+		return fmt.Errorf("graph.summaries = %q: допустимо eager или lazy", c.graphBase.Summaries)
 	}
 	if !graph.KnownAlgorithm(c.graphBase.Partition) {
 		return fmt.Errorf("graph.partition = %q: допустимо louvain или leiden", c.graphBase.Partition)
@@ -1971,6 +2030,20 @@ func (c *Config) finalize() error {
 	}
 	if c.Mix.QuotesWithoutTools < 0 {
 		c.Mix.QuotesWithoutTools = 0
+	}
+	switch c.Mix.MapStyle {
+	case "":
+		c.Mix.MapStyle = "plain"
+	case "counts", "plain":
+	default:
+		return fmt.Errorf("mix.map_style = %q: допустимо counts или plain", c.Mix.MapStyle)
+	}
+	switch c.Mix.MapWhen {
+	case "":
+		c.Mix.MapWhen = "always"
+	case "always", "pair":
+	default:
+		return fmt.Errorf("mix.map_when = %q: допустимо always или pair", c.Mix.MapWhen)
 	}
 	// Прежнее имя настройки. kb.auto жил в конфигах раньше [mix], и молча
 	// перестать его слушать значит выключить человеку подмешивание, которым

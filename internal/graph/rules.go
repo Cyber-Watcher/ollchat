@@ -39,6 +39,19 @@ type Rules struct {
 	VectorAliases int
 	MaxEvidences  int
 
+	// Вход по тройкам (этап 105, Б8): TripleLimit — сколько ближайших к вопросу
+	// троек «X —тип→ Y» добавлять во вход (их концы становятся понятиями
+	// выдачи с пометкой «по связи»); 0 — вход выключен, индекс не читается.
+	// TripleMinOrigins — с какого числа источников связь попадает в индекс
+	// (0 — DefaultTripleMinOrigins). Индекс считает --graph-embed-edges.
+	TripleLimit      int
+	TripleMinOrigins int
+
+	// PathFlow — цепочку между понятиями искать по потоку (PathRAG), а не
+	// по числу шагов: см. pathByFlow в search.go. Выключатель ради замера
+	// «до/после» одним бинарём (этап 105, Б5); умолчание — прежний обход.
+	PathFlow bool
+
 	// SeedRelationsOff — НЕ поднимать в выдачу связи между понятиями, которые
 	// сами найдены по вопросу (см. promoteSeeds в search.go).
 	//
@@ -157,6 +170,9 @@ func (r Rules) norm() Rules {
 	}
 	if r.MaxEvidences <= 0 {
 		r.MaxEvidences = DefaultMaxEvidences
+	}
+	if r.TripleMinOrigins <= 0 {
+		r.TripleMinOrigins = DefaultTripleMinOrigins
 	}
 	if r.ChainHubLimit == 0 {
 		r.ChainHubLimit = DefaultChainHubLimit

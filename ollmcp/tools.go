@@ -11,6 +11,7 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	gmaint "github.com/Cyber-Watcher/ollchat/internal/graph/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
@@ -92,8 +93,11 @@ func build(cfg *config.Config, service bool) (*mcp.Server, kbserve.Opts, error) 
 			go warmGraphs(base, graphCache, cfg.Graph.Rules())
 		}
 	} // иначе graph.cache = false: открывать на каждый вызов
+	summarizer, summaryOpts := gmaint.LazySummarizer(cfg)
 	registry, err := tools.NewRegistry(enabled, tools.Options{
 		GraphRules:     cfg.Graph.Rules(),
+		Summarizer:     summarizer,
+		SummaryOpts:    summaryOpts,
 		KBTableBoost:   cfg.KB.TableBoost,
 		KBExpandLimit:  cfg.KB.ExpandLimitOr(),
 		KBAbstainGap:   cfg.KB.AbstainGap,
