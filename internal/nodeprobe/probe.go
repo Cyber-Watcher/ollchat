@@ -68,6 +68,11 @@ type Opts struct {
 	// ModelsDir — каталог моделей для проверки места. Пусто — взять
 	// из переменных окружения службы, а если и там нет — не проверять.
 	ModelsDir string
+
+	// OwnProcs — пути своих процессов на карте, которые не опознаются
+	// родством со службой Ollama: наш реранкер поднят контейнером и службе
+	// не родня (см. own.go). Подстроки пути; пусто — только родство.
+	OwnProcs []string
 }
 
 // Sections — какие разделы снимка нужны.
@@ -326,7 +331,7 @@ func Snapshot(ctx context.Context, o Opts) Report {
 		// Свои процессы на карте опознаются по родству с этой службой: имя
 		// программы для этого негодно — счётчики моделей Ollama называются
 		// llama-server и выглядели чужими (own.go, 12.09.2026).
-		rep.markOwnGPUProcs()
+		rep.markOwnGPUProcs(o.OwnProcs)
 	}
 	if o.Want.Host {
 		rep.collectHost(ctx, o)

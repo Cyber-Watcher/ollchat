@@ -45,6 +45,8 @@ func main() {
 		samples   = flag.Int("util-samples", 3, "сколько выборок загрузки карты брать")
 		gap       = flag.Duration("util-gap", time.Second, "шаг между выборками загрузки")
 		useSudo   = flag.Bool("journal-sudo", false, "читать журнал через sudo")
+		ours      = flag.String("ours", "", "пути своих процессов на карте через запятую: "+
+			"то, что служба Ollama не запускала, но своё (например, контейнер реранкера)")
 	)
 	flag.Parse()
 
@@ -65,8 +67,15 @@ func main() {
 	if *useSudo {
 		journalCmd = []string{"sudo", "journalctl"}
 	}
+	var ownProcs []string
+	for _, p := range strings.Split(*ours, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			ownProcs = append(ownProcs, p)
+		}
+	}
 	base := nodeprobe.Opts{
 		Service:       *service,
+		OwnProcs:      ownProcs,
 		ModelsDir:     *modelsDir,
 		UtilSamples:   *samples,
 		UtilSampleGap: *gap,

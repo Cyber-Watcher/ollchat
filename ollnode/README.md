@@ -62,6 +62,19 @@ OLLNODE_TOKEN=$(openssl rand -hex 32) ollnode
 | `--util-samples` | `3` | сколько выборок загрузки карты брать |
 | `--util-gap` | `1s` | шаг между выборками |
 | `--journal-sudo` | нет | читать журнал через `sudo` |
+| `--ours` | пусто | пути своих процессов на карте через запятую: то, что служба Ollama не запускала, но своё |
+
+**`--ours` — зачем.** Свой процесс наблюдатель узнаёт по родству с главным
+процессом службы Ollama (счётчики моделей — её дети). Но на карте бывает и своё,
+запущенное мимо службы: у нас это реранкер `bge-reranker-v2-m3`, поднятый
+контейнером llama.cpp, — он виден как `/app/llama-server` и службе не родня.
+Без этого ключа он числится чужой работой, и клиент пишет «чужое на карте:
+llama-server (1460 МиБ)». Поведения это не меняет (наблюдатель ни на что
+не влияет с 12.09.2026), но строка врёт. Ключ принимает подстроки пути:
+
+```
+ollnode --listen 127.0.0.1:11435 --ours /app/llama-server
+```
 
 ## Права
 
@@ -141,7 +154,7 @@ After=network-online.target
 Type=simple
 User=ollnode
 Environment=OLLNODE_TOKEN=длинная-случайная-строка
-ExecStart=/home/ollnode/bin/ollnode --listen 127.0.0.1:11435
+ExecStart=/home/ollnode/bin/ollnode --listen 127.0.0.1:11435 --ours /app/llama-server
 Restart=on-failure
 RestartSec=5
 # Служба только читает — пусть и система это подтвердит.
