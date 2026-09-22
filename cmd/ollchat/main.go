@@ -10,6 +10,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -221,6 +222,13 @@ type cliFlags struct {
 
 // parseFlags объявляет и разбирает ключи.
 func parseFlags() *cliFlags {
+	f := parseFlagsNoParse()
+	flag.Parse()
+	return f
+}
+
+// parseFlagsNoParse объявляет ключи, но не разбирает командную строку.
+func parseFlagsNoParse() *cliFlags {
 	f := &cliFlags{}
 	f.cfgPath = flag.String("c", "", "путь к файлу настроек (по умолчанию "+config.DefaultPath()+")")
 	f.initConfig = flag.Bool("init-config", false, "создать файл настроек с комментариями и выйти")
@@ -521,13 +529,102 @@ func parseFlags() *cliFlags {
 	f.askMinCos = flag.Float64("kb-min-cosine", -1, "порог смысловой близости фрагмента")
 	f.askSemW = flag.Float64("kb-semantic-weight", -1, "вес смысла против совпадения слов")
 	flag.Usage = usage
-	flag.Parse()
+	return f
+}
+
+// parseFlagsWith — то же самое на заданной командной строке; нужен проверкам,
+// которые разбирают ключи, не трогая os.Args.
+func parseFlagsWith(args []string) *cliFlags {
+	f := parseFlagsNoParse()
+	_ = flag.CommandLine.Parse(args)
 	return f
 }
 
 // dispatchCLI выполняет безголовую команду, если её попросили ключом.
 // Возвращает true, когда команда была: интерфейс тогда не запускается.
+// writingFlags — команды, которые СОЗДАЮТ или ПРАВЯТ содержимое коллекции
+// и графа. Машине-читателю (general.role = "reader") они запрещены.
+//
+// Список перечисляет запрещённое, а не разрешённое, намеренно: новая команда
+// чтения должна работать на читателе сразу, а новая команда записи — быть
+// внесена сюда сознательно (тест TestReaderForbidsWritingFlags следит за тем,
+// чтобы список не расходился с набором ключей).
+//
+// Что читателю ОСТАЁТСЯ: чат и поиск, `--graph-doctor`, `--kb-doctor`,
+// `--kb-list`, `--graph-status`, `--graph-find`, `--graph-book`,
+// `--graph-pending`, замеры входа, а главное — приём архивов с ведущей машины:
+// `--graph-archive`, `--graph-restore` и `--kb-rebase`. Без них читатель
+// не смог бы обновить у себя граф, ради которого всё и затевалось.
+func writingFlags(f *cliFlags) map[string]func() bool {
+	notEmpty := func(p *string) func() bool { return func() bool { return p != nil && *p != "" } }
+	isSet := func(p *bool) func() bool { return func() bool { return p != nil && *p } }
+	return map[string]func() bool{
+		"--kb-index":            notEmpty(f.kbIndex),
+		"--kb-sync":             notEmpty(f.kbSync),
+		"--kb-reindex":          notEmpty(f.kbReindex),
+		"--kb-refresh":          notEmpty(f.kbRefresh),
+		"--kb-merge":            notEmpty(f.kbMerge),
+		"--kb-embed":            notEmpty(f.kbEmbed),
+		"--kb-years":            notEmpty(f.kbYears),
+		"--kb-reanalyze":        notEmpty(f.kbReanalyze),
+		"--kb-flag-toc":         notEmpty(f.kbFlagTOC),
+		"--graph-build":         notEmpty(f.graphBuild),
+		"--graph-embed":         notEmpty(f.graphEmbed),
+		"--graph-embed-stale":   notEmpty(f.graphEmbedStale),
+		"--graph-embed-edges":   notEmpty(f.graphEmbedEdges),
+		"--graph-embed-follow":  notEmpty(f.graphEmbedFollow),
+		"--graph-communities":   notEmpty(f.graphComm),
+		"--graph-drift":         notEmpty(f.graphDrift),
+		"--graph-summaries":     notEmpty(f.graphSum),
+		"--graph-recheck":       notEmpty(f.graphRecheck),
+		"--graph-findings":      notEmpty(f.graphFindings),
+		"--graph-merge":         notEmpty(f.graphMerge),
+		"--graph-unmerge":       notEmpty(f.graphUnmerge),
+		"--graph-queue-doubts":  notEmpty(f.graphQueueDoubts),
+		"--graph-compact":       notEmpty(f.graphCompact),
+		"--graph-forget-chunks": notEmpty(f.graphForgetChunks),
+		"--graph-deny-aliases":  notEmpty(f.graphDenyAliases),
+		"--graph-rebase-books":  notEmpty(f.graphRebaseBooks),
+		"--graph-record-books":  notEmpty(f.graphRecordBooks),
+		"--graph-groups-build":  notEmpty(f.graphGroupsBuild),
+		"--graph-drop-book":     notEmpty(f.graphDropBook),
+		"--graph-link-new":      isSet(f.graphLinkNew),
+		"--graph-resolve":       notEmpty(f.graphResolve),
+		"--graph-tune":          notEmpty(f.graphTune),
+		"--graph-bench":         notEmpty(f.graphBench),
+		"--graph-forget-toc":    notEmpty(f.graphForgetTOC),
+	}
+}
+
+// readerRefusal — какая из запрещённых команд запрошена; пусто — ни одной.
+// Имена перебираются по порядку, чтобы сообщение не плясало от запуска к запуску.
+func readerRefusal(f *cliFlags) string {
+	w := writingFlags(f)
+	names := make([]string, 0, len(w))
+	for name := range w {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if w[name]() {
+			return name
+		}
+	}
+	return ""
+}
+
 func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
+	// Машина-читатель: библиотеку и граф пишет другая машина.
+	if cfg.ReadOnlyMachine() {
+		if name := readerRefusal(f); name != "" {
+			return true, fmt.Errorf("%s: эта машина объявлена читателем (general.role = %q в %s).\n"+
+				"  Коллекцию и граф пишет одна машина — у графа нет слияния, и два собранных порознь склеить нечем.\n"+
+				"  Читателю доступны: чат и поиск, --graph-doctor, --kb-doctor, --kb-list, --graph-status,\n"+
+				"  и приём свежего графа: --graph-restore <архив> и --kb-rebase <коллекция>.\n"+
+				"  Если эта машина и должна собирать — поменяйте general.role на %q осознанно.",
+				name, config.RoleReader, cfg.Path, config.RoleBuilder)
+		}
+	}
 	switch {
 	case *f.kbList:
 		return true, kmaint.List(os.Stdout, cfg)

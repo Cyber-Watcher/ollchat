@@ -91,8 +91,25 @@ type Viewers struct {
 }
 
 // General — общие настройки приложения.
+// Роли машины. Библиотеку и граф пишет ровно одна машина: у графа нет слияния,
+// и два экземпляра, собранные порознь, склеить нечем (docs/ProjectMoveAndSync.md).
+// Прежде это держалось только на памяти человека; с 22.09.2026 — настройкой.
+const (
+	RoleBuilder = "builder" // всё можно: сборка, индексация, векторы, обслуживание
+	RoleReader  = "reader"  // только читать и принимать архивы с ведущей машины
+)
+
 type General struct {
 	DefaultServer string `toml:"default_server"`
+
+	// Role — что этой машине позволено делать с коллекцией и графом.
+	// Пусто или "builder" — прежнее поведение, всё разрешено. "reader" —
+	// машина-читатель: чат, поиск, обзор, доктор и приём архивов
+	// (--graph-restore, --kb-rebase) работают, а всё, что СОЗДАЁТ содержимое —
+	// сборка графа, индексация, векторы, темы, склейки, уплотнение — отклоняется
+	// с объяснением. Защита от единственной по-настоящему дорогой ошибки:
+	// собрать граф на второй машине и обнаружить это через неделю.
+	Role string `toml:"role"`
 	// VRAMProfile — путь к профилю замеров olldiagtools. Пустой путь означает
 	// стандартное расположение рядом с конфигом.
 	VRAMProfile    string `toml:"vram_profile"`
@@ -1587,6 +1604,9 @@ func (k KB) RerankOptions() kbrerank.Options {
 	return kbrerank.Options{URL: k.RerankURL, Model: k.RerankModel, Timeout: k.RerankTimeoutDuration()}
 }
 
+// ReadOnlyMachine — машина объявлена читателем (general.role = "reader").
+func (c *Config) ReadOnlyMachine() bool { return c.General.Role == RoleReader }
+
 // LazySummaries — описания тем пишутся при обращении, а не докаткой.
 func (g Graph) LazySummaries() bool { return g.Summaries == "lazy" }
 
@@ -2027,6 +2047,12 @@ func (c *Config) finalize() error {
 	}
 	if c.Mix.Neighbors < 0 {
 		c.Mix.Neighbors = 4
+	}
+	switch c.General.Role {
+	case "", RoleBuilder, RoleReader:
+	default:
+		return fmt.Errorf("general.role = %q: допустимо %q (всё можно) или %q (только чтение и приём архивов)",
+			c.General.Role, RoleBuilder, RoleReader)
 	}
 	if c.Mix.QuotesWithoutTools < 0 {
 		c.Mix.QuotesWithoutTools = 0
