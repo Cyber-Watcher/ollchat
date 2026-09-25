@@ -285,7 +285,7 @@ func (c *Collection) collect(paths []string, opt IndexOpts) ([]candidate, error)
 			// индексации задаёт человек, поэтому затянуть сюда весь
 			// репозиторий с его README можно только намеренно.
 			ext := strings.ToLower(filepath.Ext(p))
-			if ext != ".pdf" && ext != ".epub" && !document.TextExt(p) {
+			if ext != ".pdf" && ext != ".epub" && !document.IndexExt(p) {
 				return nil
 			}
 			info, err := d.Info()

@@ -75,9 +75,26 @@ func TestSearchToolIsOffUnlessListed(t *testing.T) {
 	if !inAll {
 		t.Error("имя не в AllNames: конфиг с ним не запустится")
 	}
+	// Поверхность службы MCP 25.09.2026 изменена по слову владельца: слитый
+	// `search` встал ВМЕСТО пары `kb_search` + `graph_search`, чтобы служба
+	// отдавала то же, что человек видит по /search. Держим именно это —
+	// и главный инвариант: ничего пишущего в поверхности нет и быть не может.
+	ro := map[string]bool{}
 	for _, n := range ReadOnlyNames() {
-		if n == NameSearch {
-			t.Error("инструмент попал в поверхность службы MCP — она расширяется только осознанно")
+		ro[n] = true
+	}
+	if !ro[NameSearch] {
+		t.Error("служба обязана раздавать search: решение 25.09.2026, этап 105 К7")
+	}
+	if ro[NameKBSearch] || ro[NameGraphSearch] {
+		t.Error("половинки заменены слитым поиском — держать обе раскладки сразу незачем")
+	}
+	if !ro[NameKBRead] {
+		t.Error("kb_read остаётся: без него найденный кусок не прочитать целиком")
+	}
+	for _, n := range []string{NameBash, NameWriteFile, NameEditFile, NameReadFile, NameListDir} {
+		if ro[n] {
+			t.Errorf("в поверхности службы появился %s: по сети отдаётся только чтение своих данных", n)
 		}
 	}
 }

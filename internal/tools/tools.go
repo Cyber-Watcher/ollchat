@@ -198,8 +198,14 @@ type Options struct {
 // то, чего никто не собирался раздавать.
 func ReadOnlyNames() []string {
 	return []string{
-		NameKBSearch, NameKBRead,
-		NameGraphSearch, NameGraphEntity, NameGraphPath,
+		// search вместо пары kb_search + graph_search с 25.09.2026 (этап 105,
+		// К7): служба отдаёт то же, что человек видит по /search — граф и книги
+		// одной выдачей. Замер на живой службе тем же вопросом: две половины
+		// стоили 10 438 знаков (≈3 480 токенов) за два обращения, слитая —
+		// 8 382 (≈2 794) за одно. Отбор по книге у слитого есть (параметр book),
+		// поэтому замена ничего не отнимает.
+		NameSearch, NameKBRead,
+		NameGraphEntity, NameGraphPath,
 		NameGraphOverview, NameGraphTopic,
 		NameWebSearch,
 	}

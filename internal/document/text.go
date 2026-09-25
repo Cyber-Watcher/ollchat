@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -33,10 +34,42 @@ const MaxTextLines = 65535
 // с этим делать.
 var ErrTooManyLines = errors.New("файл длиннее предела строк")
 
-// TextExt сообщает, берём ли мы файл с таким расширением как текстовый.
+// TextExt сообщает, берём ли мы файл с таким расширением как ДОКУМЕНТ-текст.
+//
+// Код сюда не входит намеренно. Первая редакция правки 25.09.2026 добавила
+// к нему `.go`, и это молча поменяло совсем другое поведение: `read_file`
+// на собственном исходнике пошёл путём документа и стал помечать вывод как
+// ЧУЖОЙ текст (`Plan.Foreign`) — то есть код проекта подавался модели так же,
+// как страница из сети. Поймали три чужих теста, которые это решение стерегли.
+// Отсюда разделение: TextExt — «документ», IndexExt — «можно положить
+// в базу знаний». Вопросы разные, и смешивать их нельзя.
 func TextExt(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".md", ".markdown", ".txt", ".text":
+		return true
+	}
+	return false
+}
+
+// IndexExt — можно ли положить файл в коллекцию базы знаний.
+//
+// Шире TextExt ровно на код: искать по своему коду вопросом полезно, а вот
+// считать его чужим документом при чтении — нет (см. TextExt).
+func IndexExt(path string) bool { return TextExt(path) || CodeExt(path) }
+
+// CodeExt — файл с исходным кодом: берётся как текст, но заголовком куска
+// служит объявление, а не заголовок раздела.
+//
+// **Зачем код в базе знаний.** Знание проекта живёт не только в `docs/`:
+// правило бывает записано только в скрипте обвязки, а почему сделано так —
+// в комментарии над функцией. 25.09.2026 разбор сторожа карты, обёртки `graph`
+// и пакетов `internal/` шёл `grep`'ом, потому что искать по ним было нечем.
+// Цена замерена в тот же день: весь код проекта — около 6 350 кусков против
+// 94 171 в коллекции документации, то есть прибавка 7 % и две минуты карты
+// на векторы.
+func CodeExt(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go", ".sh", ".bash", ".py":
 		return true
 	}
 	return false
@@ -74,17 +107,25 @@ func readText(path string, data []byte) (*Doc, []Part, error) {
 	}
 
 	md := isMarkdown(path)
+	code := CodeExt(path)
 	parts := make([]Part, 0, len(lines))
-	var heading string // ближайший заголовок markdown выше этой строки
+	var heading string // ближайший заголовок markdown (или объявление) выше строки
 	inFence := false
 	for i, l := range lines {
-		if md {
+		switch {
+		case md:
 			if strings.HasPrefix(strings.TrimSpace(l), "```") {
 				inFence = !inFence
 			} else if !inFence {
 				if h := mdHeading(l); h != "" {
 					heading = h
 				}
+			}
+		case code:
+			// У кода роль заголовка раздела играет объявление: без него
+			// ссылка «строки 120–140» не говорит, что это за место.
+			if h := codeHeading(l, filepath.Ext(path)); h != "" {
+				heading = h
 			}
 		}
 		parts = append(parts, Part{Number: i + 1, Title: heading, Text: l})
@@ -115,10 +156,51 @@ func mdHeading(line string) string {
 	return strings.TrimSpace(s)
 }
 
+// Объявления, по которым узнаётся «раздел» в коде. Языков ровно три — те,
+// на которых написан проект; остальное сюда не попадает, потому что CodeExt
+// таких расширений не берёт.
+var (
+	reGoFunc   = regexp.MustCompile(`^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)`)
+	reGoType   = regexp.MustCompile(`^type\s+([A-Za-z_]\w*)`)
+	reShFunc   = regexp.MustCompile(`^(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\)`)
+	rePyDefCls = regexp.MustCompile(`^\s*(def|class)\s+([A-Za-z_]\w*)`)
+)
+
+// codeHeading — объявление, начинающееся на этой строке, или пустая строка.
+//
+// У Go и оболочки берутся только объявления с начала строки: вложенное
+// замыкание — не «раздел», и его имя сбивало бы ссылку. У Python отступ
+// допускается намеренно: методы класса живут с отступом, и именно они
+// интересны тому, кто ищет.
+func codeHeading(line, ext string) string {
+	switch strings.ToLower(ext) {
+	case ".go":
+		if m := reGoFunc.FindStringSubmatch(line); m != nil {
+			return "func " + m[1]
+		}
+		if m := reGoType.FindStringSubmatch(line); m != nil {
+			return "type " + m[1]
+		}
+	case ".sh", ".bash":
+		if m := reShFunc.FindStringSubmatch(line); m != nil {
+			return m[1] + "()"
+		}
+	case ".py":
+		if m := rePyDefCls.FindStringSubmatch(line); m != nil {
+			return m[1] + " " + m[2]
+		}
+	}
+	return ""
+}
+
 // textTitle — как называть документ в выдаче поиска.
 //
 // У markdown берём первый заголовок первого уровня: он и есть название.
 // Не нашли — имя файла: оно всяко понятнее, чем первая строка текста.
+//
+// У кода к имени файла приписывается каталог: `main.go` в проекте два десятка
+// (по одному на каждый инструмент `privatescripts/`), и выдача из одних
+// «main» не сказала бы, о котором речь.
 func textTitle(path string, lines []string, md bool) string {
 	if md {
 		for i, l := range lines {
@@ -129,6 +211,12 @@ func textTitle(path string, lines []string, md bool) string {
 				return h
 			}
 		}
+	}
+	if CodeExt(path) {
+		if dir := filepath.Base(filepath.Dir(path)); dir != "." && dir != string(filepath.Separator) {
+			return dir + "/" + filepath.Base(path)
+		}
+		return filepath.Base(path)
 	}
 	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 }

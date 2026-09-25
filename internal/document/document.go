@@ -170,10 +170,26 @@ func DetectFile(path string) Kind {
 	return KindNone
 }
 
+// detectForIndex — то же, но для индексации базы знаний, где код тоже текст.
+//
+// Отдельная дорога, а не флаг в DetectFile: DetectFile отвечает на вопрос
+// «документ ли это» и решает, помечать ли вывод read_file как чужой текст.
+// Индексация спрашивает другое — «можно ли это положить в коллекцию»
+// (этап 105, М3).
+func detectForIndex(path string) Kind {
+	if k := DetectFile(path); k != KindNone {
+		return k
+	}
+	if CodeExt(path) {
+		return KindText
+	}
+	return KindNone
+}
+
 // Read читает документ целиком. Предел maxBytes — на файл: в контекст идёт
 // извлечённый текст, но сам файл всё же читается в память.
 func Read(path string, maxBytes int64) (*Doc, error) {
-	kind, data, err := load(path, maxBytes)
+	kind, data, err := load(path, maxBytes, false)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +232,7 @@ func Read(path string, maxBytes int64) (*Doc, error) {
 // по отдельности. Поле Doc.Text при этом пустое — склеивать текст незачем,
 // вызывающий код разбивает его на куски сам.
 func Parts(path string, maxBytes int64) (*Doc, []Part, error) {
-	kind, data, err := load(path, maxBytes)
+	kind, data, err := load(path, maxBytes, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -263,7 +279,7 @@ func Parts(path string, maxBytes int64) (*Doc, []Part, error) {
 // таких нет: там оглавление узнаётся по строению куска при нарезке.
 // Нужен проходу по уже проиндексированным книгам, где разделы не помечены.
 func ServiceUnits(path string, maxBytes int64) ([]int, error) {
-	kind, data, err := load(path, maxBytes)
+	kind, data, err := load(path, maxBytes, false)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +306,12 @@ func ServiceUnits(path string, maxBytes int64) ([]int, error) {
 // Нужен при обходе тысяч книг: скан отличается от книги только тем, что текста
 // в нём нет, и узнать это дешевле заранее.
 func Probe(path string, maxBytes int64, units int) (*Doc, error) {
-	kind, data, err := load(path, maxBytes)
+	// Проба идёт вместе с Parts (её зовёт parseBook прямо перед ним), поэтому
+	// и смотрит на файл теми же глазами: для индексации код — текст. Первая
+	// редакция правки 25.09.2026 развела Parts и Probe, и индексация отвергла
+	// 853 файла кода со словами «это не документ PDF, не книга EPUB и не
+	// текстовый файл» — проба отсекала их раньше, чем разбор успевал начаться.
+	kind, data, err := load(path, maxBytes, true)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +353,7 @@ func Probe(path string, maxBytes int64, units int) (*Doc, error) {
 
 // Images достаёт картинки документа.
 func Images(path string, maxBytes int64, opt ImageOptions) ([]Image, error) {
-	kind, data, err := load(path, maxBytes)
+	kind, data, err := load(path, maxBytes, false)
 	if err != nil {
 		return nil, err
 	}
@@ -369,8 +390,14 @@ func Images(path string, maxBytes int64, opt ImageOptions) ([]Image, error) {
 }
 
 // load определяет формат и читает файл, проверив размер.
-func load(path string, maxBytes int64) (Kind, []byte, error) {
-	kind := DetectFile(path)
+// forIndex — ищем ли мы вид файла глазами индексации (тогда код — текст)
+// или глазами документа. См. detectForIndex.
+func load(path string, maxBytes int64, forIndex bool) (Kind, []byte, error) {
+	detect := DetectFile
+	if forIndex {
+		detect = detectForIndex
+	}
+	kind := detect(path)
 	if kind == KindNone {
 		return KindNone, nil, errors.New("это не документ PDF, не книга EPUB и не текстовый файл")
 	}

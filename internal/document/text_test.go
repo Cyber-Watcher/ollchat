@@ -113,3 +113,96 @@ func TestTextExt(t *testing.T) {
 		}
 	}
 }
+
+// Код читается как текст, но заголовком куска служит объявление — иначе
+// ссылка «строки 120–140» не говорит, что это за место (этап 105, М3).
+func TestReadGoCode(t *testing.T) {
+	src := strings.Join([]string{
+		"package tools",
+		"",
+		"// compileSearch готовит шаблон.",
+		"func compileSearch(pat string) error {",
+		"\tinner := func() {}",
+		"\t_ = inner",
+		"\treturn nil",
+		"}",
+		"",
+		"type ThinLimits struct {",
+		"\tMinChunks int",
+		"}",
+		"",
+		"func (l ThinLimits) Verdict() bool { return false }",
+	}, "\n")
+	p := write(t, "search.go", src)
+	d, parts, err := Parts(p, 0)
+	if err != nil {
+		t.Fatalf("Parts: %v", err)
+	}
+	if !d.Kind.Text() || d.Units != len(parts) {
+		t.Errorf("код должен читаться как текст со строками: %q, строк %d, частей %d",
+			d.Kind, d.Units, len(parts))
+	}
+	// Название документа — с каталогом: файлов main.go в проекте десятки.
+	if want := filepath.Base(filepath.Dir(p)) + "/search.go"; d.Title != want {
+		t.Errorf("название %q, ожидалось %q", d.Title, want)
+	}
+	titles := map[int]string{}
+	for _, part := range parts {
+		titles[part.Number] = part.Title
+	}
+	for _, c := range []struct {
+		line int
+		want string
+	}{
+		{4, "func compileSearch"}, // объявление
+		{7, "func compileSearch"}, // тело той же функции
+		{10, "type ThinLimits"},   // тип
+		{14, "func Verdict"},      // метод: приёмник пропускается
+	} {
+		if titles[c.line] != c.want {
+			t.Errorf("строка %d: заголовок %q, ожидался %q", c.line, titles[c.line], c.want)
+		}
+	}
+	// Вложенное замыкание разделом не считается: иначе ссылка уехала бы на него.
+	if titles[5] != "func compileSearch" {
+		t.Errorf("вложенная функция не должна менять заголовок, получено %q", titles[5])
+	}
+}
+
+// Оболочка и Python: свои виды объявлений.
+func TestCodeHeadingShellAndPython(t *testing.T) {
+	for _, c := range []struct{ line, ext, want string }{
+		{"wait_free() {", ".sh", "wait_free()"},
+		{"function check {", ".sh", ""}, // без скобок не ловим: слишком общо
+		{"check() {", ".sh", "check()"},
+		{"  local x=1", ".sh", ""},
+		{"def main():", ".py", "def main"},
+		{"    def helper(self):", ".py", "def helper"}, // метод с отступом — берём
+		{"class Judge:", ".py", "class Judge"},
+		{"x = 1", ".py", ""},
+		{"func Open() {", ".go", "func Open"},
+		{"\tfunc inner() {}", ".go", ""}, // с отступом у Go — не раздел
+	} {
+		if got := codeHeading(c.line, c.ext); got != c.want {
+			t.Errorf("codeHeading(%q, %s) = %q, ожидалось %q", c.line, c.ext, got, c.want)
+		}
+	}
+}
+
+// Расширения кода берутся как текстовые, чужие — нет.
+func TestCodeExt(t *testing.T) {
+	for _, c := range []struct {
+		path string
+		want bool
+	}{
+		{"a/b.go", true}, {"x.sh", true}, {"y.py", true}, {"z.bash", true},
+		{"doc.md", false}, {"book.pdf", false}, {"conf.toml", false}, {"data.json", false},
+	} {
+		if got := CodeExt(c.path); got != c.want {
+			t.Errorf("CodeExt(%q) = %v, ожидалось %v", c.path, got, c.want)
+		}
+		if c.want && !IndexExt(c.path) {
+			t.Errorf("IndexExt(%q) должен брать код", c.path)
+		}
+	}
+}

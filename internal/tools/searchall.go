@@ -55,6 +55,7 @@ func (t *searchTool) Spec() ollama.Tool {
 			Properties: map[string]ollama.ToolProp{
 				"query":      {Type: "string", Description: "Вопрос своими словами или точный термин"},
 				"collection": {Type: "string", Description: "Имя коллекции; по умолчанию выбранная пользователем"},
+				"book":       {Type: "string", Description: "Брать выдержки только из книг, чьё название, автор или путь содержат эту строку. Карта понятий при этом строится по всей библиотеке: связи между понятиями не принадлежат одной книге"},
 				"top_k":      {Type: "integer", Description: "Сколько выдержек вернуть, 1..20"},
 				"full":       {Type: "boolean", Description: "Показывать куски целиком, а не выдержками"},
 			},
@@ -73,6 +74,7 @@ func (t *searchTool) Plan(args map[string]any) (*Plan, error) {
 		return nil, fmt.Errorf("пустой запрос")
 	}
 	name := strings.TrimSpace(argStringOr(args, "collection", ""))
+	book := strings.TrimSpace(argStringOr(args, "book", ""))
 	topK := argInt(args, "top_k", 0)
 	full := argBool(args, "full", false)
 
@@ -87,12 +89,12 @@ func (t *searchTool) Plan(args map[string]any) (*Plan, error) {
 		Req:   permissions.Request{Kind: permissions.KindRead, Target: t.opts.KBDir, Tool: NameSearch, Fixed: true},
 		Title: title,
 		Run: func(ctx context.Context) (string, error) {
-			return t.run(ctx, name, query, topK, full)
+			return t.run(ctx, name, query, book, topK, full)
 		},
 	}, nil
 }
 
-func (t *searchTool) run(ctx context.Context, name, query string, topK int, full bool) (string, error) {
+func (t *searchTool) run(ctx context.Context, name, query, book string, topK int, full bool) (string, error) {
 	// Где искать по книгам: своя коллекция или общая библиотека организации —
 	// тем же путём, что kb_search.
 	src, err := t.opts.collection(name)
@@ -140,6 +142,17 @@ func (t *searchTool) run(ctx context.Context, name, query string, topK int, full
 		Full:           full,
 		QueryTimeout:   t.opts.QueryTimeout,
 		RerankOpts:     t.opts.RerankOpts,
+	}
+	// Отбор по книге — то же, что у kb_search. Без него слитый поиск не мог бы
+	// заменить его собой: «что говорит ВОТ ЭТА книга» — обычный вопрос
+	// (25.09.2026, этап 105, К7 — возражение против замены без этого параметра).
+	//
+	// Отбор действует на ВЫДЕРЖКИ, а не на карту понятий: связь «X использует Y»
+	// подтверждена многими книгами сразу и одной книге не принадлежит. Так и
+	// написано в описании инструмента, чтобы модель не считала карту
+	// отфильтрованной.
+	if book != "" {
+		o.Docs = booksMatching(coll, book)
 	}
 	res, err := find.Search(ctx, deps, query, o)
 	if err != nil {
