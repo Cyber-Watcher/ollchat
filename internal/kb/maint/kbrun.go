@@ -72,7 +72,13 @@ func kbIndexDryRun(stdout io.Writer, coll *kb.Collection, name string, paths []s
 // лишь на --kb-embed, и «сухой» --kb-sync 29.08.2026 доиндексировал 49 книг
 // по-настоящему: человек просил оценку, а получил работу. Оценка обязана быть
 // оценкой при любой команде, к которой её приписали.
-func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sync, dry bool) error {
+//
+// keepThin — взять в индекс и те книги, которые проверка объявила тощими
+// (страницы-картинки, превью издательства). Решение человека, посмотревшего
+// на причину отказа, важнее порога; заодно ключ возвращает к разбору книги,
+// отвергнутые прошлым заходом, — иначе неизменившийся файл не попал бы
+// даже в кандидаты.
+func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sync, dry, keepThin bool) error {
 	if err := kb.ValidName(name); err != nil {
 		return err
 	}
@@ -119,11 +125,16 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 	pl := progressPrinter()
 	defer pl.stop()
 	report := pl.update
-	opt := kb.IndexOpts{Workers: cfg.KB.Workers, MaxBytes: int64(cfg.KB.MaxBookMB) << 20}
+	opt := kb.IndexOpts{
+		Workers:  cfg.KB.Workers,
+		MaxBytes: int64(cfg.KB.MaxBookMB) << 20,
+		Thin:     cfg.KB.ThinLimits(),
+		KeepThin: keepThin,
+	}
 
 	var res kb.IndexResult
 	if sync {
-		res, err = coll.Sync(ctx, report)
+		res, err = coll.Sync(ctx, opt, report)
 	} else {
 		res, err = coll.Add(ctx, paths, opt, report)
 	}
@@ -150,7 +161,20 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 	if res.Errors > 0 {
 		fmt.Fprintf(stdout, ", сбоев %d", res.Errors)
 	}
+	if res.Thin > 0 {
+		fmt.Fprintf(stdout, ", тощих %d", res.Thin)
+	}
 	fmt.Fprintf(stdout, "\n")
+	// Тощие книги печатаются с причиной и числами сразу, а не отсылкой
+	// к доктору: это отказ взять книгу, которую человек только что положил
+	// в каталог, и он вправе тут же увидеть, почему, и не согласиться.
+	for _, t := range res.ThinBooks {
+		fmt.Fprintf(stdout, "  ! в индекс не взята: %s\n    %s\n",
+			filepath.Base(t.Path), t.Reason)
+	}
+	if res.Thin > 0 {
+		fmt.Fprintf(stdout, "  взять их всё равно: ollchat --kb-sync %s --kb-keep-thin\n", name)
+	}
 	if res.Skipped+res.Scans+res.Errors > 0 {
 		fmt.Fprintf(stdout, "причины по каждой книге: ollchat --kb-doctor %s\n", name)
 	}
@@ -281,7 +305,7 @@ func Reanalyze(stdout io.Writer, cfg *config.Config, name string, dry bool) erro
 // отрезок, потому что куски дописываются в конец. Поэтому доливка десятка
 // файлов стоит секунды, а не пересчёта всей коллекции.
 func Refresh(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
-	if err := Index(stdout, cfg, name, nil, true, dry); err != nil {
+	if err := Index(stdout, cfg, name, nil, true, dry, false); err != nil {
 		return err
 	}
 	// Смыслы не настроены — это не ошибка доливки: словесный поиск работает

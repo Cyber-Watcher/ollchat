@@ -59,6 +59,13 @@ const (
 	BookBroken  BookKind = "broken"  // разбор не удался
 	BookSkipped BookKind = "skipped" // слишком велика или не документ
 	BookGone    BookKind = "gone"    // пропала с диска
+
+	// BookThin — текст извлёкся, но его слишком мало для такого файла:
+	// страницы-картинки в обёртке из разметки или превью издательства,
+	// где от каждой главы взят один абзац. От BookScan отличается тем, что
+	// текст есть и проба его находит, — поймать можно только после разбора,
+	// сравнив объём текста с объёмом файла. Подробности — ThinLimits.
+	BookThin BookKind = "thin"
 )
 
 // BookRec — запись о книге в реестре коллекции.
@@ -732,7 +739,9 @@ func (c *Collection) Stats() Stats {
 		switch d.Kind {
 		case BookOK:
 			st.Indexed++
-		case BookScan:
+		case BookScan, BookThin:
+			// Тощая книга стоит рядом со сканом не случайно: и там и там
+			// в коллекции есть запись, а искать нечего.
 			st.Scans++
 		case BookBroken, BookGarbled:
 			st.Broken++

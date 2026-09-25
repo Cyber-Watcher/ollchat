@@ -96,7 +96,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 	books := c.LiveBooks()
 	st := c.Stats()
 
-	var gone, scans, broken []BookRec
+	var gone, scans, broken, thin []BookRec
 	byTitle := map[string][]BookRec{}
 	o.step("проверяю книги на месте", 0, len(books))
 	for i, b := range books {
@@ -115,6 +115,8 @@ func Doctor(c *Collection, o DoctorOpts) string {
 			byTitle[normalizeTitle(b.Title)] = append(byTitle[normalizeTitle(b.Title)], b)
 		case BookScan:
 			scans = append(scans, b)
+		case BookThin:
+			thin = append(thin, b)
 		case BookBroken, BookGarbled, BookSkipped:
 			broken = append(broken, b)
 		}
@@ -238,6 +240,21 @@ func Doctor(c *Collection, o DoctorOpts) string {
 			where(&b, r.Path, paint)
 		}
 		b.WriteString("  Текста в них нет; страницы можно показать модели с vision через /addimg.\n")
+	}
+	// Тощие книги: в индекс не взяты намеренно, и это не беда коллекции,
+	// а решение проверки. Человеку показывается причина с числами — чтобы
+	// он мог не согласиться и взять книгу ключом --kb-keep-thin.
+	if len(thin) > 0 {
+		fmt.Fprintf(&b, "\nВ индекс не взяты (текста мало для такого файла): %d\n", len(thin))
+		for i, r := range thin {
+			if i >= 5 {
+				fmt.Fprintf(&b, "  …и ещё %d\n", len(thin)-5)
+				break
+			}
+			dir, file := filepath.Split(r.Path)
+			fmt.Fprintf(&b, "  %s\n      %s\n      причина: %s\n\n", file, dir, r.Err)
+		}
+		fmt.Fprintf(&b, "  Взять их всё равно: ollchat --kb-sync %s --kb-keep-thin\n", c.name)
 	}
 	if len(broken) > 0 {
 		fmt.Fprintf(&b, "\nНе прочитались: %d\n", len(broken))
@@ -368,7 +385,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		fmt.Fprintf(&b, "\nПравила разбора изменились (%s → %s): стоит пересобрать словесный индекс.\n",
 			st.Analyzer, AnalyzerVersion)
 	}
-	if len(gone)+len(scans)+len(broken)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
+	if len(gone)+len(scans)+len(broken)+len(thin)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
 		!st.Stale && len(del) == 0 {
 		b.WriteString("\nВсё в порядке: непрочитанных, пропавших, сканов, сбоев и повторов нет.\n")
 	}
@@ -447,6 +464,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		copies:    len(pend.Dupes),
 		gone:      len(gone),
 		scans:     len(scans),
+		thin:      len(thin),
 		broken:    len(broken),
 		sameFiles: same,
 		editions:  dups,
@@ -610,6 +628,7 @@ type summary struct {
 	copies    int
 	gone      int
 	scans     int
+	thin      int
 	broken    int
 	sameFiles int
 	editions  int
@@ -633,6 +652,7 @@ func (s summary) String() string {
 		{s.gone, "пропали с диска, но ещё в выдаче"},
 		{s.broken, "не прочитались"},
 		{s.scans, "сканы без текста"},
+		{s.thin, "в индекс не взяты: мало текста"},
 		{s.sameFiles, "одна книга под разными именами"},
 		{s.editions, "похожи на разные издания"},
 		{s.deleted, "помечены удалёнными (место на диске)"},

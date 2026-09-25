@@ -38,6 +38,15 @@ type IndexOpts struct {
 	// изменились правила разбора, а не сама книга: доливка ориентируется
 	// на размер и время файла и такую книгу пропустила бы.
 	Force bool
+
+	// Thin — пределы «тощей» книги: текста извлеклось слишком мало для такого
+	// файла, и в индекс она не попадает. Нулевое значение — умолчания замера
+	// (см. ThinLimits).
+	Thin ThinLimits
+
+	// KeepThin — взять тощую книгу в индекс всё равно. Нужен человеку, который
+	// посмотрел на причину отказа и не согласен: своё решение важнее порога.
+	KeepThin bool
 }
 
 // Progress — сообщение о ходе работы.
@@ -95,6 +104,20 @@ type IndexResult struct {
 	// отличает семь нужных от семи случайно попавших в папку. Список видно
 	// сразу, без похода в /kb list и сверки с прошлым составом.
 	AddedBooks []AddedBook
+
+	// Thin — сколько книг отвергнуто как тощие, ThinBooks — какие именно
+	// и почему. Счётчика без списка тут мало вдвойне: отказ надо перепроверить
+	// глазами, а для этого человеку нужны имя файла и причина с числами.
+	Thin      int
+	ThinBooks []ThinBook
+}
+
+// ThinBook — книга, отвергнутая как тощая: путь и причина с числами.
+type ThinBook struct {
+	Path   string
+	Chunks int
+	Size   int64
+	Reason string
 }
 
 // forgetRecord убирает запись о книге, у которой нет ни номера, ни кусков.
@@ -274,7 +297,13 @@ func (c *Collection) collect(paths []string, opt IndexOpts) ([]candidate, error)
 			}
 			// Уже проиндексированная и не изменившаяся книга пропускается
 			// без чтения — на этом и держится дешёвая доливка.
-			if rec, ok := known[p]; ok && rec.Unchanged(info) && !opt.Force {
+			//
+			// Исключение — тощая книга при KeepThin: человек посмотрел на
+			// причину отказа и велел взять её всё равно. Без этого исключения
+			// ключ не работал бы вовсе: файл не менялся, и книга не попала бы
+			// даже в кандидаты.
+			if rec, ok := known[p]; ok && rec.Unchanged(info) && !opt.Force &&
+				!(opt.KeepThin && rec.Kind == BookThin) {
 				return nil
 			}
 			seen[p] = true
@@ -375,6 +404,15 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			ModTime: p.cand.info.ModTime().UnixNano(), At: time.Now().Unix(),
 			Hash: p.cand.hash,
 		}
+		// Тощая ли книга, решается до switch: причину надо и записать в реестр,
+		// и показать человеку, а считать вердикт дважды — значит однажды
+		// разойтись. Проверка идёт здесь, а не в пробе на скан: пока книга
+		// не разобрана, объёма текста никто не знает, а именно он и отличает
+		// превью издательства от книги.
+		thin, thinWhy := false, ""
+		if p.err == nil && len(p.chunks) > 0 && !opt.KeepThin {
+			thin, thinWhy = opt.Thin.Verdict(len(p.chunks), rec.Size)
+		}
 		switch {
 		case p.err != nil:
 			rec.Kind = classifyErr(p.err)
@@ -394,6 +432,22 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			rec.Kind = BookScan
 			rec.Err = "текста не нашлось"
 			res.Scans++
+			if err := c.appendDoc(rec); err != nil {
+				return res, err
+			}
+		case thin:
+			rec.Kind = BookThin
+			rec.Err = thinWhy
+			rec.Title, rec.Author = p.doc.Title, p.doc.Author
+			rec.Format, rec.Units, rec.UnitWord = string(p.doc.Kind), p.doc.Units, p.doc.Unit
+			rec.Chunks = len(p.chunks)
+			if rec.Title == "" || technicalTitle(rec.Title) {
+				rec.Title = titleFromFile(p.cand.path)
+			}
+			res.Thin++
+			res.ThinBooks = append(res.ThinBooks, ThinBook{
+				Path: p.cand.path, Chunks: len(p.chunks), Size: rec.Size, Reason: thinWhy,
+			})
 			if err := c.appendDoc(rec); err != nil {
 				return res, err
 			}
@@ -557,7 +611,7 @@ func (c *Collection) buildSegment(ctx context.Context, send func(Progress)) erro
 
 // Sync сверяет коллекцию с диском: доиндексирует новые книги, помечает
 // пропавшие и переиндексирует изменившиеся.
-func (c *Collection) Sync(ctx context.Context, report func(Progress)) (IndexResult, error) {
+func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progress)) (IndexResult, error) {
 	defer c.restamp() // запись своей же коллекции не должна выглядеть чужой
 	c.mu.RLock()
 	roots := append([]string(nil), c.meta.Roots...)
@@ -599,7 +653,7 @@ func (c *Collection) Sync(ctx context.Context, report func(Progress)) (IndexResu
 		removed++
 	}
 
-	res, err := c.Add(ctx, roots, IndexOpts{}, report)
+	res, err := c.Add(ctx, roots, opt, report)
 	res.Removed = removed
 	if removed > 0 {
 		if rerr := c.reopenIndex(); err == nil {

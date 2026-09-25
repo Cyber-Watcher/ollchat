@@ -209,8 +209,16 @@ func (g *Graph) Search(query string, opt SearchOpts) SearchResult {
 	var res SearchResult
 
 	seeds := g.linkEntities(query, opt)
-	seeds = g.addSenseSeeds(seeds, opt)
-	seeds = g.addTripleSeeds(seeds, opt)
+	// Порядок решает, кому достанутся места входа. Обычный — слово, смысл,
+	// тройки; при заданной квоте тройки встают перед смыслом, иначе им
+	// не остаётся ничего (замер В1: room = 0, см. Rules.TripleQuota).
+	if g.rules.TripleQuota > 0 {
+		seeds = g.addTripleSeeds(seeds, opt)
+		seeds = g.addSenseSeeds(seeds, opt)
+	} else {
+		seeds = g.addSenseSeeds(seeds, opt)
+		seeds = g.addTripleSeeds(seeds, opt)
+	}
 	if len(seeds) == 0 {
 		res.Note = "в графе нет понятий из этого вопроса"
 		return res
@@ -1105,7 +1113,13 @@ func (g *Graph) addTripleSeeds(seeds []FoundEntity, opt SearchOpts) []FoundEntit
 		return seeds
 	}
 	room := opt.TopEntities - len(seeds)
-	if max := opt.TopEntities / 2; room > max {
+	if q := g.rules.TripleQuota; q > 0 {
+		// Квота задана явно — она и есть предел; половинное правило
+		// смыслового входа к ней не применяется.
+		if room > q {
+			room = q
+		}
+	} else if max := opt.TopEntities / 2; room > max {
 		room = max
 	}
 	if room <= 0 {

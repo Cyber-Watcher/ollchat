@@ -167,7 +167,7 @@ func TestCollectionForgetsRemovedBook(t *testing.T) {
 	}
 
 	os.Remove(path)
-	res, err := c.Sync(context.Background(), nil)
+	res, err := c.Sync(context.Background(), IndexOpts{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

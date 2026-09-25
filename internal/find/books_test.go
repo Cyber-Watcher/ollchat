@@ -102,6 +102,27 @@ func TestBooksPassesFilters(t *testing.T) {
 	}
 }
 
+// Предел на книгу: ноль — умолчание коллекции, отрицательное — предела нет.
+//
+// Ловушка первого замера Ж2 (24.09.2026): «щедрый бюджет» ставил ноль, думая,
+// что снимает предел, а ядро читало ноль как умолчание (3) — и «по
+// max_per_book выпало 0» было артефактом прибора, а не результатом.
+func TestBooksPerBookLimitZeroIsDefaultNegativeIsNone(t *testing.T) {
+	def := kb.DefaultSearchOpts().MaxPerDoc
+	if def <= 0 {
+		t.Fatalf("умолчание коллекции должно быть положительным, иначе тест мерит не то: %d", def)
+	}
+	for _, c := range []struct{ set, want int }{{0, def}, {-1, 0}, {2, 2}} {
+		src := &fakeSource{hits: hits(3)}
+		if _, _, err := Books(context.Background(), Deps{Source: src}, "q", "q", Opts{TopK: 3, MaxPerBook: c.set}); err != nil {
+			t.Fatal(err)
+		}
+		if src.seen.MaxPerDoc != c.want {
+			t.Errorf("MaxPerBook %d → коллекции ушло %d, ожидалось %d", c.set, src.seen.MaxPerDoc, c.want)
+		}
+	}
+}
+
 // Ноль в kb.rerank_candidates значит «двадцать» (config.go), и первая ступень
 // обязана читать его так же, как вторая. Замер 04.09.2026: пока ядро брало
 // ноль буквально, реранкер переставлял ровно TopK кусков, и recall с ним

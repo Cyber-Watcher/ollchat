@@ -37,6 +37,7 @@ const (
 
 	// Инструменты графа понятий. Только чтение: сборка занимает видеокарту
 	// на часы и запускается человеком, у модели такого инструмента нет.
+	NameSearch        = "search"
 	NameGraphSearch   = "graph_search"
 	NameGraphEntity   = "graph_entity"
 	NameGraphPath     = "graph_path"
@@ -49,8 +50,8 @@ const (
 // AllNames возвращает имена всех поддерживаемых инструментов.
 func AllNames() []string {
 	return []string{NameReadFile, NameListDir, NameGrep, NameWriteFile, NameEditFile,
-		NameBash, NameHTTPFetch, NameKBSearch, NameKBRead, NameViewImage, NameWebSearch,
-		NameGraphSearch, NameGraphEntity, NameGraphPath, NameGraphOverview,
+		NameBash, NameHTTPFetch, NameSearch, NameKBSearch, NameKBRead, NameViewImage,
+		NameWebSearch, NameGraphSearch, NameGraphEntity, NameGraphPath, NameGraphOverview,
 		NameGraphTopic, NameConfluence}
 }
 
@@ -139,6 +140,9 @@ type Options struct {
 	// KBExpandLimit — сколькими именами понятий графа дополнять вопрос
 	// (kb.expand_limit, уже раскрытое: 0 — не расширять).
 	KBExpandLimit int
+	// KBDedupeCosine — порог, выше которого кусок выдачи считается повтором
+	// уже отобранного (kb.dedupe_cosine); 0 — не проверять.
+	KBDedupeCosine float64
 	// KBAbstainGap — порог воздержания kb_search (kb.abstain_gap): разрыв
 	// первого и второго места ниже него — выдача помечается как неуверенная.
 	// 0 — не помечать.
@@ -252,6 +256,8 @@ func NewRegistry(enabled []string, opts Options) (*Registry, error) {
 			t = &viewImageTool{opts: opts}
 		case NameWebSearch:
 			t = &webSearchTool{opts: opts}
+		case NameSearch:
+			t = &searchTool{opts: opts}
 		case NameGraphSearch:
 			t = &graphSearchTool{opts: opts}
 		case NameConfluence:

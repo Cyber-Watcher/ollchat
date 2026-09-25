@@ -67,6 +67,7 @@ type cliFlags struct {
 	kbRebaseTo            *string
 	kbRefresh             *string
 	kbDry                 *bool
+	kbKeepThin            *bool
 	kbList                *bool
 	kbDoctor              *string
 	kbQuick               *bool
@@ -121,6 +122,9 @@ type cliFlags struct {
 	kbEval                *string
 	kbEvalColl            *string
 	kbEvalK               *int
+	kbEvalWide            *int
+	kbEvalDedupe          *float64
+	kbEvalKeepAdj         *bool
 	kbEvalWeight          *float64
 	kbEvalTable           *float64
 	kbEvalRRFK            *float64
@@ -188,6 +192,7 @@ type cliFlags struct {
 	graphRecheck          *string
 	graphRecheckN         *int
 	graphDoctor           *string
+	graphRepartition      *string
 	graphArchive          *string
 	graphArchives         *string
 	graphRestore          *string
@@ -260,6 +265,8 @@ func parseFlagsNoParse() *cliFlags {
 	f.kbRefresh = flag.String("kb-refresh", "",
 		"долить новое и сразу досчитать векторы(смыслы): --kb-refresh projectdocs")
 	f.kbDry = flag.Bool("kb-dry-run", false, dryRunFlagHelp)
+	f.kbKeepThin = flag.Bool("kb-keep-thin", false,
+		"с --kb-sync и --kb-index: брать в индекс и книги, отвергнутые как тощие (страницы-картинки, превью издательства)")
 	f.kbList = flag.Bool("kb-list", false, "показать коллекции базы знаний и выйти")
 	f.kbDoctor = flag.String("kb-doctor", "", "проверить коллекцию: пропавшие книги, сканы, повторы (\"all\" — все)")
 	f.kbQuick = flag.Bool("kb-quick", false, "с --kb-doctor: без сверки книг по содержимому — быстрее, но повторы не найдутся")
@@ -348,6 +355,12 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-eval: коллекция, по которой мерить (по умолчанию kb.default)")
 	f.kbEvalK = flag.Int("kb-eval-k", 0,
 		"с --kb-eval: сколько первых кусков смотреть (по умолчанию 10)")
+	f.kbEvalWide = flag.Int("kb-eval-wide", 0,
+		"с --kb-eval: щедрый бюджет (кусков) для промахнувшихся вопросов — отделяет «не нашлось» от «нашлось, но не поместилось»: --kb-eval-wide 50")
+	f.kbEvalDedupe = flag.Float64("kb-eval-dedupe", 0,
+		"с --kb-eval: отбрасывать из выдачи куски, похожие на уже отобранные (порог близости, kb.dedupe_cosine): --kb-eval-dedupe 0.9")
+	f.kbEvalKeepAdj = flag.Bool("kb-eval-keep-adjacent", false,
+		"с --kb-eval: не выбрасывать соседние куски одной книги — отделяет «поиск не нашёл» от «выбросила наша доводка» (этап 105, З5)")
 	f.kbEvalWeight = flag.Float64("kb-eval-weight", 0,
 		"с --kb-eval: вес смыслового списка при слиянии (0 — как в работе)")
 	f.kbEvalTable = flag.Float64("kb-eval-table-boost", 0,
@@ -493,6 +506,8 @@ func parseFlagsNoParse() *cliFlags {
 		"с --graph-build: связывать новые имена с существующими понятиями по вектору и арбитру (опытный граф)")
 	f.graphDoctor = flag.String("graph-doctor", "",
 		"проверить граф и сказать, какими командами привести его в порядок: --graph-doctor books")
+	f.graphRepartition = flag.String("graph-repartition-due", "",
+		"сказать, пора ли пересчитывать разметку тем (доля понятий вне тем против порога), ничего не меняя: --graph-repartition-due books")
 	f.graphFind = flag.String("graph-find", "", "искать по графу понятий: --graph-find \"как связаны X и Y\"")
 	f.graphColl = flag.String("graph-collection", "", "с --graph-find: в какой коллекции искать")
 	f.graphJSON = flag.Bool("graph-json", false, "с --graph-find: выдать разбираемый JSON")
@@ -631,9 +646,9 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.kbDoctor != "":
 		return true, kmaint.Doctor(os.Stdout, cfg, *f.kbDoctor, *f.kbQuick)
 	case *f.kbIndex != "":
-		return true, kmaint.Index(os.Stdout, cfg, *f.kbIndex, flag.Args(), false, *f.kbDry)
+		return true, kmaint.Index(os.Stdout, cfg, *f.kbIndex, flag.Args(), false, *f.kbDry, *f.kbKeepThin)
 	case *f.kbSync != "":
-		return true, kmaint.Index(os.Stdout, cfg, *f.kbSync, nil, true, *f.kbDry)
+		return true, kmaint.Index(os.Stdout, cfg, *f.kbSync, nil, true, *f.kbDry, *f.kbKeepThin)
 	case *f.kbReindex != "":
 		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, flag.Args())
 	case *f.kbHash != "":
@@ -671,6 +686,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
+	case *f.graphRepartition != "":
+		return true, gmaint.Repartition(os.Stdout, cfg, *f.graphRepartition)
 	case *f.graphRebaseBooks != "":
 		return true, gmaint.RebaseBooks(os.Stdout, cfg, *f.graphRebaseBooks, false, *f.kbDry)
 	case *f.graphRecordBooks != "":
@@ -724,7 +741,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			coll = cfg.KB.Default
 		}
 		return true, kmaint.Eval(os.Stdout, cfg, coll, *f.kbEval, *f.kbEvalK, *f.kbEvalWeight, *f.kbEvalRRFK, *f.kbEvalTable,
-			*f.kbEvalOnly, *f.kbEvalRerank, *f.kbEvalCands, *f.kbEvalSnippet, *f.kbEvalExpand)
+			*f.kbEvalOnly, *f.kbEvalRerank, *f.kbEvalCands, *f.kbEvalSnippet, *f.kbEvalExpand, *f.kbEvalWide, *f.kbEvalDedupe, *f.kbEvalKeepAdj)
 	case *f.graphFindings != "":
 		return true, gmaint.Findings(os.Stdout, cfg, *f.graphFindings, *f.graphFindingsRating,
 			*f.graphFindingsMembers, *f.graphFindingsRedo, *f.graphFindingsDry)
@@ -961,6 +978,7 @@ func run() error {
 		GraphRules:           cfg.Graph.Rules(),
 		KBTableBoost:         cfg.KB.TableBoost,
 		KBExpandLimit:        cfg.KB.ExpandLimitOr(),
+		KBDedupeCosine:       cfg.KB.DedupeCosine,
 		KBAbstainGap:         cfg.KB.AbstainGap,
 		KBAbstainScore:       cfg.KB.AbstainScore,
 		Live:                 live,

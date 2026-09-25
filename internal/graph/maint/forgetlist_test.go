@@ -124,7 +124,7 @@ func TestForgetListDropsDeletedBook(t *testing.T) {
 	if err := os.Remove(gone); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := coll.Sync(context.Background(), nil); err != nil {
+	if _, err := coll.Sync(context.Background(), kb.IndexOpts{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(coll.DeletedBooks()) != 1 {

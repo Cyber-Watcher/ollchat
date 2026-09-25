@@ -451,3 +451,51 @@ func TestSnippetFindsWrappedWord(t *testing.T) {
 		t.Fatalf("выдержка не показала найденное: %q", got)
 	}
 }
+
+// Выключатель правила против соседей (этап 105, З5): с ним соседние куски
+// в выдачу попадают. Нужен замеру, чтобы отделить «поиск не нашёл» от
+// «нашёл, но выбросила наша доводка»; в работе умолчание прежнее.
+func TestSearchKeepAdjacentSwitch(t *testing.T) {
+	// Цитаты у кусков должны РАЗЛИЧАТЬСЯ: иначе соседей выбросит проверка
+	// по сходству цитат, и тест проверит не выключатель, а её (поймано
+	// прогоном 24.09.2026).
+	around := []string{
+		"при системном вызове чтения файла",
+		"когда канал переполнен записями",
+		"на границе кванта времени таймера",
+		"по требованию сборщика мусора",
+		"после блокировки мьютекса в очереди",
+		"при переносе на другое ядро процессора",
+	}
+	var book []string
+	for i := 0; i < len(around); i++ {
+		book = append(book, fmt.Sprintf("Часть %d. %s Планировщик вытесняет горутины %s. %s",
+			i, filler(4), around[i], filler(4)))
+	}
+	store, s := buildTestIndex(t, [][]string{book})
+	opt := DefaultSearchOpts()
+	opt.MaxPerDoc = 6
+	opt.KeepAdjacent = true
+	hits, err := s.Search("планировщик вытесняет горутины", opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ords []uint32
+	for _, h := range hits {
+		ords = append(ords, store.Rec(h.Chunk).Ord)
+	}
+	if len(ords) < 2 {
+		t.Fatalf("кусков в выдаче %d — проверять нечего", len(ords))
+	}
+	var adjacent bool
+	for i := 0; i < len(ords); i++ {
+		for j := i + 1; j < len(ords); j++ {
+			if ords[i]+1 == ords[j] || ords[j]+1 == ords[i] {
+				adjacent = true
+			}
+		}
+	}
+	if !adjacent {
+		t.Errorf("с KeepAdjacent соседние куски обязаны попадать в выдачу, получено %v", ords)
+	}
+}

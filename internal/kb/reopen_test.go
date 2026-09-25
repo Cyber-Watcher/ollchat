@@ -52,7 +52,7 @@ func TestOpenSeesExternalReindex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Sync(context.Background(), nil); err != nil {
+	if _, err := w.Sync(context.Background(), IndexOpts{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	writerBase.Close()

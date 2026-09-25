@@ -141,6 +141,11 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	} else if g.Rules().TripleLimit > 0 {
 		fmt.Fprintln(stdout, "  вход по тройкам включён (triple_limit), а индекса нет — посчитать: --graph-embed-edges")
 	}
+	// Квота без самого входа — настройка, которая молча не делает ничего:
+	// места резервируются для того, кто за ними не придёт.
+	if r := g.Rules(); r.TripleQuota > 0 && r.TripleLimit == 0 {
+		fmt.Fprintln(stdout, "  мест входа отдано тройкам (triple_quota), но сам вход выключен (triple_limit = 0) — настройка не делает ничего")
+	}
 	if p := g.Descriptions().Problem(); p != "" {
 		fmt.Fprintf(stdout, "  описания понятий: %s\n", p)
 	}
@@ -303,9 +308,15 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 				comms.Entities, st.Entities)
 		}
 		if uncovered > 0 {
-			share := 100 * uncovered / max(st.Entities, 1)
+			// Делим на ЖИВЫЕ понятия, а не на записи реестра: в числителе
+			// живые (`Entities().Live()`), и делить их на реестр с поглощёнными
+			// склейкой значит занижать долю — 24.09.2026 это давало 3 % вместо
+			// 4 % и отодвигало порог пересчёта. Та же ловушка, что в числителе
+			// 15.09.2026, только с другой стороны дроби.
+			live := st.Live()
+			share := 100 * uncovered / max(live, 1)
 			fmt.Fprintf(stdout, "    понятий вне тем: %d (%d%%) — обзор тем их не видит\n", uncovered, share)
-			needCommunities = repartitionDue(uncovered, st.Entities)
+			needCommunities = repartitionDue(uncovered, live)
 		}
 		if described < cand {
 			needSummaries = true
@@ -401,11 +412,13 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 //
 // Порог — десятая часть. Ниже неё пересчёт стоит дороже пользы: разметка
 // секундная, но следом идут описания тем, а это часы карты.
+const repartitionThreshold = 10
+
 func repartitionDue(uncovered, entities int) bool {
 	if entities <= 0 || uncovered <= 0 {
 		return false
 	}
-	return 100*uncovered/entities >= 10
+	return 100*uncovered/entities >= repartitionThreshold
 }
 
 // folderPending — сколько кусков каталога библиотеки ещё не разобрано.

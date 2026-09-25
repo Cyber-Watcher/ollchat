@@ -656,6 +656,37 @@ func TestStepsFileOverridesPatternAndMayBeAbsolute(t *testing.T) {
 	}
 }
 
+// Пределы тощей книги: ноль — умолчание кода, отрицательное — признак выключен.
+// У thin_min_mb «выключен» значит выключить признак «мало кусков», который он
+// охраняет, а не снять охрану: иначе -1 делал бы проверку строже всего —
+// предел по кускам ловил бы каждую короткую статью.
+func TestKBThinLimitsNegativeDisables(t *testing.T) {
+	if got := (KB{}).ThinLimits(); got.MinChunks != 0 || got.MinMB != 0 || got.ChunksPerMB != 0 {
+		t.Errorf("нули должны доехать нулями (умолчания кода): %+v", got)
+	}
+	if got := (KB{ThinMinChunks: -5}).ThinLimits(); got.MinChunks != -1 {
+		t.Errorf("thin_min_chunks < 0 → -1, получено %d", got.MinChunks)
+	}
+	if got := (KB{ThinChunksPerMB: -0.5}).ThinLimits(); got.ChunksPerMB != -1 {
+		t.Errorf("thin_chunks_per_mb < 0 → -1, получено %v", got.ChunksPerMB)
+	}
+	got := (KB{ThinMinMB: -1}).ThinLimits()
+	if got.MinChunks != -1 || got.MinMB < 0 {
+		t.Errorf("thin_min_mb < 0 должен выключить признак «мало кусков», получено %+v", got)
+	}
+	// Превью Ньюмена: 65 кусков на 9 МБ — плотность в порядке (7 на МБ),
+	// ловит только правило «мало кусков», и оно выключено.
+	if thin, why := got.Verdict(65, 9<<20); thin {
+		t.Errorf("с выключенным thin_min_mb книга не должна отвергаться по числу кусков: %s", why)
+	}
+	if thin, _ := (KB{}).ThinLimits().Verdict(65, 9<<20); !thin {
+		t.Error("контроль: с умолчаниями то же превью обязано отвергаться")
+	}
+	if got := (KB{ThinMinChunks: 50, ThinMinMB: 2, ThinChunksPerMB: 0.5}).ThinLimits(); got.MinChunks != 50 || got.MinMB != 2 || got.ChunksPerMB != 0.5 {
+		t.Errorf("положительные значения доезжают как есть: %+v", got)
+	}
+}
+
 // kb.expand_limit: 0 — умолчание кода, -1 — не расширять, N — N (этап 105, Б1).
 func TestKBExpandLimitOr(t *testing.T) {
 	for _, c := range []struct{ set, want int }{{0, DefaultExpandLimit}, {-1, 0}, {5, 5}, {1, 1}} {

@@ -139,6 +139,7 @@ func (m *Model) searchCmdFor(arg, collName string, withGraph bool, mode, where s
 		Turn:           m.turnID,
 		Mode:           mode,
 		TableBoost:     m.cfg.KB.TableBoost,
+		DedupeCosine:   m.cfg.KB.DedupeCosine,
 		Collection:     coll.Name(),
 		TopK:           a.TopK,
 		MaxPerBook:     liveMaxPerDoc,

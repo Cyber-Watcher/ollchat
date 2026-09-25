@@ -62,7 +62,7 @@ func threeHits() []kb.Result {
 func TestMixerUsesReranker(t *testing.T) {
 	coll := &fakeColl{hits: threeHits()}
 	s := Settings{TopK: 3, RerankOpts: kb.RerankOpts{Candidates: 10}}
-	res := books(coll, "запрос", "вопрос", 3, Deps{Coll: coll, Reranker: reverser{}}, s)
+	res, _ := books(coll, "запрос", "вопрос", 3, Deps{Coll: coll, Reranker: reverser{}}, s)
 	if res.Empty() {
 		t.Fatal("подмешивание пусто")
 	}
@@ -82,7 +82,7 @@ func TestMixerUsesReranker(t *testing.T) {
 func TestMixerSurvivesRerankerFailure(t *testing.T) {
 	coll := &fakeColl{hits: threeHits()}
 	s := Settings{TopK: 2, RerankOpts: kb.RerankOpts{Candidates: 10}}
-	res := books(coll, "запрос", "вопрос", 2, Deps{Coll: coll, Reranker: broken{}}, s)
+	res, _ := books(coll, "запрос", "вопрос", 2, Deps{Coll: coll, Reranker: broken{}}, s)
 	if res.Empty() {
 		t.Fatal("сбой второй ступени не должен отменять подмешивание")
 	}
@@ -97,7 +97,7 @@ func TestMixerSurvivesRerankerFailure(t *testing.T) {
 // Без реранкера ничего не меняется: первая ступень не расширяется.
 func TestMixerWithoutRerankerUnchanged(t *testing.T) {
 	coll := &fakeColl{hits: threeHits()}
-	res := books(coll, "запрос", "вопрос", 2, Deps{Coll: coll}, Settings{TopK: 2})
+	res, _ := books(coll, "запрос", "вопрос", 2, Deps{Coll: coll}, Settings{TopK: 2})
 	if res.Chunks != 2 || coll.got.TopK != 2 {
 		t.Errorf("без второй ступени TopK=%d, кусков %d — ожидалось 2 и 2", coll.got.TopK, res.Chunks)
 	}
@@ -113,7 +113,7 @@ func TestMixerWithoutRerankerUnchanged(t *testing.T) {
 // после, она объявляла бы это задним числом.
 func TestBooksBlockOrder(t *testing.T) {
 	coll := &fakeColl{hits: threeHits()}
-	out := books(coll, "вопрос", "вопрос", 3, Deps{BooksOn: true}, Settings{TopK: 3})
+	out, _ := books(coll, "вопрос", "вопрос", 3, Deps{BooksOn: true}, Settings{TopK: 3})
 
 	note := strings.Index(out.Text, kb.QuotedDataNote)
 	quotes := strings.Index(out.Text, "Выдержки из книг пользователя")

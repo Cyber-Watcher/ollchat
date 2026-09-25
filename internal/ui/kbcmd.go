@@ -261,8 +261,13 @@ func (m *Model) kbSync(arg string) tea.Cmd {
 		return nil
 	}
 	title := fmt.Sprintf("сверка коллекции %s", name)
+	opt := kb.IndexOpts{
+		Workers:  m.cfg.KB.Workers,
+		MaxBytes: int64(m.cfg.KB.MaxBookMB) * 1024 * 1024,
+		Thin:     m.cfg.KB.ThinLimits(),
+	}
 	return m.startJob(title, func(ctx context.Context, report func(kb.Progress)) error {
-		_, err := coll.Sync(ctx, report)
+		_, err := coll.Sync(ctx, opt, report)
 		return err
 	})
 }

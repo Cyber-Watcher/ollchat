@@ -314,8 +314,13 @@ func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 		RelationYears: cfg.Mix.RelationYears,
 		MapPlain:      cfg.Mix.MapStyle == "plain",
 		MapPairOnly:   cfg.Mix.MapWhen == "pair",
+		Abstain:       cfg.Mix.Abstain,
+		SenseEntry:    cfg.Mix.SenseEntry,
+		AbstainScore:  cfg.KB.AbstainScore,
+		AbstainGap:    cfg.KB.AbstainGap,
 		TableBoost:    cfg.KB.TableBoost,
 		ExpandLimit:   cfg.KB.ExpandLimitOr(),
+		DedupeCosine:  cfg.KB.DedupeCosine,
 		Entities:      cfg.Mix.Entities,
 		Neighbors:     cfg.Mix.Neighbors,
 		Rank: graph.NeighborRank{

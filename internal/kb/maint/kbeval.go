@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -38,7 +39,8 @@ type evalFile struct {
 // lookup, plain vector RAG edges out the best graph method»). 0 — как у
 // `/search`: без расширения.
 func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, weight, rrfk, tableBoost float64,
-	only string, rerank bool, candidates int, snippet bool, expand int) error {
+	only string, rerank bool, candidates int, snippet bool, expand, wide int, dedupe float64,
+	keepAdjacent bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("набор %s: %w", path, err)
@@ -79,7 +81,8 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 	if tableBoost <= 0 {
 		tableBoost = cfg.KB.TableBoost // «как в работе» — то, что стоит в настройках
 	}
-	opt := kb.EvalOpts{K: topK, SemanticWeight: weight, TableBoost: tableBoost}
+	opt := kb.EvalOpts{K: topK, SemanticWeight: weight, TableBoost: tableBoost, WideK: wide,
+		KeepAdjacent: keepAdjacent}
 	if rerank {
 		rr := kbrerank.New(cfg.KB.RerankOptions())
 		if rr == nil {
@@ -114,6 +117,8 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 			Semantic: so.Semantic, SemanticOnly: so.SemanticOnly,
 			TableBoost: so.TableBoost, RRFK: so.RRFK, SemanticWeight: so.SemanticWeight,
 			QueryTimeout: kb.DefaultQueryTimeout,
+			DedupeCosine: dedupe,
+			KeepAdjacent: keepAdjacent,
 			Rerank:       opt.Rerank != nil, RerankOpts: opt.RerankOpts,
 		}
 		hits, _, err := find.Books(ctx, find.Deps{Coll: coll, Embedder: emb, Reranker: opt.Rerank}, query, query, fo)
@@ -138,12 +143,25 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 	if expand > 0 {
 		fmt.Fprintf(stdout, ", вопрос расширен именами понятий графа (до %d)", expand)
 	}
+	if dedupe > 0 {
+		fmt.Fprintf(stdout, ", повторы выдачи отброшены по близости ≥ %.2f", dedupe)
+	}
+	if keepAdjacent {
+		fmt.Fprintf(stdout, ", СОСЕДНИЕ КУСКИ НЕ ВЫБРАСЫВАЮТСЯ (замер З5)")
+	}
 	fmt.Fprintln(stdout)
 	if emb == nil {
 		fmt.Fprintln(stdout, "внимание: kb.embed_model не задан — смысловые режимы мерить нечем")
 	}
-	fmt.Fprintf(stdout, "\n%-10s %10s %8s %8s %10s %8s\n", "режим", "recall@K", "MRR", "nDCG", "ср. место", "мимо")
-	fmt.Fprintln(stdout, "  "+dashes(56))
+	fmt.Fprintf(stdout, "\n%-10s %10s %8s %8s %10s %8s %8s\n",
+		"режим", "recall@K", "MRR", "nDCG", "ср. место", "мимо", "выпало")
+	fmt.Fprintln(stdout, "  "+dashes(65))
+	// «Выпало» — из «мимо»: нужный кусок достижим при щедром бюджете, но места
+	// ему не хватило. Без ключа колонка пуста, и это сказано прямо: молчащий
+	// столбец читался бы как «таких вопросов нет» (этап 105, Ж2).
+	if wide <= 0 {
+		fmt.Fprintf(stdout, "  (колонка «выпало» не мерена: --kb-eval-wide N — щедрый бюджет для промахнувшихся вопросов)\n")
+	}
 
 	// При подборе веса словесный и смысловой режимы не меняются вовсе, а стоят
 	// двух третей времени прогона. Замер 26.08.2026: восемь прогонов подбора
@@ -155,6 +173,7 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 	}
 
 	var missedBy = map[kb.EvalMode][]string{}
+	var droppedBy = map[kb.EvalMode][]string{}
 	var fusionGaps []kb.GapPoint
 	var gapsMode kb.EvalMode
 	for _, mode := range modes {
@@ -168,8 +187,36 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 		if mode == kb.EvalFusion || only != "" {
 			fusionGaps, gapsMode = rep.Gaps, mode
 		}
-		fmt.Fprintf(stdout, "%-10s %10.3f %8.3f %8.3f %10.1f %8d\n",
-			string(mode), rep.Recall, rep.MRR, rep.NDCG, rep.AvgRank, len(rep.Missed))
+		dropped := "—"
+		if wide > 0 {
+			dropped = fmt.Sprintf("%d", len(rep.Dropped))
+		}
+		fmt.Fprintf(stdout, "%-10s %10.3f %8.3f %8.3f %10.1f %8d %8s\n",
+			string(mode), rep.Recall, rep.MRR, rep.NDCG, rep.AvgRank, len(rep.Missed), dropped)
+		// Вторая мера — «та же страница» (этап 105, З4): попаданием считается
+		// и кусок-сосед, накрывающий страницу эталона. Печатается РЯДОМ
+		// со строгой, чтобы прежние числа остались сравнимыми.
+		if rep.RecallNear > rep.Recall {
+			fmt.Fprintf(stdout, "%-10s %10.3f %8.3f %8.3f %10.1f %8d %8s  ← попаданием считается и кусок той же страницы\n",
+				"  та же стр.", rep.RecallNear, rep.MRRNear, rep.NDCGNear, rep.AvgRankNear,
+				len(f.Case)-int(rep.RecallNear*float64(len(f.Case))+0.5), "—")
+		}
+		// Разбор промахов: сколько из них промахи ПРИБОРА, а не поиска.
+		// Печатается по тому же режиму, что и таблица, и только когда промахи
+		// есть, — иначе строка была бы шумом.
+		if len(rep.Missed) > 0 && rep.NearBook > 0 {
+			near := append([]int(nil), rep.NearDist...)
+			sort.Ints(near)
+			fmt.Fprintf(stdout, "  · из %d промахов та же книга нашлась у %d (%.0f%%), из них кусок рядом (±2) у %d (%.0f%%); медиана расстояния %d кусков\n",
+				len(rep.Missed), rep.NearBook, 100*float64(rep.NearBook)/float64(len(rep.Missed)),
+				rep.NearChunk, 100*float64(rep.NearChunk)/float64(len(rep.Missed)),
+				near[len(near)/2])
+		}
+		if wide > 0 && len(rep.Dropped) > 0 {
+			fmt.Fprintf(stdout, "  · из них место в щедром списке не ниже %d: %d (срезал предел на книгу max_per_book=%d), ниже: %d (срезал top_k=%d)\n",
+				topK, rep.DroppedInK, cfg.KB.MaxPerBook, len(rep.Dropped)-rep.DroppedInK, topK)
+			droppedBy[mode] = rep.Dropped
+		}
 	}
 
 	printRagasNames(stdout)
@@ -184,8 +231,18 @@ func Eval(stdout io.Writer, cfg *config.Config, name, path string, topK int, wei
 	// Вопросы, на которых промахнулось слияние, — это и есть список работ.
 	// Их полезно видеть глазами, а не только счётчиком.
 	if miss := missedBy[kb.EvalFusion]; len(miss) > 0 {
+		dropped := map[string]bool{}
+		for _, q := range droppedBy[kb.EvalFusion] {
+			dropped[q] = true
+		}
 		fmt.Fprintf(stdout, "\nслияние не нашло (%d):\n", len(miss))
 		for _, q := range miss {
+			if dropped[q] {
+				// Помета важнее вежливости: такой вопрос лечится бюджетом
+				// выдачи, а не поиском, и в списке работ ему не место.
+				fmt.Fprintln(stdout, "  · [выпало по бюджету]", q)
+				continue
+			}
 			fmt.Fprintln(stdout, "  ·", q)
 		}
 	}

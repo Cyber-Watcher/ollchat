@@ -4,6 +4,8 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // Замер качества поиска.
@@ -104,6 +106,53 @@ type EvalReport struct {
 	Missed  []string // вопросы, где не нашлось вовсе
 	AvgRank float64  // среднее место попадания среди найденных
 
+	// Dropped — вопросы, где нужный кусок достижим при щедром бюджете
+	// (WideK, предел на книгу снят), но в рабочую выдачу не попал. Это не
+	// промах поиска, а нехватка места: лечится `top_k` и `max_per_book`.
+	// Считается только при WideK > 0; такие вопросы остаются и в Missed —
+	// рабочая выдача их действительно не нашла, и recall от этого не меняется.
+	Dropped []string
+
+	// Вторая мера попадания — «та же страница» (этап 105, З4).
+	//
+	// **Зачем она рядом со строгой.** Строгая засчитывает РОВНО тот кусок,
+	// по которому составлен вопрос. Между тем нарезка идёт с перекрытием,
+	// а доводка выдачи намеренно выбрасывает соседние куски: если ответ достался
+	// человеку в соседнем куске той же страницы, строгая мера считает это
+	// промахом поиска. Замер 24.09.2026: таких «промахов» четверть при k = 10,
+	// и починка меры даёт 73 вопроса из 452 против 23 от выключения самой
+	// доводки — то есть наказывал прибор, а не поиск.
+	//
+	// Попаданием по этой мере считается кусок ТОЙ ЖЕ книги, накрывающий
+	// страницу эталона (а если страницы не прочитать — соседний по номеру,
+	// не дальше NearOrds). Строгие числа остаются рядом и не меняются:
+	// менять прибор посреди замеров нельзя, обе меры печатаются вместе.
+	RecallNear  float64
+	MRRNear     float64
+	NDCGNear    float64
+	AvgRankNear float64
+
+	// NearBook — промахи, где в выдаче была ТА ЖЕ КНИГА, что у эталонного куска,
+	// NearChunk — где ещё и кусок рядом с эталонным (не дальше NearOrds номеров).
+	//
+	// **Зачем.** Набор засчитывает ровно тот кусок, по которому составлен
+	// вопрос, а на вопрос в библиотеке отвечают десятки кусков; вдобавок
+	// доводка выдачи намеренно выбрасывает СОСЕДНИЕ куски (нарезка идёт
+	// с перекрытием). Значит часть «промахов» — промахи прибора: ответ
+	// человеку и модели достался, а замер его не увидел. Эти два числа
+	// и отделяют одно от другого (этап 105, «беда в отборе»).
+	NearBook  int
+	NearChunk int
+
+	// NearDist — расстояние в номерах кусков до эталона у тех промахов, где
+	// нашлась та же книга: по нему видно, «сосед» это или другая глава.
+	NearDist []int
+
+	// DroppedInK — сколько из Dropped стояли в щедром списке не ниже K-го
+	// места. У них места хватило бы и при нынешнем top_k, значит срезал
+	// предел на книгу; у остальных — сам top_k.
+	DroppedInK int
+
 	// Gaps — разрыв первого и второго места по каждому вопросу и попал ли
 	// нужный кусок в первые K. По ним подбирается порог воздержания
 	// (этап 91, R2.11): ниже какого разрыва честнее сказать «в книгах нет».
@@ -140,6 +189,60 @@ func AbstainTable(points []GapPoint, thresholds []float64) []AbstainRow {
 // несопоставимы (этап 89, шаг 4).
 func AbstainTableTop1(points []GapPoint, thresholds []float64) []AbstainRow {
 	return abstainTableBy(points, thresholds, func(p GapPoint) float64 { return p.Top1 })
+}
+
+// goldRef — эталонный кусок вопроса: книга, номер куска и его страницы.
+// Страницы читаются у коллекции; если куска в ней нет (замер идёт против
+// другой коллекции или подставного поиска), остаётся сравнение по номерам.
+type goldRef struct {
+	doc, ord int
+	from, to int // страницы эталона; 0 — неизвестны
+}
+
+// near — тот же кусок, кусок той же страницы или соседний по номеру.
+func (g goldRef) near(r Result, ords int) bool {
+	doc, ord, ok := splitChunkID(r.ID)
+	if !ok || doc != g.doc {
+		return false
+	}
+	if g.from > 0 && r.UnitTo >= g.from && r.UnitFrom <= g.to {
+		return true // страницы перекрываются
+	}
+	d := ord - g.ord
+	if d < 0 {
+		d = -d
+	}
+	return d <= ords
+}
+
+// goldSpan собирает эталон вопроса. Пусто, когда в наборе нет ссылки на кусок.
+func (c *Collection) goldSpan(cs EvalCase) (goldRef, bool) {
+	doc, ord, ok := splitChunkID(cs.ChunkID)
+	if !ok {
+		return goldRef{}, false
+	}
+	g := goldRef{doc: doc, ord: ord}
+	if info, ok := c.ChunkByRef(uint32(doc), uint32(ord)); ok {
+		g.from, g.to = info.UnitFrom, info.UnitTo
+	}
+	return g, true
+}
+
+// splitChunkID разбирает ссылку «books/98#173» на номер книги и номер куска.
+// Своего разбора тут не избежать: в наборе ссылка строкой, а сравнивать надо
+// по книге и порядковому номеру.
+func splitChunkID(id string) (doc, ord int, ok bool) {
+	slash := strings.LastIndexByte(id, '/')
+	hash := strings.LastIndexByte(id, '#')
+	if slash < 0 || hash < slash {
+		return 0, 0, false
+	}
+	d, err1 := strconv.Atoi(id[slash+1 : hash])
+	o, err2 := strconv.Atoi(id[hash+1:])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return d, o, true
 }
 
 func abstainTableBy(points []GapPoint, thresholds []float64, by func(GapPoint) float64) []AbstainRow {
@@ -196,6 +299,32 @@ type EvalOpts struct {
 	Rerank     Reranker
 	RerankOpts RerankOpts
 
+	// KeepAdjacent — не выбрасывать соседние куски (SearchOpts.KeepAdjacent):
+	// замер отделяет «поиск не нашёл» от «нашёл, но выбросила наша доводка».
+	KeepAdjacent bool
+
+	// NearOrds — какое расстояние в номерах кусков считать «рядом» при разборе
+	// промахов. 0 — умолчание 2: доводка выдачи выбрасывает соседние куски
+	// (±1), и брать надо чуть шире, чтобы увидеть именно их.
+	NearOrds int
+
+	// WideK — щедрый бюджет для второго прогона по промахнувшимся вопросам:
+	// сколько кусков смотреть, когда предел на книгу снят вовсе. 0 — не мерить.
+	//
+	// **Зачем.** Замер отвечал двумя исходами: нашлось в первых K или «мимо».
+	// Между ними спрятан третий, самый обидный: нужный кусок **нашёлся, но
+	// не поместился** — его срезал `top_k` или предел на книгу (`max_per_book`).
+	// Лечится он не переранжированием и не переписыванием запроса, а бюджетом
+	// выдачи, то есть совсем другой ручкой («LLM Engineering with Python», 2026,
+	// разд. 25: «It ranked well but appears in dropped | The dropped field |
+	// Budget»; этап 105, Ж2). Пока исход не назван, он выглядел промахом
+	// извлечения, и лечили его не тем.
+	//
+	// Прогон идёт ТЕМ ЖЕ путём и с той же второй ступенью — меняются только
+	// два предела. Поэтому «достижимо щедрым бюджетом» значит именно то, что
+	// написано: работа теряет этот кусок на бюджете, а не на поиске.
+	WideK int
+
 	// Search — чем искать. nil — коллекция сама (SearchWith плюс Rerank).
 	// Замер через тот же путь, что и работа (find.Books), задаётся отсюда:
 	// пакет kb не может звать find, а мерить надо ровно то, чем ищут (этап 91, R2.9).
@@ -209,6 +338,9 @@ func (o EvalOpts) norm() EvalOpts {
 	if o.MaxPerDoc <= 0 {
 		o.MaxPerDoc = 3
 	}
+	if o.NearOrds <= 0 {
+		o.NearOrds = 2
+	}
 	return o
 }
 
@@ -219,7 +351,8 @@ func (o EvalOpts) norm() EvalOpts {
 // списка убирается в ноль через SemanticOnly, и слияние остаётся с одним
 // списком — ровно так же, как оно ведёт себя, когда векторов ещё нет.
 func searchOptsFor(mode EvalMode, o EvalOpts) SearchOpts {
-	opt := SearchOpts{TopK: o.K, MaxPerDoc: o.MaxPerDoc, TableBoost: o.TableBoost, SemanticWeight: o.SemanticWeight, RRFK: o.RRFK}
+	opt := SearchOpts{TopK: o.K, MaxPerDoc: o.MaxPerDoc, TableBoost: o.TableBoost,
+		SemanticWeight: o.SemanticWeight, RRFK: o.RRFK, KeepAdjacent: o.KeepAdjacent}
 	switch mode {
 	case EvalLexical:
 		opt.Semantic = false
@@ -246,7 +379,7 @@ func (c *Collection) Eval(ctx context.Context, cases []EvalCase, mode EvalMode,
 	}
 
 	opt := searchOptsFor(mode, o)
-	var ranks []int
+	var ranks, ranksNear []int
 	for _, cs := range cases {
 		searchOpt := opt
 		if o.Rerank != nil {
@@ -276,6 +409,26 @@ func (c *Collection) Eval(ctx context.Context, cases []EvalCase, mode EvalMode,
 				break
 			}
 		}
+		// Мера «та же страница»: место первого куска, который либо эталон,
+		// либо его сосед по той же странице (см. RecallNear).
+		rankNear := rank
+		if gold, ok := c.goldSpan(cs); ok {
+			for i, r := range res {
+				if rankNear > 0 && i+1 >= rankNear {
+					break
+				}
+				if gold.near(r, o.NearOrds) {
+					rankNear = i + 1
+					break
+				}
+			}
+		}
+		if rankNear > 0 {
+			ranksNear = append(ranksNear, rankNear)
+			rep.RecallNear++
+			rep.MRRNear += 1 / float64(rankNear)
+			rep.NDCGNear += 1 / math.Log2(float64(rankNear)+1)
+		}
 		gp := GapPoint{Gap: TopGap(res), Hit: rank > 0}
 		if len(res) > 0 {
 			gp.Top1 = res[0].Score
@@ -283,6 +436,64 @@ func (c *Collection) Eval(ctx context.Context, cases []EvalCase, mode EvalMode,
 		rep.Gaps = append(rep.Gaps, gp)
 		if rank == 0 {
 			rep.Missed = append(rep.Missed, cs.Query)
+			// Промах прибора или промах поиска: была ли в выдаче та же книга
+			// и не стоял ли рядом с эталоном другой её кусок.
+			if doc, ord, ok := splitChunkID(cs.ChunkID); ok {
+				best := -1
+				for _, r := range res {
+					d, o, ok := splitChunkID(r.ID)
+					if !ok || d != doc {
+						continue
+					}
+					dist := o - ord
+					if dist < 0 {
+						dist = -dist
+					}
+					if best < 0 || dist < best {
+						best = dist
+					}
+				}
+				if best >= 0 {
+					rep.NearBook++
+					rep.NearDist = append(rep.NearDist, best)
+					if best <= o.NearOrds {
+						rep.NearChunk++
+					}
+				}
+			}
+			// Третий исход: кусок достижим, но не поместился. Спрашиваем только
+			// у промахнувшихся вопросов — у найденных спрашивать нечего.
+			if o.WideK > 0 {
+				wide := opt
+				wide.TopK = o.WideK
+				// Предел на книгу снят вовсе. Именно отрицательное, не ноль:
+				// путь работы (find.Books) читает ноль как «умолчание
+				// коллекции», и первый замер Ж2 (24.09.2026) с нулём мерил
+				// щедрый бюджет при прежнем пределе на книгу.
+				wide.MaxPerDoc = -1
+				var wres []Result
+				var werr error
+				if o.Search != nil {
+					wres, werr = o.Search(ctx, cs.Query, wide, o.WideK)
+				} else {
+					wres, werr = c.SearchWith(ctx, cs.Query, wide, emb)
+					if werr == nil && o.Rerank != nil {
+						wres, werr = Rerank(ctx, o.Rerank, cs.Query, wres, o.WideK, o.RerankOpts)
+					}
+				}
+				if werr != nil {
+					return rep, werr
+				}
+				for i, r := range wres {
+					if cs.hit(r) {
+						rep.Dropped = append(rep.Dropped, cs.Query)
+						if i+1 <= opt.TopK {
+							rep.DroppedInK++
+						}
+						break
+					}
+				}
+			}
 			continue
 		}
 		ranks = append(ranks, rank)
@@ -297,6 +508,16 @@ func (c *Collection) Eval(ctx context.Context, cases []EvalCase, mode EvalMode,
 	rep.Recall /= n
 	rep.MRR /= n
 	rep.NDCG /= n
+	rep.RecallNear /= n
+	rep.MRRNear /= n
+	rep.NDCGNear /= n
+	if len(ranksNear) > 0 {
+		sum := 0
+		for _, r := range ranksNear {
+			sum += r
+		}
+		rep.AvgRankNear = float64(sum) / float64(len(ranksNear))
+	}
 	if len(ranks) > 0 {
 		sort.Ints(ranks)
 		sum := 0

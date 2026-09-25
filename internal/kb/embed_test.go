@@ -450,7 +450,7 @@ func TestEmbedCoverageIsPrefix(t *testing.T) {
 
 	// Доливаем книгу: её куски встают в конец, покрытие перестаёт быть полным.
 	makeBook(t, books, "new.pdf", longPage("мьютекс и блокировка памяти"))
-	if _, err := coll.Sync(context.Background(), nil); err != nil {
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	cov := coll.Coverage(emb.Model())
@@ -613,7 +613,7 @@ func TestEmbedTruncatesTornTail(t *testing.T) {
 func TestMergeMovesVectors(t *testing.T) {
 	_, coll, books := embedFixture(t)
 	drop := makeBook(t, books, "drop.pdf", longPage("совершенно посторонняя тема про садоводство"))
-	if _, err := coll.Sync(context.Background(), nil); err != nil {
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	emb := newFakeEmbedder(256)

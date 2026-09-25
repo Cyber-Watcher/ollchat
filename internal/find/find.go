@@ -74,8 +74,19 @@ type Opts struct {
 	Collection string // имя для ссылок вида «books/12#37»
 
 	// Книги.
-	TopK           int
-	MaxPerBook     int
+	TopK       int
+	MaxPerBook int // не больше стольких кусков из одной книги; 0 — умолчание коллекции, < 0 — без предела
+
+	// KeepAdjacent — не выбрасывать соседние куски одной книги (этап 105, З5);
+	// умолчание false — доводка выдачи работает как всегда.
+	KeepAdjacent bool
+
+	// DedupeCosine — порог близости, выше которого кусок считается повтором
+	// уже отобранного и в выдачу не идёт (kb.dedupe_cosine; 0 — не проверять).
+	// Куски режутся с перекрытием, и соседние куски одной книги делят по
+	// нескольку предложений: без проверки они занимают места в выдаче как
+	// разные, а отвечают как один (этап 105, Ж4).
+	DedupeCosine   float64
 	MinCosine      float64
 	SemanticWeight float64
 	Semantic       bool
@@ -420,6 +431,12 @@ func (d Deps) books(ctx context.Context, search, question string, emb kb.Embedde
 	}
 	if o.MaxPerBook > 0 {
 		opt.MaxPerDoc = o.MaxPerBook
+	} else if o.MaxPerBook < 0 {
+		// Отрицательное — предела на книгу нет вовсе. Ноль оставляет умолчание
+		// коллекции (3): замер Ж2 24.09.2026 ставил ноль, думая, что снимает
+		// предел, и «щедрый бюджет» шёл с прежним пределом на книгу — отсюда
+		// «по max_per_book выпало 0», которое было не результатом, а артефактом.
+		opt.MaxPerDoc = 0
 	}
 	opt.Semantic = o.Semantic
 	opt.SemanticOnly = o.SemanticOnly
@@ -430,6 +447,7 @@ func (d Deps) books(ctx context.Context, search, question string, emb kb.Embedde
 	opt.QueryTimeout = o.QueryTimeout
 	opt.Docs = o.Docs
 	opt.Exact = o.Exact
+	opt.KeepAdjacent = o.KeepAdjacent
 
 	// Вторая ступень читает вопрос вместе с куском и переставляет верхушку.
 	// Ей нужны кандидаты сверх того, что показываем: первая ступень отдаёт
@@ -450,6 +468,14 @@ func (d Deps) books(ctx context.Context, search, question string, emb kb.Embedde
 	src := d.source()
 	hits, err := src.SearchWith(ctx, search, opt, emb)
 	note := src.SearchNote()
+	// Повторы убираются из КАНДИДАТОВ: до второй ступени и до обрезки по TopK,
+	// иначе освободившееся место осталось бы пустым. Работает только с местной
+	// коллекцией — векторы кусков лежат у неё; у сетевого источника их нет.
+	if err == nil && o.DedupeCosine > 0 && d.Coll != nil {
+		if cleaned, n := d.Coll.DedupeSimilar(hits, o.DedupeCosine); n > 0 {
+			hits = cleaned
+		}
+	}
 	if err != nil || !rerank {
 		if len(hits) > want {
 			hits = hits[:want]

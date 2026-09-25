@@ -83,12 +83,42 @@ type Settings struct {
 	AnswerStyle    string
 	TableBoost     float64 // надбавка кускам-таблицам; 0 — умолчание
 	ExpandLimit    int     // сколькими именами понятий дополнять вопрос (kb.expand_limit, раскрытое); 0 — не расширять
+	DedupeCosine   float64 // порог повтора кусков выдачи (kb.dedupe_cosine); 0 — не проверять
 
 	// QueryTimeout — сколько ждать вектор вопроса; 0 — умолчание пакета kb.
 	QueryTimeout time.Duration
 
 	// QuotesWithoutTools — сколько выдержек добавлять модели без инструментов.
 	QuotesWithoutTools int
+
+	// Воздержание привратника: если реранкер оценил лучший кусок ниже порога,
+	// в библиотеке об этом нет, и подмешивать нечего — ни выдержек, ни карты
+	// (этап 105, Ж9). Порог и его замер — те же, что у kb_search
+	// (kb.abstain_score, −2 по замеру 04.09.2026 на 457 вопросах).
+	//
+	// **Зачем это привратнику.** Он пропускает вопрос, если нашлось хоть одно
+	// понятие с двумя упоминаниями, а это ловится бытовыми словами: «какая
+	// погода в Москве» цепляет понятие `weather` (в книгах про ИИ-агентов
+	// погодный инструмент — стандартный пример) и получает карту про
+	// NetworkPolicy и функции активации (замер Ж6, 24.09.2026).
+	//
+	// Abstain выключено — прежнее поведение; порог берётся из AbstainScore
+	// и AbstainGap.
+	Abstain      bool
+	AbstainScore *float64
+	AbstainGap   float64
+
+	// SenseEntry — считать вектор вопроса и входить в граф не только
+	// по написанию слов, но и по смыслу (этап 105, Ж10).
+	//
+	// **Почему это отдельная настройка, а не всегда.** До 24.09.2026 подмес
+	// входил в граф ТОЛЬКО по словам: `QueryVector` ставили `find.Search`,
+	// инструменты и команды графа, а `mixer.Build` — нет. Отсюда и замер Ж6:
+	// в карту приходит 2,2 понятия при разрешённых шести — ограничивает
+	// не настройка, а словесный вход. Цена смыслового входа — вызов эмбеддера
+	// перед КАЖДЫМ вопросом (0,1–0,3 с на тёплой модели, секунды на холодной),
+	// поэтому включение — решение по замеру, а не по умолчанию.
+	SenseEntry bool
 
 	// RerankOpts — числа второй ступени: сколько кандидатов и что ей давать.
 	RerankOpts kb.RerankOpts
@@ -155,7 +185,8 @@ func Build(question string, d Deps, s Settings) Result {
 		if !d.BooksOn {
 			return Result{}
 		}
-		return books(coll, question, question, 0, d, s)
+		out, _ := books(coll, question, question, 0, d, s)
+		return out
 	}
 
 	if graph.WorkRequest(question) {
@@ -164,7 +195,19 @@ func Build(question string, d Deps, s Settings) Result {
 		return Result{}
 	}
 
+	// Вектор вопроса под граф: одно место на всех — find.QueryVector, оно же
+	// сверяет модель эмбеддера с векторами графа (разные модели дают
+	// бессмысленные расстояния).
+	var qv []int8
+	if s.SenseEntry && d.Embedder != nil {
+		qctx, cancel := context.WithTimeout(context.Background(), queryTimeout(s))
+		qv, _, _ = find.QueryVector(qctx, find.Deps{Graph: g, Embedder: d.Embedder}, question,
+			find.Opts{Semantic: true, QueryTimeout: queryTimeout(s)})
+		cancel()
+	}
+
 	res := g.Search(question, graph.SearchOpts{
+		QueryVector:  qv,
 		TopEntities:  s.Entities,
 		TopNeighbors: s.Neighbors,
 		// Ранжирование связей — то же, что у поиска и у инструментов модели.
@@ -193,13 +236,44 @@ func Build(question string, d Deps, s Settings) Result {
 		want = s.QuotesWithoutTools
 	}
 
+	// Вторая проверка привратника: нашлись ли в книгах куски, которые реранкер
+	// считает относящимися к делу (этап 105, Ж9).
+	//
+	// **Зачем поверх первой.** Первая пропускает вопрос, если нашлось хоть одно
+	// понятие с двумя упоминаниями, а это ловится бытовыми словами: «какая
+	// погода в Москве на выходных» цепляет понятие `weather` — в книгах про
+	// ИИ-агентов погодный инструмент стандартный пример — и получает карту про
+	// NetworkPolicy и функции активации Keras (замер Ж6, 24.09.2026).
+	// Оценка реранкера сопоставима между запросами (по делу около +1, не по делу
+	// около −11), и порог −2 снят замером на 457 вопросах (этап 89, шаг 4).
+	//
+	// Проба стоит одного поиска с реранкером: в режиме с выдержками её результат
+	// используется дальше, в режиме «только карта» это лишний поиск — цена
+	// включения, и она замерена (Ж9).
+	var probe Result
+	var probeWant int
+	if s.Abstain && d.Reranker != nil && (s.AbstainScore != nil || s.AbstainGap > 0) {
+		probeWant = want
+		if probeWant <= 0 {
+			probeWant = 3 // проба: нам нужна оценка, а не выдержки
+		}
+		q, sig := books(coll, question, question, probeWant, d, s)
+		if note := find.AbstainScoreNote(sig, s.AbstainScore, true); note != "" {
+			return Result{}
+		}
+		if note := find.AbstainNote(sig, s.AbstainGap); note != "" {
+			return Result{}
+		}
+		probe = q
+	}
+
 	if !d.GraphOn {
 		// Граф выключен пользователем, но привратник уже сказал «вопрос по
 		// делу» — выдержки подмешать можно, если их вообще просили.
 		if want == 0 {
 			return Result{}
 		}
-		out := books(coll, question, question, want, d, s)
+		out, _ := books(coll, question, question, want, d, s)
 		out.NoTools = !d.BooksOn
 		return out
 	}
@@ -215,7 +289,7 @@ func Build(question string, d Deps, s Settings) Result {
 		if want == 0 {
 			return Result{}
 		}
-		out := books(coll, question, question, want, d, s)
+		out, _ := books(coll, question, question, want, d, s)
 		out.NoTools = !d.BooksOn
 		return out
 	}
@@ -275,7 +349,13 @@ func Build(question string, d Deps, s Settings) Result {
 		if s.ExpandLimit > 0 {
 			search = find.Expand(question, res.Entities, find.Opts{ExpandLimit: s.ExpandLimit})
 		}
-		if q := books(coll, search, question, want, d, s); !q.Empty() {
+		q := probe
+		if q.Empty() || probeWant != want || s.ExpandLimit > 0 {
+			// Проба искала по самому вопросу; с расширением запроса именами
+			// понятий поиск другой, и брать пробу вместо него нельзя.
+			q, _ = books(coll, search, question, want, d, s)
+		}
+		if !q.Empty() {
 			b.WriteString("\n")
 			b.WriteString(q.Text)
 			out.Chunks = q.Chunks
@@ -292,6 +372,16 @@ func Build(question string, d Deps, s Settings) Result {
 	out.Text = b.String()
 	out.Tokens = ctxmeter.Estimate(out.Text)
 	return out
+}
+
+// queryTimeout — сколько ждать вектор вопроса; 0 в настройках значит умолчание
+// коллекции, а не «без предела»: под идущей сборкой графа карта занята, и ждать
+// вектор бесконечно нельзя (то же правило, что у поиска).
+func queryTimeout(s Settings) time.Duration {
+	if s.QueryTimeout > 0 {
+		return s.QueryTimeout
+	}
+	return kb.DefaultQueryTimeout
 }
 
 // aboutPair — о связи ли понятий вопрос: найдено не меньше двух понятий
@@ -322,7 +412,7 @@ func aboutPair(res graph.SearchResult, chain []graph.PathStep) bool {
 // Запросов два: `search` идёт в поиск (он может быть дополнен именами понятий
 // графа), `question` — вопрос человека, и он уходит второй ступени. Кросс-энкодер
 // читает вопрос вместе с куском, и приписанные синонимы для него шум.
-func books(coll kb.Source, search, question string, topK int, d Deps, s Settings) Result {
+func books(coll kb.Source, search, question string, topK int, d Deps, s Settings) (Result, find.Signals) {
 	want := s.TopK
 	if topK > 0 {
 		want = topK
@@ -342,13 +432,15 @@ func books(coll kb.Source, search, question string, topK int, d Deps, s Settings
 		Rerank:         true,
 		RerankOpts:     s.RerankOpts,
 		ExpandLimit:    s.ExpandLimit,
+		DedupeCosine:   s.DedupeCosine,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	hits, _, err := find.Books(ctx, find.Deps{Source: coll, Embedder: d.Embedder, Reranker: d.Reranker}, search, question, o)
 	if err != nil || len(hits) == 0 {
-		return Result{}
+		return Result{}, find.Signals{}
 	}
+	sig := find.SignalsOf(hits)
 
 	// Порядок частей: сперва сами выдержки, требование ссылаться — последним,
 	// вплотную к вопросу. Замер 24.08.2026 на deepseek-r1:70b: с требованием
@@ -370,5 +462,5 @@ func books(coll kb.Source, search, question string, topK int, d Deps, s Settings
 		kb.AnswerStyle(s.AnswerStyle) + "\n")
 	out := Result{Text: b.String(), Chunks: len(hits), Tokens: ctxmeter.Estimate(b.String())}
 	out.From, out.To, out.Note = kb.YearSpan(hits, time.Now())
-	return out
+	return out, sig
 }

@@ -163,7 +163,7 @@ func TestSyncRemovesVanishedScans(t *testing.T) {
 	if err := os.Remove(scan); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.Sync(context.Background(), nil)
+	res, err := c.Sync(context.Background(), IndexOpts{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

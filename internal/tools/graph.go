@@ -42,26 +42,9 @@ import (
 // Так вышло не по замыслу, а потому, что раздача графа службой ещё не сделана;
 // см. graphOverNetwork ниже — отказ обязан объяснять это прямо.
 func graphOpen(opts Options, collection string) (*kb.Collection, *graph.Graph, string, func(), error) {
-	if opts.KB == nil {
-		return nil, nil, "", nil, fmt.Errorf("база знаний не настроена")
-	}
-	name := strings.TrimSpace(collection)
-	if name == "" {
-		name = opts.KBDefault
-	}
-	if name == "" {
-		names, err := opts.KB.Names()
-		if err != nil {
-			return nil, nil, "", nil, err
-		}
-		if len(names) == 0 {
-			return nil, nil, "", nil, fmt.Errorf("в базе знаний нет коллекций")
-		}
-		name = names[0]
-	}
-	coll, err := opts.KB.Open(name)
+	coll, name, err := localColl(opts, collection)
 	if err != nil {
-		return nil, nil, "", nil, graphOverNetwork(opts, name, err)
+		return nil, nil, "", nil, err
 	}
 	if opts.GraphCache != nil {
 		g, release, err := opts.GraphCache.Get(coll.Dir(), coll.ChunkCount())
@@ -75,6 +58,38 @@ func graphOpen(opts Options, collection string) (*kb.Collection, *graph.Graph, s
 		return nil, nil, "", nil, fmt.Errorf("граф коллекции %s недоступен: %w", name, err)
 	}
 	return coll, g, name, func() { g.Close() }, nil
+}
+
+// localColl открывает МЕСТНУЮ коллекцию и разрешает её имя.
+//
+// Отдельно от graphOpen потому, что графа может не быть вовсе, а коллекция
+// нужна и тогда: поиск без графа показывает одни выдержки из книг и говорит
+// об этом строкой (так же ведёт себя /search). Одно место разрешения имени
+// на всех — две копии однажды разошлись бы в том, какую коллекцию считать
+// умолчанием.
+func localColl(opts Options, collection string) (*kb.Collection, string, error) {
+	if opts.KB == nil {
+		return nil, "", fmt.Errorf("база знаний не настроена")
+	}
+	name := strings.TrimSpace(collection)
+	if name == "" {
+		name = opts.KBDefault
+	}
+	if name == "" {
+		names, err := opts.KB.Names()
+		if err != nil {
+			return nil, "", err
+		}
+		if len(names) == 0 {
+			return nil, "", fmt.Errorf("в базе знаний нет коллекций")
+		}
+		name = names[0]
+	}
+	coll, err := opts.KB.Open(name)
+	if err != nil {
+		return nil, "", graphOverNetwork(opts, name, err)
+	}
+	return coll, name, nil
 }
 
 // rank — ранжирование связей: живое значение главнее записанного в конфиге.

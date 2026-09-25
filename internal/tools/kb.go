@@ -116,7 +116,8 @@ func (t *kbSearchTool) run(ctx context.Context, name, query, book string, topK i
 		// имена понятий графа и их синонимы. Замер 30.08.2026: на слово
 		// «горутина» приходили десять русских книг из десяти. Число — настройка
 		// kb.expand_limit (этап 105, Б1: замер показал вред на точных терминах).
-		ExpandLimit: t.opts.KBExpandLimit,
+		ExpandLimit:  t.opts.KBExpandLimit,
+		DedupeCosine: t.opts.KBDedupeCosine,
 	}
 	if book != "" {
 		o.Docs = booksMatching(coll, book)
