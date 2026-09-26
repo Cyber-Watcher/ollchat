@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -146,14 +147,150 @@ func parseFacts(answer, chunkText string) (Facts, error) {
 	}
 	var f Facts
 	if err := json.Unmarshal([]byte(raw), &f); err != nil {
-		if fixed := repairJSON(answer); fixed != "" && fixed != raw {
-			if err2 := json.Unmarshal([]byte(fixed), &f); err2 == nil {
-				return clean(f, chunkText), nil
+		// Порядок попыток от дешёвой к дорогой. Сперва синтаксическая правка
+		// (слэши, повторённый ключ, недостающая скобка), затем обрезка
+		// оборванного хвоста, затем обе разом: ответ бывает и порченый,
+		// и оборванный — как раз тот случай, где модель цитирует «</s>».
+		for _, cand := range []string{
+			repairSyntax(raw),
+			repairJSON(answer),
+			repairJSON(repairSyntax(answer)),
+		} {
+			if cand == "" || cand == raw {
+				continue
+			}
+			var g Facts
+			if json.Unmarshal([]byte(cand), &g) == nil {
+				return clean(g, chunkText), nil
 			}
 		}
 		return Facts{}, fmt.Errorf("разбор JSON: %w", err)
 	}
 	return clean(f, chunkText), nil
+}
+
+// repairSyntax чинит три вида порчи, которые модель извлечения делает
+// РЕГУЛЯРНО. Замер 26.09.2026 на 16 кусках, устойчиво не разбиравшихся:
+// из 11 отказов 5 — одиночный обратный слэш, 3 — повторённый ключ,
+// 2 — потерянная закрывающая скобка, 1 — обрыв. Содержательно все ответы
+// были верные: понятия и связи извлечены, теряется всё из-за одного знака.
+//
+// **Чинится только то, что уже не разобралось.** Годный ответ сюда
+// не попадает вовсе, поэтому починка ничем не рискует; а чего починка
+// не понимает, то остаётся отказом, как прежде.
+func repairSyntax(s string) string {
+	return fixBrackets(dropRepeatedKey(escapeLoneBackslashes(s)))
+}
+
+// escapeLoneBackslashes удваивает обратный слэш, за которым нет годного
+// продолжения. Модель извлекает из книг про psql и sed имена вида «\du»,
+// «\watch», «\<ing\>» и пишет их в JSON как есть: для JSON это начало
+// escape-последовательности, которой не существует, и разбор падает
+// на первом же таком имени, теряя весь кусок целиком.
+func escapeLoneBackslashes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	inString := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' {
+			inString = !inString
+			b.WriteByte(c)
+			continue
+		}
+		if c != '\\' || !inString {
+			b.WriteByte(c)
+			continue
+		}
+		if i+1 >= len(s) {
+			b.WriteString("\\\\")
+			continue
+		}
+		switch s[i+1] {
+		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			b.WriteByte(c)
+			b.WriteByte(s[i+1])
+			i++
+		case 'u': // \uXXXX годится, только если дальше четыре шестнадцатеричных
+			if i+5 < len(s) && isHex4(s[i+2:i+6]) {
+				b.WriteString(s[i : i+6])
+				i += 5
+			} else {
+				b.WriteString("\\\\")
+			}
+		default:
+			b.WriteString("\\\\") // одиночный слэш — экранируем
+		}
+	}
+	return b.String()
+}
+
+func isHex4(s string) bool {
+	if len(s) < 4 {
+		return false
+	}
+	for i := 0; i < 4; i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// repeatedKey — пара «ключ»:«значение», за которой сразу идёт двоеточие:
+// значит то, что выглядело значением, на деле ключ, а предыдущая пара
+// лишняя. Живой пример: {"src":"else","src":"dst":"if"} — модель написала
+// «src» дважды и второй раз вместо «dst».
+var repeatedKey = regexp.MustCompile(`"[^"\\]*"\s*:\s*("[^"\\]*"\s*:)`)
+
+func dropRepeatedKey(s string) string {
+	for i := 0; i < 8; i++ { // предел на случай странной строки
+		out := repeatedKey.ReplaceAllString(s, "$1")
+		if out == s {
+			return s
+		}
+		s = out
+	}
+	return s
+}
+
+// fixBrackets закрывает скобку, которую модель забыла: «aliases»:[«…»} —
+// массив закрывается фигурной скобкой. Вставляет недостающую закрывающую
+// перед чужой; ГОДНЫЙ JSON не меняется, потому что несоответствий в нём нет.
+func fixBrackets(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	var stack []byte
+	inString, escaped := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case inString:
+		case c == '{' || c == '[':
+			stack = append(stack, c)
+		case c == '}' || c == ']':
+			want := byte('}')
+			if len(stack) > 0 && stack[len(stack)-1] == '[' {
+				want = ']'
+			}
+			if len(stack) > 0 && want != c {
+				b.WriteByte(want) // закрываем то, что модель забыла
+				stack = stack[:len(stack)-1]
+			}
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // repairJSON чинит оборванный ответ: отрезает хвост по последний целый элемент

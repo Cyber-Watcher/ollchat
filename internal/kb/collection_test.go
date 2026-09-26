@@ -421,3 +421,64 @@ func TestBreakdownByFolder(t *testing.T) {
 		t.Fatalf("первой идёт %q, ожидалась самая крупная папка", first)
 	}
 }
+
+// TestBookHidesDeletedAndBookAnyShowsIt — геттер книги по номеру не отдаёт
+// удалённую, а BookAny отдаёт с признаком.
+//
+// Ловушка, ради которой тест написан (26.09.2026): удаление НЕ переписывает
+// запись реестра — она остаётся с прежним kind и хешем, а удалённой книгу
+// делает номер в deleted.ids. Перепись, спросившая «есть ли такая книга»
+// вместо «жива ли», насчитала вчетверо больше работы, чем есть.
+func TestBookHidesDeletedAndBookAnyShowsIt(t *testing.T) {
+	base, books := newBase(t)
+	os.MkdirAll(books, 0o755)
+	makeBook(t, books, "alive.pdf", longPage("goroutines and channels"))
+	path := makeBook(t, books, "gone.pdf", longPage("kubernetes deployment"))
+
+	c, _ := base.Create("test", "")
+	c.Add(context.Background(), []string{books}, IndexOpts{}, nil)
+	c.AddRoots([]string{books})
+
+	var goneID, aliveID uint32
+	for _, b := range c.Books() {
+		if strings.HasSuffix(b.Path, "gone.pdf") {
+			goneID = b.ID
+		} else {
+			aliveID = b.ID
+		}
+	}
+	if goneID == 0 || aliveID == 0 {
+		t.Fatalf("книги не нашлись: живая %d, удаляемая %d", aliveID, goneID)
+	}
+	if _, ok := c.Book(goneID); !ok {
+		t.Fatal("книга не отдаётся ещё ДО удаления — тест проверял бы не то")
+	}
+
+	os.Remove(path)
+	if _, err := c.Sync(context.Background(), IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec, ok := c.Book(goneID); ok {
+		t.Fatalf("Book отдал удалённую книгу: %q", rec.Path)
+	}
+	rec, ok := c.BookAny(goneID)
+	if !ok {
+		t.Fatal("BookAny не нашёл удалённую книгу — а он обязан её видеть")
+	}
+	if !rec.Deleted {
+		t.Fatal("BookAny вернул удалённую книгу без признака Deleted")
+	}
+	if rec.Path == "" {
+		t.Fatal("у удалённой книги потерялась запись реестра")
+	}
+
+	// Живая книга не задета, и признак у неё ложен.
+	live, ok := c.Book(aliveID)
+	if !ok {
+		t.Fatal("живая книга перестала отдаваться")
+	}
+	if live.Deleted {
+		t.Fatal("живая книга помечена удалённой")
+	}
+}
