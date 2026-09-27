@@ -372,12 +372,16 @@ func rewriteAliases(path, stamp string, remap func(uint32) (uint32, bool)) (int,
 // BookMapReport — карта книг графа против нынешней коллекции, для доктора:
 // сколько книг графа найдено на тех же номерах, сколько переехало, сколько
 // в коллекции больше нет.
-func BookMapReport(dir string, books []KnownBook) (mapped, same, moved, unknown int, err error) {
+func BookMapReport(dir string, books []KnownBook) (mapped, same, moved, unknown, reread int, err error) {
 	st, err := RebaseBooks(dir, books, true)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, 0, err
 	}
-	return st.Mapped, st.Same, st.Moved, st.Unknown, nil
+	// Reread возвращается с 27.09.2026 (этап 110, А0.3): без него строка
+	// доктора не сходилась — 523 на своих номерах + 0 переехавших + 7
+	// исчезнувших давали 530 при 532 книгах в карте, и два перечитанных
+	// файла пропадали неизвестно куда.
+	return st.Mapped, st.Same, st.Moved, st.Unknown, st.Reread, nil
 }
 
 // SortedMoves — переносы в устойчивом порядке, для печати.

@@ -87,7 +87,15 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 
 	st := g.Stats(chunks)
 	cst := coll.Stats()
-	done, empty, skipped := g.Progress().Counts()
+	// Отметки считаем ПО ВИДАМ и отдельно по книгам, которых в коллекции
+	// больше нет: прежнее одно число «пропущено» складывало потерю (модель
+	// не дала разбираемого ответа) с нормой работы (служебный кусок), да ещё
+	// и со следами удалённых книг — и раздувалось вдвое (этап 110, А0).
+	aliveBooks := map[uint32]bool{}
+	for _, b := range coll.Books() {
+		aliveBooks[b.ID] = true
+	}
+	ms := g.Progress().Stats(func(doc uint32) bool { return aliveBooks[doc] })
 
 	stage.done()
 	fmt.Fprintf(stdout, "коллекция %s · граф\n", name)
@@ -108,8 +116,14 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		pct = 100 * st.Covered / chunks
 	}
 	fmt.Fprintf(stdout, "  разобрано кусков %d из %d (%d%%), осталось %d\n", st.Covered, chunks, pct, st.Pending)
-	if skipped > 0 || empty > 0 {
-		fmt.Fprintf(stdout, "    с понятиями %d, пустых %d, пропущено %d\n", done, empty, skipped)
+	if ms.Skipped > 0 || ms.Empty > 0 || ms.Service > 0 {
+		fmt.Fprintf(stdout, "    с понятиями %d, пустых %d, не разобрала модель %d, служебных %d\n",
+			ms.Done, ms.Empty, ms.Skipped, ms.Service)
+		fmt.Fprintf(stdout, "      «служебных» — оглавления и списки литературы, модели не показывались\n")
+	}
+	if ms.Gone > 0 {
+		fmt.Fprintf(stdout, "    отметок книг, которых в коллекции НЕТ: %d (в %d книгах) — "+
+			"в счёт выше не входят\n", ms.Gone, ms.GoneBooks)
 	}
 
 	fmt.Fprintf(stdout, "  %s\n", g.PromptLine())
@@ -151,12 +165,17 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	}
 	// Карта книг: переживёт ли граф переиндексацию коллекции.
 	books := knownBooks(coll)
-	if mapped, same, moved, unknown, err := graph.BookMapReport(g.Dir(), books); err != nil {
+	if mapped, same, moved, unknown, reread, err := graph.BookMapReport(g.Dir(), books); err != nil {
 		fmt.Fprintf(stdout, "  карта книг графа: НЕТ (%v) — граф не переживёт переиндексацию коллекции; записать: --graph-record-books\n",
 			err)
 	} else {
-		fmt.Fprintf(stdout, "  карта книг графа: %d книг, на своих номерах %d, переехало %d, в коллекции больше нет %d",
-			mapped, same, moved, unknown)
+		// Четыре слагаемых, а не три: без «перечитано» строка не сходилась
+		// с общим числом книг (этап 110, А0.3).
+		fmt.Fprintf(stdout, "  карта книг графа: %d книг, на своих номерах %d, переехало %d, перечитано %d, в коллекции больше нет %d",
+			mapped, same, moved, reread, unknown)
+		if same+moved+reread+unknown != mapped {
+			fmt.Fprintf(stdout, " (не сходится: %d+%d+%d+%d≠%d)", same, moved, reread, unknown, mapped)
+		}
 		if moved > 0 {
 			fmt.Fprintf(stdout, " — НУМЕРАЦИЯ СМЕНИЛАСЬ: ollchat --graph-rebase-books %s --kb-dry-run", name)
 		}

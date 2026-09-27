@@ -128,6 +128,55 @@ func (p *Progress) Count() int {
 // Counts раскладывает разобранное по признакам: сколько дало сущности,
 // сколько оказалось пустым, сколько пропущено. По этим числам видно качество
 // извлечения, а не только его ход.
+// MarkStats — отметки разбора по ВИДАМ и отдельно по книгам, которых
+// в коллекции больше нет.
+//
+// **Зачем разводить.** Прежний `Counts` складывал `MarkSkipped` (модель
+// ответила неразбираемым — это потеря) и `MarkService` (служебный кусок,
+// модели не показывали — это норма работы) в одно число «пропущено».
+// 26.09.2026 оно равнялось 24 820 = 11 993 + 12 827, и по нему выходило,
+// будто потеряно вчетверо больше, чем на самом деле.
+//
+// **Зачем отдельно мёртвые книги.** Из тех же 24 736 на 27.09.2026
+// **11 867 отметок принадлежали удалённым книгам**: их куски давно не в графе
+// (упоминаний от них 0, связей 0), а число в отчёте они раздували вдвое.
+type MarkStats struct {
+	Done, Empty, Skipped, Service int // по книгам, живым в коллекции
+	Gone                          int // отметок книг, которых в коллекции нет
+	GoneBooks                     int // и сколько это книг
+}
+
+// Stats считает отметки по видам. `alive` отвечает, жива ли книга; nil —
+// считать все книги живыми (тогда Gone останется нулём).
+func (p *Progress) Stats(alive func(doc uint32) bool) MarkStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var st MarkStats
+	gone := map[uint32]bool{}
+	for key, m := range p.mark {
+		doc := UnpackChunk(key).Doc
+		if alive != nil && !alive(doc) {
+			st.Gone++
+			gone[doc] = true
+			continue
+		}
+		switch m {
+		case MarkDone:
+			st.Done++
+		case MarkEmpty:
+			st.Empty++
+		case MarkSkipped:
+			st.Skipped++
+		case MarkService:
+			st.Service++
+		}
+	}
+	st.GoneBooks = len(gone)
+	return st
+}
+
+// Counts — прежний счёт одним числом «пропущено». Оставлен для мест, где
+// разбор по видам не нужен; новое печатать через Stats.
 func (p *Progress) Counts() (done, empty, skipped int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
