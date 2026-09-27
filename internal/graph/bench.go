@@ -156,6 +156,9 @@ func BenchModel(ctx context.Context, coll Source, ex Extractor, o BenchOpts,
 		res.Err = err
 		return res, err
 	}
+	// Служебные куски (br.Service) в счёт замера не идут: модели их не
+	// показывали, и в стоимость захода они не входят. До 27.09.2026 они
+	// лежали внутри br.Skipped и раздували число разобранных.
 	res.Chunks = br.Done + br.Empty + br.Skipped
 	res.Empty, res.Skipped = br.Empty, br.Skipped
 	res.Entities, res.Edges = g.Entities().Count(), g.Edges().Count()

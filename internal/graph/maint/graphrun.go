@@ -311,7 +311,24 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	elapsed := time.Since(start)
 	fmt.Fprintf(stdout, "разобрано кусков: %d за %s (%.1f кусков/с)\n",
 		res.Done, elapsed.Round(time.Second), res.Rate())
-	fmt.Fprintf(stdout, "  пусто: %d, пропущено: %d\n", res.Empty, res.Skipped)
+	// Три разных числа, а не два: пустой кусок — результат разбора,
+	// служебный модели не показывался, а «не разобрала модель» — потеря,
+	// которую сборка больше не возьмёт. Раньше последние два складывались.
+	fmt.Fprintf(stdout, "  пусто: %d, не разобрала модель: %d, служебных: %d\n",
+		res.Empty, res.Skipped, res.Service)
+	// Причины пропуска — тут же, а не только в файле: одно число «пропущено»
+	// ничего не говорит, а такой кусок сборка больше не возьмёт (27.09.2026:
+	// 107 потерянных кусков за день, причина выяснению не подлежала).
+	if res.Skipped > 0 {
+		if kinds := g.SkipLog().Kinds(start.Unix()); len(kinds) > 0 {
+			parts := make([]string, 0, len(kinds))
+			for _, k := range kinds {
+				parts = append(parts, fmt.Sprintf("%s — %d", k.Kind, k.Count))
+			}
+			fmt.Fprintf(stdout, "  причины пропуска: %s (подробно: graph/%s)\n",
+				strings.Join(parts, ", "), "skipped.jsonl")
+		}
+	}
 	fmt.Fprintf(stdout, "  сущностей: %d (+%d), связей: %d (+%d)\n",
 		res.Entities, res.NewEntities, res.Edges, res.NewEdges)
 	if named && pool != nil {

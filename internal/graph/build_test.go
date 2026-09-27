@@ -341,8 +341,13 @@ func TestBuildSkipsTableOfContents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Done != 8 || res.Skipped != 2 || res.Pending != 0 {
-		t.Fatalf("разобрано %d, пропущено %d, остаток %d", res.Done, res.Skipped, res.Pending)
+	// Служебные куски идут в Service, а НЕ в Skipped: первое — норма (модели
+	// не показывали), второе — потеря (модель не дала ответа, и сборка такой
+	// кусок больше не возьмёт). Разделено 27.09.2026: слитное число однажды
+	// прочлось как потеря 107 кусков там, где потерь не было вовсе.
+	if res.Done != 8 || res.Service != 2 || res.Skipped != 0 || res.Pending != 0 {
+		t.Fatalf("разобрано %d, служебных %d, не разобрала модель %d, остаток %d",
+			res.Done, res.Service, res.Skipped, res.Pending)
 	}
 	if asked.Load() != 8 {
 		t.Fatalf("модель спросили %d раз, ожидалось 8", asked.Load())

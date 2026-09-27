@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -331,8 +332,14 @@ type Graph struct {
 	// skipped — связи, не записанные заходом по правилам формата 2
 	// (см. writeFacts). Правится под замком записи сборки.
 	skipped struct{ untyped, overlap, names, renamed int }
-	vecs    *EntityVectors // смысловой вход; пусто, пока векторы не посчитаны
-	evecs   *EdgeVectors   // вход по тройкам (edgevec.go); пусто, пока не посчитан
+
+	// skipLog — журнал причин пропуска кусков (skiplog.go). Открывается
+	// по первому обращению: у коллекции без пропусков файла нет вовсе.
+	skipOnce sync.Once
+	skipLog  *SkipLog
+
+	vecs  *EntityVectors // смысловой вход; пусто, пока векторы не посчитаны
+	evecs *EdgeVectors   // вход по тройкам (edgevec.go); пусто, пока не посчитан
 
 	// alias — журнал синонимов с источником; есть только у формата 2,
 	// у формата 1 остаётся nil.

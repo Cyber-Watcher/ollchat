@@ -102,10 +102,15 @@ func (o BuildOpts) norm() BuildOpts {
 
 // BuildProgress — ход работы для показа пользователю.
 type BuildProgress struct {
-	Total    int // сколько кусков предстоит за этот заход
-	Done     int // сколько разобрано
-	Empty    int // в скольких не нашлось ничего
-	Skipped  int // сколько пропущено из-за неразбираемого ответа
+	Total   int // сколько кусков предстоит за этот заход
+	Done    int // сколько разобрано
+	Empty   int // в скольких не нашлось ничего
+	Skipped int // сколько пропущено из-за неразбираемого ответа — ЭТО ПОТЕРЯ
+	// Service — служебные куски (оглавления, списки литературы): модели
+	// не показывались, это норма работы, а не потеря. Отдельным полем
+	// с 27.09.2026: слитное «пропущено» в итоге захода однажды прочлось
+	// как потеря 107 кусков, и владельцу было доложено неверно.
+	Service  int
 	Entities int // сколько сущностей в графе сейчас
 	Edges    int
 	Elapsed  time.Duration
@@ -299,6 +304,16 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 			case err != nil:
 				skipped++
 				_ = g.Progress().Mark(j.key, MarkSkipped)
+				// Пропуск — это потеря: такой кусок сборка больше никогда
+				// не возьмёт (takesChunk). Причину пишем в журнал, иначе
+				// через сутки не ответить, чем одна книга отличалась
+				// от другой (27.09.2026: три книги потеряли 107 кусков,
+				// и выяснить причину было нечем). Ошибка записи журнала
+				// заход не останавливает: журнал для человека, не для графа.
+				_ = g.SkipLog().Add(SkipRec{
+					Doc: j.key.Doc, Ord: j.key.Ord, Book: j.book,
+					Unit: j.unit, Kind: SkipKindOf(err), Why: err.Error(),
+				})
 			case len(facts.Entities) == 0:
 				empty++
 				_ = g.Progress().Mark(j.key, MarkEmpty)
@@ -398,7 +413,7 @@ send:
 
 	res.LockWait = lockWait
 	res.BuildProgress = BuildProgress{
-		Total: res.Total, Done: done, Empty: empty, Skipped: skipped + service,
+		Total: res.Total, Done: done, Empty: empty, Skipped: skipped, Service: service,
 		Entities: g.Entities().Count(), Edges: g.Edges().Count(),
 		Elapsed: time.Since(started), Book: lastBook,
 	}
