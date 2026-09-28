@@ -78,6 +78,7 @@ type cliFlags struct {
 	kbEmbedPlain          *bool
 	graphForgetTOC        *string
 	graphForgetChunks     *string
+	graphDropDeadMarks    *string
 	graphForgetFile       *string
 	graphForgetSkip       *bool
 	graphDenyAliases      *string
@@ -273,6 +274,9 @@ func parseFlagsNoParse() *cliFlags {
 	f.kbYears = flag.String("kb-years", "", "проставить книгам коллекции год издания")
 	f.kbHash = flag.String("kb-hash", "", "проставить книгам коллекции хеш содержимого (ключ книги для переноса графа): --kb-hash books; с --kb-recount — пересчитать всем")
 	f.kbReanalyze = flag.String("kb-reanalyze", "", "пересобрать словесный индекс коллекции новыми правилами разбора, не перечитывая книг")
+	f.graphDropDeadMarks = flag.String("graph-drop-dead-marks", "",
+		"убрать из графа отметки разбора у книг, которых в коллекции больше нет: "+
+			"--graph-drop-dead-marks books (с --kb-dry-run — только показать)")
 	f.graphForgetChunks = flag.String("graph-forget-chunks", "",
 		"убрать из графа извлечённое из кусков по списку: --graph-forget-chunks books --graph-forget-file список.txt (с --kb-dry-run — только посчитать)")
 	f.graphForgetFile = flag.String("graph-forget-file", "", "с --graph-forget-chunks: файл со списком, номер куска «книга#кусок» в начале строки")
@@ -574,40 +578,41 @@ func writingFlags(f *cliFlags) map[string]func() bool {
 	notEmpty := func(p *string) func() bool { return func() bool { return p != nil && *p != "" } }
 	isSet := func(p *bool) func() bool { return func() bool { return p != nil && *p } }
 	return map[string]func() bool{
-		"--kb-index":            notEmpty(f.kbIndex),
-		"--kb-sync":             notEmpty(f.kbSync),
-		"--kb-reindex":          notEmpty(f.kbReindex),
-		"--kb-refresh":          notEmpty(f.kbRefresh),
-		"--kb-merge":            notEmpty(f.kbMerge),
-		"--kb-embed":            notEmpty(f.kbEmbed),
-		"--kb-years":            notEmpty(f.kbYears),
-		"--kb-reanalyze":        notEmpty(f.kbReanalyze),
-		"--kb-flag-toc":         notEmpty(f.kbFlagTOC),
-		"--graph-build":         notEmpty(f.graphBuild),
-		"--graph-embed":         notEmpty(f.graphEmbed),
-		"--graph-embed-stale":   notEmpty(f.graphEmbedStale),
-		"--graph-embed-edges":   notEmpty(f.graphEmbedEdges),
-		"--graph-embed-follow":  notEmpty(f.graphEmbedFollow),
-		"--graph-communities":   notEmpty(f.graphComm),
-		"--graph-drift":         notEmpty(f.graphDrift),
-		"--graph-summaries":     notEmpty(f.graphSum),
-		"--graph-recheck":       notEmpty(f.graphRecheck),
-		"--graph-findings":      notEmpty(f.graphFindings),
-		"--graph-merge":         notEmpty(f.graphMerge),
-		"--graph-unmerge":       notEmpty(f.graphUnmerge),
-		"--graph-queue-doubts":  notEmpty(f.graphQueueDoubts),
-		"--graph-compact":       notEmpty(f.graphCompact),
-		"--graph-forget-chunks": notEmpty(f.graphForgetChunks),
-		"--graph-deny-aliases":  notEmpty(f.graphDenyAliases),
-		"--graph-rebase-books":  notEmpty(f.graphRebaseBooks),
-		"--graph-record-books":  notEmpty(f.graphRecordBooks),
-		"--graph-groups-build":  notEmpty(f.graphGroupsBuild),
-		"--graph-drop-book":     notEmpty(f.graphDropBook),
-		"--graph-link-new":      isSet(f.graphLinkNew),
-		"--graph-resolve":       notEmpty(f.graphResolve),
-		"--graph-tune":          notEmpty(f.graphTune),
-		"--graph-bench":         notEmpty(f.graphBench),
-		"--graph-forget-toc":    notEmpty(f.graphForgetTOC),
+		"--kb-index":              notEmpty(f.kbIndex),
+		"--kb-sync":               notEmpty(f.kbSync),
+		"--kb-reindex":            notEmpty(f.kbReindex),
+		"--kb-refresh":            notEmpty(f.kbRefresh),
+		"--kb-merge":              notEmpty(f.kbMerge),
+		"--kb-embed":              notEmpty(f.kbEmbed),
+		"--kb-years":              notEmpty(f.kbYears),
+		"--kb-reanalyze":          notEmpty(f.kbReanalyze),
+		"--kb-flag-toc":           notEmpty(f.kbFlagTOC),
+		"--graph-build":           notEmpty(f.graphBuild),
+		"--graph-embed":           notEmpty(f.graphEmbed),
+		"--graph-embed-stale":     notEmpty(f.graphEmbedStale),
+		"--graph-embed-edges":     notEmpty(f.graphEmbedEdges),
+		"--graph-embed-follow":    notEmpty(f.graphEmbedFollow),
+		"--graph-communities":     notEmpty(f.graphComm),
+		"--graph-drift":           notEmpty(f.graphDrift),
+		"--graph-summaries":       notEmpty(f.graphSum),
+		"--graph-recheck":         notEmpty(f.graphRecheck),
+		"--graph-findings":        notEmpty(f.graphFindings),
+		"--graph-merge":           notEmpty(f.graphMerge),
+		"--graph-unmerge":         notEmpty(f.graphUnmerge),
+		"--graph-queue-doubts":    notEmpty(f.graphQueueDoubts),
+		"--graph-compact":         notEmpty(f.graphCompact),
+		"--graph-forget-chunks":   notEmpty(f.graphForgetChunks),
+		"--graph-drop-dead-marks": notEmpty(f.graphDropDeadMarks),
+		"--graph-deny-aliases":    notEmpty(f.graphDenyAliases),
+		"--graph-rebase-books":    notEmpty(f.graphRebaseBooks),
+		"--graph-record-books":    notEmpty(f.graphRecordBooks),
+		"--graph-groups-build":    notEmpty(f.graphGroupsBuild),
+		"--graph-drop-book":       notEmpty(f.graphDropBook),
+		"--graph-link-new":        isSet(f.graphLinkNew),
+		"--graph-resolve":         notEmpty(f.graphResolve),
+		"--graph-tune":            notEmpty(f.graphTune),
+		"--graph-bench":           notEmpty(f.graphBench),
+		"--graph-forget-toc":      notEmpty(f.graphForgetTOC),
 	}
 }
 
@@ -702,6 +707,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			return true, fmt.Errorf("--graph-deny-aliases требует список: --graph-deny-file <файл>")
 		}
 		return true, gmaint.DenyAliases(os.Stdout, cfg, *f.graphDenyAliases, *f.graphDenyFile, *f.kbDry)
+	case *f.graphDropDeadMarks != "":
+		return true, gmaint.DropDeadMarks(os.Stdout, cfg, *f.graphDropDeadMarks, *f.kbDry)
 	case *f.graphForgetChunks != "":
 		if *f.graphForgetFile == "" {
 			return true, fmt.Errorf("--graph-forget-chunks требует список кусков: --graph-forget-file <файл>")
