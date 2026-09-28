@@ -19,6 +19,20 @@ if not gname and not gdir.exists():
     if len(named) == 1:
         gdir = named[0]
 
+# Коллекции без графа — это норма, а не поломка: `projectdocs` по решению
+# владельца живёт простым RAG (поиск по тексту и векторам), графа у неё нет
+# и не должно быть. До 28.09.2026 прибор в этом случае падал трассировкой
+# «FileNotFoundError: …/graph/entities.jsonl», и читать её приходилось как
+# аварию — сбивает с толку на ровном месте.
+if not base.exists():
+    sys.exit(f"коллекции «{name}» нет: {base}")
+if not (gdir/"entities.jsonl").exists():
+    print(f"у коллекции «{name}» графа нет — сверять нечего.")
+    print(f"  ожидался каталог: {gdir}")
+    print("  если граф и не задуман (простой RAG, как у projectdocs) — это норма;")
+    print("  если он должен быть — его не собрали или коллекция не та.")
+    sys.exit(0)
+
 # --- понятия: живые номера и их число -----------------------------------------
 ents, merged, broken = {}, set(), 0
 for line in (gdir/"entities.jsonl").open(encoding="utf-8"):
