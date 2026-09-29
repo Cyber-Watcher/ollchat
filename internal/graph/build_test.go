@@ -26,6 +26,9 @@ func (s *source) EachChunkRef(f kb.ChunkFilter, fn func(kb.ChunkRef) error) erro
 		if f.PathContains != "" && !strings.Contains(c.Book.Path, f.PathContains) {
 			continue
 		}
+		if !kb.InFolder(c.Book.Path, f.Folder) {
+			continue
+		}
 		if len(f.Docs) > 0 && !slices.Contains(f.Docs, c.Doc) {
 			continue
 		}
@@ -309,21 +312,29 @@ func TestModelChangeRefused(t *testing.T) {
 	}
 }
 
-// Подстрока имени файла отбирает одну книгу: так книга переизвлекается
-// в опытный граф без отдельного ключа (этап 90, пункт 3).
-func TestFolderFilterByFileName(t *testing.T) {
+// Каталог — не подстрока имени файла. До 29.09.2026 ключ --graph-folder
+// с частью имени файла отбирал книгу по имени (этап 90, пункт 3), и короткое
+// имя каталога захватывало книги с ним в названии из чужих каталогов
+// (этап 113, И1). Книга по имени теперь берётся ключом --graph-book-name
+// (BuildOpts.Books).
+func TestFolderIsNotFileName(t *testing.T) {
 	g, _ := graph(t)
-	src := &source{}
-	src.chunks = append(chunksFor(3, "/DevOps/NGINX HTTP Server 2024.pdf").chunks,
-		chunksFor(4, "/DevOps/Kubernetes 2025.pdf").chunks...)
+	src := chunksOfBooks(3, "/lib/Sect/first book 2024.pdf", "/lib/Sect/second book 2025.pdf")
 	m := &model{answer: func(int) (string, error) { return goodAnswer, nil }}
 
-	res, err := Build(context.Background(), src, g, m, BuildOpts{Folder: "NGINX HTTP Server", Workers: 1}, nil)
+	res, err := Build(context.Background(), src, g, m, BuildOpts{Folder: "first book", Workers: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 0 {
+		t.Errorf("по «каталогу» из имени файла взято кусков = %d, ожидалось 0", res.Total)
+	}
+	res, err = Build(context.Background(), src, g, m, BuildOpts{Folder: "/Sect", Books: []uint32{1}, Workers: 1}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Total != 3 {
-		t.Errorf("взято кусков = %d, ожидалось 3 одной книги", res.Total)
+		t.Errorf("каталог плюс книга: взято кусков = %d, ожидалось 3 одной книги", res.Total)
 	}
 }
 

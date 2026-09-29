@@ -148,7 +148,7 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	}
 	defer g.Close()
 
-	filter := kb.ChunkFilter{PathContains: folder}
+	filter := kb.ChunkFilter{Folder: folder}
 	// Отбор по имени книги сужает уже выбранный каталог: «--graph-folder /AI
 	// --graph-book-name Graph» — книги про графы внутри /AI. Без каталога
 	// ищется по всей коллекции.
@@ -600,7 +600,7 @@ func graphProgress(logPath string, nodes func() string) func(graph.BuildProgress
 // я оценивал каталог по среднему числу кусков на книгу (1 240) и ошибся вдвое —
 // в книгах по информационной безопасности оказалось 1 750 на книгу, и срок
 // вырос с четырёх часов до восьми.
-func Status(stdout io.Writer, cfg *config.Config, name, folder string) error {
+func Status(stdout io.Writer, cfg *config.Config, name, folder string, books bool) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -650,24 +650,8 @@ func Status(stdout io.Writer, cfg *config.Config, name, folder string) error {
 		} else if st.Entities > 0 {
 			fmt.Fprintf(stdout, "  векторы(смыслы) понятий не считались (ollchat --graph-embed %s)\n", n)
 		}
-		if folder != "" {
-			var total, covered int
-			err := coll.EachChunkRef(kb.ChunkFilter{PathContains: folder}, func(r kb.ChunkRef) error {
-				total++
-				if g.Progress().Done(graph.ChunkKey{Doc: r.Doc, Ord: r.Ord}) {
-					covered++
-				}
-				return nil
-			})
-			switch {
-			case err != nil:
-				fmt.Fprintf(stdout, "  каталог %s: %v\n", folder, err)
-			case total == 0:
-				fmt.Fprintf(stdout, "  каталог %s: кусков не нашлось — проверьте написание пути\n", folder)
-			default:
-				fmt.Fprintf(stdout, "  каталог %s: кусков %d, разобрано %d, осталось %d (%d%%)\n",
-					folder, total, covered, total-covered, 100*covered/total)
-			}
+		if folder != "" || books {
+			printBooksProgress(stdout, coll, g, folder, books)
 		}
 		if g.Locked() {
 			fmt.Fprintln(stdout, "  идёт сборка")
@@ -675,6 +659,71 @@ func Status(stdout io.Writer, cfg *config.Config, name, folder string) error {
 		g.Close()
 	}
 	return nil
+}
+
+// printBooksProgress — строка по каталогу и, по просьбе, таблица по книгам.
+//
+// Числа — по одному правилу с `--graph-pending` (graph.WillTake): «разобрано» —
+// куски с отметкой любого вида, «осталось» — что сборка возьмёт. Строку
+// «каталог …: кусков N, разобрано N, осталось N» читает обвязка
+// (`graph-books-queue.sh`, `rest_of`) — её вид менять нельзя.
+//
+// Книга, которой уже нет на диске, помечается: её остаток не разберётся
+// никогда, и в плане карты он — мираж (этап 113, гипотеза В4).
+func printBooksProgress(stdout io.Writer, coll *kb.Collection, g *graph.Graph, folder string, books bool) {
+	rows, err := graph.BooksProgress(coll, g, kb.ChunkFilter{Folder: folder})
+	label := "каталог " + folder
+	if folder == "" {
+		label = "вся коллекция"
+	}
+	if err != nil {
+		fmt.Fprintf(stdout, "  %s: %v\n", label, err)
+		return
+	}
+	var sum graph.BookProgress
+	var gone int
+	for _, r := range rows {
+		sum.Total += r.Total
+		sum.Done += r.Done
+		sum.Empty += r.Empty
+		sum.Skipped += r.Skipped
+		sum.Service += r.Service
+		sum.Pending += r.Pending
+		if !bookOnDisk(r.Book.Path) {
+			gone++
+		}
+	}
+	if sum.Total == 0 {
+		fmt.Fprintf(stdout, "  %s: кусков не нашлось — проверьте написание пути (%s)\n", label, graphFolderHint(coll))
+		return
+	}
+	fmt.Fprintf(stdout, "  %s: кусков %d, разобрано %d, осталось %d (%d%%)\n",
+		label, sum.Total, sum.Marked(), sum.Pending, 100*sum.Marked()/sum.Total)
+	fmt.Fprintf(stdout, "    книг %d; из разобранных с понятиями %d, пустых %d, пропущено %d, служебных %d\n",
+		len(rows), sum.Done, sum.Empty, sum.Skipped, sum.Service)
+	if gone > 0 {
+		fmt.Fprintf(stdout, "    книг, которых нет на диске: %d — их остаток не разберётся (ollchat --kb-refresh)\n", gone)
+	}
+	if !books {
+		return
+	}
+	// Числа впереди, имя файла — последним и целиком: строку читает и
+	// обвязка (`graph-books-queue.sh`), ей нужно имя без обрезки. Книга,
+	// которой нет на диске, помечена после табуляции.
+	fmt.Fprintf(stdout, "  %8s %9s %8s  %s\n", "осталось", "разобрано", "кусков", "файл книги")
+	for _, r := range rows {
+		note := ""
+		if !bookOnDisk(r.Book.Path) {
+			note = "\t[нет на диске]"
+		}
+		fmt.Fprintf(stdout, "  %8d %9d %8d  %s%s\n", r.Pending, r.Marked(), r.Total, filepath.Base(r.Book.Path), note)
+	}
+}
+
+// bookOnDisk — лежит ли файл книги там, где его знает коллекция.
+func bookOnDisk(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // graphFolderHint подсказывает, какие каталоги есть в коллекции.
@@ -1082,7 +1131,7 @@ func pickBooks(coll *kb.Collection, folder, bookQuery, docsFile string) ([]uint3
 	for _, q := range queries {
 		low, found := strings.ToLower(q), false
 		for _, b := range all {
-			if strings.Contains(strings.ToLower(b.Path), low) && (folder == "" || strings.Contains(b.Path, folder)) {
+			if strings.Contains(strings.ToLower(b.Path), low) && kb.InFolder(b.Path, folder) {
 				add(b.ID)
 				found = true
 			}
@@ -1111,7 +1160,7 @@ func Pending(stdout io.Writer, cfg *config.Config, name, folder, bookQuery, docs
 		return err
 	}
 	defer g.Close()
-	filter := kb.ChunkFilter{PathContains: folder}
+	filter := kb.ChunkFilter{Folder: folder}
 	picked, err := pickBooks(coll, folder, bookQuery, docsFile)
 	if err != nil {
 		return err

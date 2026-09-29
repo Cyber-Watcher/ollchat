@@ -39,10 +39,21 @@ type ChunkFilter struct {
 	// Docs — только эти книги. Пусто — все.
 	Docs []uint32
 
-	// PathContains — только книги, в пути которых есть эта строка.
-	// Так выбирается каталог библиотеки: «/AI/» — книги по искусственному
-	// интеллекту, и граф собирается по одной теме за раз.
+	// PathContains — только книги, в пути которых есть эта строка. Это отбор
+	// по ИМЕНИ: часть названия файла найдёт книгу. Каталог им отбирать
+	// нельзя — см. Folder.
 	PathContains string
+
+	// Folder — только книги из этого каталога библиотеки: «/Раздел»,
+	// «Раздел/», «Раздел/Подраздел». Сравнивается по ГРАНИЦАМ каталога,
+	// а не подстрокой: короткое имя каталога не заденет книгу, в названии
+	// которой оно встречается, из другого каталога.
+	//
+	// Дефект 29.09.2026: каталог отбирался подстрокой (PathContains), и
+	// в остаток по короткому имени каталога попали семь книг из других
+	// каталогов — 190 книг вместо 183 на диске и 12 227 «оставшихся»
+	// кусков вместо 6 476.
+	Folder string
 
 	// From и Limit — окно обхода по сквозному номеру. Нужны калибровке:
 	// «прогони первые двести кусков и замерь».
@@ -78,6 +89,9 @@ func (c *Collection) MatchingDocs(f ChunkFilter) []BookRec {
 			continue
 		}
 		if f.PathContains != "" && !strings.Contains(d.Path, f.PathContains) {
+			continue
+		}
+		if !InFolder(d.Path, f.Folder) {
 			continue
 		}
 		out = append(out, d)
@@ -123,14 +137,36 @@ func (c *Collection) docFilter(f ChunkFilter) func(uint32) bool {
 		if len(want) > 0 && !want[doc] {
 			return false
 		}
-		if f.PathContains != "" {
+		if f.PathContains != "" || f.Folder != "" {
 			b, ok := c.book(doc)
-			if !ok || !strings.Contains(b.Path, f.PathContains) {
+			if !ok {
+				return false
+			}
+			if f.PathContains != "" && !strings.Contains(b.Path, f.PathContains) {
+				return false
+			}
+			if !InFolder(b.Path, f.Folder) {
 				return false
 			}
 		}
 		return true
 	}
+}
+
+// InFolder отвечает, лежит ли книга с таким путём в каталоге folder.
+//
+// Пустой folder — любой каталог. Косые по краям не важны: «/Раздел»,
+// «Раздел», «Раздел/» и «/Раздел/» — один и тот же каталог. Совпадение —
+// по границам каталога: в пути должен быть сегмент «/Раздел/» целиком,
+// поэтому «Раздел» не найдёт ни каталог «Раздел2», ни книгу «Раздел-…»
+// в другом каталоге. Хвост пути тоже годится: «Подраздел» найдёт
+// «…/Раздел/Подраздел/…».
+func InFolder(path, folder string) bool {
+	folder = strings.Trim(folder, "/")
+	if folder == "" {
+		return true
+	}
+	return strings.Contains(path, "/"+folder+"/")
 }
 
 // book ищет книгу без блокировки — вызывается изнутри уже занятого замка.

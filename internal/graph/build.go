@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -43,8 +44,9 @@ type Source interface {
 
 // BuildOpts — как собирать.
 type BuildOpts struct {
-	// Folder — брать только книги, в пути которых есть эта строка: «/AI/».
-	// Так граф собирается каталогами, а не всей библиотекой разом.
+	// Folder — брать только книги этого каталога библиотеки: «/Раздел»,
+	// «Раздел/Подраздел». Совпадение по границам каталога (kb.InFolder),
+	// не подстрокой. Так граф собирается каталогами, а не всей библиотекой.
 	Folder string
 
 	// Books — брать только эти книги, если указаны.
@@ -209,7 +211,7 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 		return res, err
 	}
 
-	filter := kb.ChunkFilter{PathContains: opt.Folder, Docs: opt.Books}
+	filter := kb.ChunkFilter{Folder: opt.Folder, Docs: opt.Books}
 
 	// Сначала собираем список неразобранного — по ссылкам, без текстов.
 	// Так известно общее число заранее: без него полоса хода врёт, а по ней
@@ -463,18 +465,93 @@ func takesChunk(g *Graph, c kb.ChunkRef, redoEmpty bool) bool {
 	return false
 }
 
+// WillTake — возьмёт ли сборка этот кусок в работу на следующем заходе.
+//
+// ЕДИНСТВЕННОЕ определение «осталось» в проекте: им считают остаток
+// `--graph-pending`, `--graph-status --graph-folder`, таблица `--graph-books`
+// и доктор. Служебные куски (оглавления, списки литературы) в остаток не
+// входят: сборка их только помечает, модели не показывает. Кусок с любой
+// отметкой (с понятиями, пустой, пропущенный, служебный) — разобран, сборка
+// его не возьмёт (пустые — только по явной просьбе, см. takesChunk).
+//
+// Этап 113 (29.09.2026): три прибора называли три разных остатка по одному
+// каталогу, потому что у каждого было своё «разобрано». Теперь оно одно.
+func (g *Graph) WillTake(c kb.ChunkRef) bool {
+	return !c.TOC && !c.Refs && takesChunk(g, c, false)
+}
+
 // PendingChunks — сколько кусков под этим отбором сборка ещё возьмёт в работу.
-// Служебные куски (оглавления, списки литературы) в счёт не идут: сборка их
-// только помечает.
 func PendingChunks(coll Source, g *Graph, filter kb.ChunkFilter) (int, error) {
 	n := 0
 	err := coll.EachChunkRef(filter, func(c kb.ChunkRef) error {
-		if !c.TOC && !c.Refs && takesChunk(g, c, false) {
+		if g.WillTake(c) {
 			n++
 		}
 		return nil
 	})
 	return n, err
+}
+
+// BookProgress — ход разбора одной книги: сколько кусков, что с ними стало
+// и сколько сборка ещё возьмёт. Все числа — по тому же правилу, что и
+// PendingChunks (WillTake), поэтому сумма Pending по книгам каталога равна
+// остатку каталога — это проверяет тест TestBooksProgressAgreesWithPending.
+type BookProgress struct {
+	Doc  uint32
+	Book kb.BookRec
+
+	Total   int // кусков книги в коллекции
+	Done    int // с понятиями (MarkDone)
+	Empty   int // разобраны, понятий не нашлось (MarkEmpty)
+	Skipped int // модель не дала разбираемого ответа (MarkSkipped)
+	Service int // служебные, модели не показывались (MarkService)
+	Pending int // сборка ещё возьмёт (WillTake)
+}
+
+// Marked — сколько кусков книги имеют отметку любого вида: «разобрано».
+func (b BookProgress) Marked() int { return b.Done + b.Empty + b.Skipped + b.Service }
+
+// BooksProgress — ход разбора по книгам под отбором, от большего остатка
+// к меньшему; при равном остатке — по пути книги.
+func BooksProgress(coll Source, g *Graph, filter kb.ChunkFilter) ([]BookProgress, error) {
+	byDoc := map[uint32]*BookProgress{}
+	err := coll.EachChunkRef(filter, func(c kb.ChunkRef) error {
+		b := byDoc[c.Doc]
+		if b == nil {
+			b = &BookProgress{Doc: c.Doc, Book: c.Book}
+			byDoc[c.Doc] = b
+		}
+		b.Total++
+		switch mark, ok := g.Progress().MarkOf(ChunkKey{Doc: c.Doc, Ord: c.Ord}); {
+		case !ok:
+		case mark == MarkDone:
+			b.Done++
+		case mark == MarkEmpty:
+			b.Empty++
+		case mark == MarkSkipped:
+			b.Skipped++
+		case mark == MarkService:
+			b.Service++
+		}
+		if g.WillTake(c) {
+			b.Pending++
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BookProgress, 0, len(byDoc))
+	for _, b := range byDoc {
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Pending != out[j].Pending {
+			return out[i].Pending > out[j].Pending
+		}
+		return out[i].Book.Path < out[j].Book.Path
+	})
+	return out, nil
 }
 
 // errEnough — внутренний признак «набрали сколько просили», а не ошибка.

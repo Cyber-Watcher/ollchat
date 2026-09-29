@@ -513,11 +513,16 @@ func pendingByFolder(coll *kb.Collection, g *graph.Graph, roots []string,
 		if f == "" {
 			f = "(корень библиотеки)"
 		}
-		if g.Progress().Done(graph.ChunkKey{Doc: r.Doc, Ord: r.Ord}) {
+		// Одно правило с --graph-pending и --graph-books: разобран — любая
+		// отметка; остаток — то, что сборка возьмёт (graph.WillTake).
+		// Неотмеченный служебный кусок не считается ни туда, ни сюда:
+		// сборка его пометит без модели.
+		switch {
+		case g.Progress().Done(graph.ChunkKey{Doc: r.Doc, Ord: r.Ord}):
 			done[f]++
-			return nil
+		case g.WillTake(r):
+			left[f]++
 		}
-		left[f]++
 		return nil
 	})
 	out := make([]folderPending, 0, len(left)+len(done))

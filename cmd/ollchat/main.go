@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	gmaint "github.com/Cyber-Watcher/ollchat/internal/graph/maint"
+	gstats "github.com/Cyber-Watcher/ollchat/internal/graph/stats"
 	kmaint "github.com/Cyber-Watcher/ollchat/internal/kb/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"os"
@@ -113,6 +114,8 @@ type cliFlags struct {
 	graphNewModel         *bool
 	graphNewPrompt        *bool
 	graphStatus           *string
+	graphBooks            *bool
+	graphStats            *string
 	graphComm             *string
 	graphSum              *string
 	graphSumMin           *int
@@ -303,7 +306,7 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-embed: считать векторы БЕЗ шапки «книга · страница» — только для замера skew (этап 101, Г8)")
 
 	f.graphBuild = flag.String("graph-build", "", "собрать граф понятий по коллекции: --graph-build books")
-	f.graphFolder = flag.String("graph-folder", "", "с --graph-build и --graph-status: только книги, чей путь содержит эту строку")
+	f.graphFolder = flag.String("graph-folder", "", "с --graph-build, --graph-status, --graph-pending: только книги этого каталога библиотеки — по имени каталога (/Раздел или Раздел/Подраздел), не подстрокой")
 	f.graphEntryEval = flag.String("graph-entry-eval", "",
 		"замерить вход в граф по набору вопросов: --graph-entry-eval вопросы.toml")
 	f.graphEntryColl = flag.String("graph-entry-eval-collection", "",
@@ -337,6 +340,8 @@ func parseFlagsNoParse() *cliFlags {
 		"с --graph-build: досбирать граф промптом, отличным от записанного в паспорте;\n"+
 			"по умолчанию это отказ — граф двумя схемами выглядит исправным и не чинится")
 	f.graphStatus = flag.String("graph-status", "", "показать состояние графа коллекции (\"all\" — всех)")
+	f.graphStats = flag.String("graph-stats", "", "исследовательские счёты по графу коллекции (бывший graphstats): --graph-stats books -- -hubs; свои ключи после «--», список: --graph-stats books -- -h")
+	f.graphBooks = flag.Bool("graph-books", false, "с --graph-status: таблица по книгам — кусков, разобрано, осталось (с --graph-folder — по каталогу)")
 	f.graphComm = flag.String("graph-communities", "",
 		"разбить граф коллекции на сообщества: --graph-communities books")
 	f.graphSum = flag.String("graph-summaries", "",
@@ -814,12 +819,14 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Recheck(os.Stdout, cfg, *f.graphRecheck, *f.graphRecheckN, 0)
 	case *f.graphComm != "":
 		return true, gmaint.Communities(os.Stdout, cfg, *f.graphComm, *f.graphFreshComm, *f.graphCarrySim)
+	case *f.graphStats != "":
+		return true, gstats.Run(os.Stdout, cfg, *f.graphStats, flag.Args())
 	case *f.graphStatus != "":
 		name := *f.graphStatus
 		if name == "all" || name == "все" {
 			name = ""
 		}
-		return true, gmaint.Status(os.Stdout, cfg, name, *f.graphFolder)
+		return true, gmaint.Status(os.Stdout, cfg, name, *f.graphFolder, *f.graphBooks)
 	}
 	return false, nil
 }
@@ -1165,6 +1172,10 @@ func usage() {
   ollchat --graph-status books          состояние графа: понятия, связи, охват
   ollchat --graph-status books --graph-folder /Infosec/
                                         то же по одному каталогу: сколько осталось
+  ollchat --graph-status books --graph-folder /Раздел --graph-books
+                                        по книгам каталога: кусков, разобрано, осталось
+  ollchat --graph-stats books -- -only rank -top 40
+                                        исследовательские счёты по графу (-h — список)
   ollchat --graph-drift books           пора ли пересчитывать сообщества
   ollchat --graph-resolve books         двойники понятий: показать, ничего не меняя
   ollchat --graph-merge books --graph-merge-file verdicts.tsv
