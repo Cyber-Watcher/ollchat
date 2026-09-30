@@ -40,6 +40,14 @@ func LooksLikeTOC(text string) bool {
 	return lines >= 4 && ends*2 >= lines
 }
 
+// LineEndsWithPageNumber — то же правило по ОДНОЙ строке, наружу для приборов,
+// которые калибруют LooksLikeTOC (`ollchat --census … -only toc-epub`). Сделано
+// 30.09.2026, этап 114, пункт Г4: до этого `privatescripts/epubtocprobe` носил
+// свою копию правила, и копия отстала — случай `�` (отточие шрифтом без
+// Unicode) в ней так и не появился, то есть прибор мерил по правилу старше
+// того, которое калибровал.
+func LineEndsWithPageNumber(l string) bool { return endsWithPageNumber(l) }
+
 // endsWithPageNumber — кончается ли строка номером страницы: до четырёх
 // десятичных цифр, перед ними пробел или отточие, а в самой строке есть буквы.
 func endsWithPageNumber(l string) bool {

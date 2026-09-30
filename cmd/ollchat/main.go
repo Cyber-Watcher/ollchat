@@ -5,8 +5,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/Cyber-Watcher/ollchat/internal/census"
+	docprobe "github.com/Cyber-Watcher/ollchat/internal/document/probe"
 	gmaint "github.com/Cyber-Watcher/ollchat/internal/graph/maint"
 	gstats "github.com/Cyber-Watcher/ollchat/internal/graph/stats"
+	"github.com/Cyber-Watcher/ollchat/internal/graphex/probes"
 	kmaint "github.com/Cyber-Watcher/ollchat/internal/kb/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"os"
@@ -116,6 +119,9 @@ type cliFlags struct {
 	graphStatus           *string
 	graphBooks            *bool
 	graphStats            *string
+	docProbe              *string
+	census                *string
+	probes                *string
 	graphComm             *string
 	graphSum              *string
 	graphSumMin           *int
@@ -341,6 +347,9 @@ func parseFlagsNoParse() *cliFlags {
 			"по умолчанию это отказ — граф двумя схемами выглядит исправным и не чинится")
 	f.graphStatus = flag.String("graph-status", "", "показать состояние графа коллекции (\"all\" — всех)")
 	f.graphStats = flag.String("graph-stats", "", "исследовательские счёты по графу коллекции (бывший graphstats): --graph-stats books -- -hubs; свои ключи после «--», список: --graph-stats books -- -h")
+	f.docProbe = flag.String("doc-probe", "", "что наш разбор достаёт из файла книги (бывшие docprobe и pagedump): --doc-probe «книга.pdf» -- -unit 120 | -page 40")
+	f.census = flag.String("census", "", "перепись состояния коллекции и графа: --census books -- -only toc; список режимов: --census books -- -h")
+	f.probes = flag.String("probes", "", "замеры извлечения (КАРТА у режимов stability и seq): --probes books -- -only stability -axis temp; список: --probes books -- -h")
 	f.graphBooks = flag.Bool("graph-books", false, "с --graph-status: таблица по книгам — кусков, разобрано, осталось (с --graph-folder — по каталогу)")
 	f.graphComm = flag.String("graph-communities", "",
 		"разбить граф коллекции на сообщества: --graph-communities books")
@@ -821,6 +830,13 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Communities(os.Stdout, cfg, *f.graphComm, *f.graphFreshComm, *f.graphCarrySim)
 	case *f.graphStats != "":
 		return true, gstats.Run(os.Stdout, cfg, *f.graphStats, flag.Args())
+	case *f.docProbe != "":
+		// Ни графа, ни коллекции: проба читает один файл, потому cfg не нужен.
+		return true, docprobe.Run(os.Stdout, *f.docProbe, flag.Args())
+	case *f.census != "":
+		return true, census.Run(os.Stdout, cfg, *f.census, flag.Args())
+	case *f.probes != "":
+		return true, probes.Run(os.Stdout, cfg, *f.probes, flag.Args())
 	case *f.graphStatus != "":
 		name := *f.graphStatus
 		if name == "all" || name == "все" {
