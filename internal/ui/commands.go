@@ -783,6 +783,11 @@ func (m *Model) currentCtx() (int, bool) {
 func (m *Model) applyContext(target int, clamped bool) {
 	cur, _ := m.currentCtx()
 	if target == cur {
+		// Индикатор мог разойтись с окном сеанса — выравниваем, а не только
+		// отвечаем: иначе команда повторяется без толку (этап 115).
+		if n, ok := m.server.NumCtx(); ok && n == cur {
+			m.meter.SetCapacity(cur, ctxmeter.SourceConfig)
+		}
 		text := fmt.Sprintf("окно контекста уже равно %d токенам", cur)
 		if clamped {
 			text = fmt.Sprintf("окно контекста уже равно максимуму модели — %d токенов", cur)
@@ -816,6 +821,7 @@ func (m *Model) setNumCtx(n int) {
 	}
 	m.server.Options["num_ctx"] = n
 	m.meter.SetCapacity(n, ctxmeter.SourceConfig)
+	m.foreignCtx = 0 // окно новое — расхождение с сервером сравнивается заново
 }
 
 // parseTokens — разбор записи числа токенов. Живёт в config, потому что

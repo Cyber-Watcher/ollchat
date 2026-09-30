@@ -1161,9 +1161,7 @@ func (m *Model) onModelInfo(msg modelInfoMsg) (tea.Model, tea.Cmd) {
 	if msg.maxCtx > 0 {
 		m.modelMaxCtx = msg.maxCtx
 	}
-	if msg.capacity > 0 {
-		m.meter.SetCapacity(msg.capacity, msg.source)
-	}
+	m.takeCapacity(msg.capacity, msg.source)
 	if m.cfg.Agent.Enabled && len(m.modelCaps) > 0 && !m.toolsUsable() {
 		why := "не поддерживает инструменты"
 		if hasCap(m.modelCaps, "tools") {
@@ -1215,4 +1213,47 @@ func (m *Model) onResidency(msg residencyMsg) (tea.Model, tea.Cmd) {
 		return m, loadHintAfter(m.gen.run)
 	}
 	return m, nil
+}
+
+// takeCapacity принимает сведения об окне модели и решает, верить ли им.
+//
+// Заданный num_ctx авторитетнее любого ответа сервера: именно он уходит
+// в options запроса, и сервер перезагрузит модель под него. На общем сервере
+// /api/ps сразу после ответа показывает окно ЧУЖОГО запроса — другой клиент
+// успел перезагрузить модель под себя. Принять это число за своё значит
+// соврать в индикаторе и посчитать от него порог сжатия: при 173k занятых
+// и подменённых 32k вопрос в агентном режиме не отправлялся вовсе (этап 115).
+//
+// О расхождении говорим один раз на значение: оно объясняет человеку, почему
+// следующий ответ придёт с задержкой на перезагрузку.
+func (m *Model) takeCapacity(n int, src ctxmeter.CapacitySource) {
+	if n <= 0 {
+		return
+	}
+	want, ok := m.server.NumCtx()
+	if !ok {
+		m.meter.SetCapacity(n, src)
+		return
+	}
+	// Больше, чем модель умеет, сервер не даст: урезает до её максимума.
+	if m.modelMaxCtx > 0 && want > m.modelMaxCtx {
+		want = m.modelMaxCtx
+	}
+	m.meter.SetCapacity(want, ctxmeter.SourceConfig)
+	if src != ctxmeter.SourcePS {
+		return
+	}
+	if n == want {
+		m.foreignCtx = 0
+		return
+	}
+	if n == m.foreignCtx {
+		return
+	}
+	m.foreignCtx = n
+	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
+		"сервер сейчас держит модель %s с окном %d токенов, а не с вашим %d — так бывает, "+
+			"когда её перезагрузил запрос другого клиента.\nВаш следующий вопрос уйдёт с окном %d: "+
+			"сервер перезагрузит модель, это займёт время. Индикатор считает от вашего окна.",
+		m.modelName, n, want, want)})
 }

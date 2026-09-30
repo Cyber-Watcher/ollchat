@@ -38,7 +38,13 @@ type Chatter interface {
 
 // Summarize просит модель сжать сообщения в сводку. Возвращает текст сводки
 // и статистику обмена (токены — для журнала шагов).
-func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Message) (string, ollama.Stats, error) {
+//
+// keepAlive и options — те же, с какими идёт сам диалог. Без num_ctx в options
+// сервер поднимает модель со своим умолчанием: история длиннее этого окна
+// в сводку целиком не попадёт, а модель будет перезагружена дважды — под
+// сводку и обратно под диалог (этап 115).
+func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Message,
+	keepAlive string, options map[string]any) (string, ollama.Stats, error) {
 	if len(msgs) == 0 {
 		return "", ollama.Stats{}, errors.New("сжимать нечего")
 	}
@@ -50,7 +56,9 @@ func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Mess
 			{Role: ollama.RoleUser, Content: transcript(msgs)},
 		},
 		// Рассуждения здесь не нужны: они удлиняют ответ и не попадают в сводку.
-		Think: &no,
+		Think:     &no,
+		KeepAlive: keepAlive,
+		Options:   options,
 	}
 	var b strings.Builder
 	var stats ollama.Stats

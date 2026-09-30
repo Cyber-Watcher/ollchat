@@ -44,7 +44,7 @@ func TestSummarizeSendsTranscript(t *testing.T) {
 		{Kind: ollama.EventContent, Text: "- порт 11434"},
 		{Kind: ollama.EventDone, Stats: ollama.Stats{PromptEvalCount: 120, EvalCount: 20}},
 	}}
-	sum, stats, err := Summarize(context.Background(), cl, "m", history())
+	sum, stats, err := Summarize(context.Background(), cl, "m", history(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,20 +69,43 @@ func TestSummarizeSendsTranscript(t *testing.T) {
 }
 
 func TestSummarizeFailures(t *testing.T) {
-	if _, _, err := Summarize(context.Background(), &scriptedChat{}, "m", nil); err == nil {
+	if _, _, err := Summarize(context.Background(), &scriptedChat{}, "m", nil, "", nil); err == nil {
 		t.Fatal("пустая история должна быть ошибкой")
 	}
 	boom := &scriptedChat{events: []ollama.Event{{Kind: ollama.EventError, Err: errors.New("сервер занят")}}}
-	if _, _, err := Summarize(context.Background(), boom, "m", history()); err == nil || !strings.Contains(err.Error(), "занят") {
+	if _, _, err := Summarize(context.Background(), boom, "m", history(), "", nil); err == nil || !strings.Contains(err.Error(), "занят") {
 		t.Fatalf("ошибка сервера должна доходить: %v", err)
 	}
 	empty := &scriptedChat{events: []ollama.Event{{Kind: ollama.EventDone}}}
-	if _, _, err := Summarize(context.Background(), empty, "m", history()); err == nil {
+	if _, _, err := Summarize(context.Background(), empty, "m", history(), "", nil); err == nil {
 		t.Fatal("пустая сводка должна быть ошибкой")
 	}
 	cut := &scriptedChat{events: []ollama.Event{{Kind: ollama.EventContent, Text: "нача"}}}
-	if _, _, err := Summarize(context.Background(), cut, "m", history()); err == nil {
+	if _, _, err := Summarize(context.Background(), cut, "m", history(), "", nil); err == nil {
 		t.Fatal("оборванный поток должен быть ошибкой")
+	}
+}
+
+// Сводка уходит с окном и сроком жизни диалога. Без num_ctx сервер поднял бы
+// модель со своим умолчанием, и история длиннее него в сводку не попала бы
+// (этап 115).
+func TestSummarizeCarriesDialogOptions(t *testing.T) {
+	cl := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: "сводка"},
+		{Kind: ollama.EventDone},
+	}}
+	opts := map[string]any{"num_ctx": 262144, "temperature": 0.2}
+	if _, _, err := Summarize(context.Background(), cl, "m", history(), "10m", opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := cl.seen.Options["num_ctx"]; got != 262144 {
+		t.Errorf("num_ctx в запросе сводки = %v, ожидалось 262144", got)
+	}
+	if got := cl.seen.Options["temperature"]; got != 0.2 {
+		t.Errorf("прочие options потеряны: temperature = %v", got)
+	}
+	if cl.seen.KeepAlive != "10m" {
+		t.Errorf("keep_alive в запросе сводки = %q, ожидалось 10m", cl.seen.KeepAlive)
 	}
 }
 

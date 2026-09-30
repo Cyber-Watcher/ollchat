@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"maps"
 	"strings"
 	"time"
 
@@ -115,8 +116,11 @@ type Model struct {
 	// modelMaxCtx — окно, на которое модель обучена (из /api/show). Это не то же
 	// самое, что действующая ёмкость: она задаётся num_ctx и может быть меньше.
 	modelMaxCtx int
-	srvVersion  string
-	models      []ollama.ModelInfo
+	// foreignCtx — последнее названное человеку окно, с которым модель стояла
+	// на сервере вопреки запрошенному num_ctx; 0 — расхождения нет (этап 115).
+	foreignCtx int
+	srvVersion string
+	models     []ollama.ModelInfo
 
 	// Виджеты.
 	vp   viewport.Model
@@ -1100,6 +1104,10 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 	}
 	older := m.conv.Older(keep)
 	client := m.client
+	// Сводка идёт с тем же окном, что и диалог: без num_ctx сервер поднял бы
+	// модель со своим умолчанием, и длинная история в сводку не поместилась бы.
+	// Копия — потому что /context set правит исходный словарь, пока идёт запрос.
+	keepAlive, options := m.server.KeepAlive, maps.Clone(m.server.Options)
 	m.gen.compact++
 	gen := m.gen.compact
 	m.statusMsg = "сжимаю историю сводкой…"
@@ -1109,7 +1117,7 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 	return tea.Batch(m.spin.Tick, func() tea.Msg {
 		ctx, cancel := contextWithTimeout(300)
 		defer cancel()
-		summary, stats, err := session.Summarize(ctx, client, model, older)
+		summary, stats, err := session.Summarize(ctx, client, model, older, keepAlive, options)
 		return compactDoneMsg{gen: gen, text: text, summary: summary, stats: stats, err: err}
 	}), true
 }

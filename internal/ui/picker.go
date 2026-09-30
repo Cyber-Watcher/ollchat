@@ -289,6 +289,7 @@ func (m *Model) switchServer(name string) tea.Cmd {
 	m.modelName = srv.Model
 	m.modelCaps = nil
 	m.modelMaxCtx = 0
+	m.foreignCtx = 0
 	m.models = nil
 	m.srvVersion = ""
 	m.think = srv.Think
@@ -316,6 +317,7 @@ func (m *Model) switchModel(name string) tea.Cmd {
 	m.modelName = name
 	m.modelCaps = nil
 	m.modelMaxCtx = 0
+	m.foreignCtx = 0
 	m.meter.Reset()
 	m.addBlock(block{kind: blockNotice, text: "модель переключена на " + name})
 	_ = m.logger.Write("Система", "Переключение на модель "+name+".")
