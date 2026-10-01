@@ -670,6 +670,20 @@ func Status(stdout io.Writer, cfg *config.Config, name, folder string, books boo
 //
 // Книга, которой уже нет на диске, помечается: её остаток не разберётся
 // никогда, и в плане карты он — мираж (этап 113, гипотеза В4).
+// outsideIndex — сколько из файлов, которых нет в индексе вовсе, лежит
+// в каталоге folder. Пустой folder — вся библиотека (см. kb.InFolder).
+// Копии уже проиндексированных книг сюда не попадают: их Pending держит
+// отдельным полем Dupes, и доливка их намеренно пропускает.
+func outsideIndex(files []string, folder string) int {
+	n := 0
+	for _, p := range files {
+		if kb.InFolder(p, folder) {
+			n++
+		}
+	}
+	return n
+}
+
 func printBooksProgress(stdout io.Writer, coll *kb.Collection, g *graph.Graph, folder string, books bool) {
 	rows, err := graph.BooksProgress(coll, g, kb.ChunkFilter{Folder: folder})
 	label := "каталог " + folder
@@ -703,6 +717,21 @@ func printBooksProgress(stdout io.Writer, coll *kb.Collection, g *graph.Graph, f
 		len(rows), sum.Done, sum.Empty, sum.Skipped, sum.Service)
 	if gone > 0 {
 		fmt.Fprintf(stdout, "    книг, которых нет на диске: %d — их остаток не разберётся (ollchat --kb-refresh)\n", gone)
+	}
+	// Обратный случай, и он опаснее: файл лежит в каталоге библиотеки, но в
+	// индексе коллекции его нет. В счёт выше он не входит ВОВСЕ — не как
+	// «осталось», а никак, — и каталог с неразобранной книгой печатает
+	// «осталось 0 (100%)». Доктор коллекции это знает с 30.08.2026 («Лежат в
+	// каталогах, но в индексе их нет»), а здесь отчёт молчал, и 01.10.2026
+	// я на этом молчании доложил владельцу, что в /OS/Linux разбирать нечего,
+	// — при 35 файлах на диске и 34 книгах в индексе.
+	if pend, perr := coll.Pending(); perr == nil {
+		if outside := outsideIndex(pend.Files, folder); outside > 0 {
+			fmt.Fprintf(stdout, "    книг на диске, которых НЕТ в индексе: %d — "+
+				"в счёт выше они не входят вовсе, и «разобрано» сказано не про них "+
+				"(ollchat --kb-doctor %s покажет, какие; долить — ollchat --kb-refresh %s)\n",
+				outside, coll.Name(), coll.Name())
+		}
 	}
 	if !books {
 		return
