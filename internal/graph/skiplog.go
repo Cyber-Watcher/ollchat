@@ -3,6 +3,7 @@ package graph
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,6 +68,10 @@ type SkipLog struct {
 	path string
 	recs []SkipRec
 	bad  string // беда чтения: говорим о ней, но работать не мешаем
+	// noNL — файл кончается не переводом строки (запись оборвалась): перед
+	// следующей записью его надо поставить, иначе две строки склеятся в одну
+	// битую.
+	noNL bool
 }
 
 // openSkipLog читает журнал, если он есть. Отсутствие файла — не ошибка:
@@ -80,6 +85,8 @@ func openSkipLog(dir string) *SkipLog {
 		}
 		return s
 	}
+	s.noNL = len(b) > 0 && b[len(b)-1] != '\n'
+	broken := 0
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -87,10 +94,12 @@ func openSkipLog(dir string) *SkipLog {
 		}
 		var r SkipRec
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			// Обрезанная последняя строка (падение на записи) — не повод
-			// терять весь журнал: читаем, что прочлось, и говорим об этом.
-			s.bad = "журнал пропусков прочитан не до конца: " + err.Error()
-			break
+			// Обрезанная строка (падение на записи) — не повод терять журнал.
+			// И не повод бросать чтение: файл дозаписывается, и за битой
+			// строкой идут целые — прежний break терял их все.
+			broken++
+			s.bad = fmt.Sprintf("журнал пропусков прочитан не до конца: нечитаемых строк %d, они пропущены (%v)", broken, err)
+			continue
 		}
 		s.recs = append(s.recs, r)
 	}
@@ -129,10 +138,15 @@ func (s *SkipLog) Add(r SkipRec) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	line = append(line, '\n')
+	if s.noNL {
+		line = append([]byte{'\n'}, line...)
+	}
+	if _, err := f.Write(line); err != nil {
 		f.Close()
 		return err
 	}
+	s.noNL = false
 	if err := f.Close(); err != nil {
 		return err
 	}

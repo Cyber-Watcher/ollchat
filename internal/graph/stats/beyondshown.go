@@ -26,7 +26,7 @@ func beyondShown(cfg *config.Config, g *graph.Graph, c *kb.Collection, sets []st
 		Embedder: kbembed.New(cfg.KB.EmbedOptions(), cfg.EmbedFallback(), 2*time.Minute, nil)}
 	fmt.Println("\nП3.1. Нужная связь X↔Y: показана / есть в графе, но потеряна на отборе / в графе нет")
 	for _, set := range sets {
-		var total, shown, lost, absent, lostEntity, lostCut int
+		var total, shown, lost, absent, lostEntity, lostCut, failed int
 		var examples []string
 		for _, p := range readRelationPairs(set) {
 			a, ok1 := g.Entities().Lookup(p[0])
@@ -39,9 +39,12 @@ func beyondShown(cfg *config.Config, g *graph.Graph, c *kb.Collection, sets []st
 			}
 			res, err := find.Search(context.Background(), deps, "Как связаны "+p[0]+" и "+p[1]+"?", find.Opts{})
 			if err != nil {
+				failed++
 				continue
 			}
-			if hasPair(res.Relations, p[0], p[1]) {
+			// В выдаче стоят имена реестра, а в наборе — любое написание
+			// (Lookup находит и по синониму): сверяются оба.
+			if hasPair(res.Relations, p[0], p[1]) || hasPair(res.Relations, a.Name, b.Name) {
 				shown++
 				continue
 			}
@@ -64,6 +67,9 @@ func beyondShown(cfg *config.Config, g *graph.Graph, c *kb.Collection, sets []st
 		}
 		fmt.Printf("\n  %s: пар %d; связь показана %d, потеряна на отборе %d (понятие не найдено %d, срезана %d), в графе нет %d\n",
 			set, total, shown, lost, lostEntity, lostCut, absent)
+		if failed > 0 {
+			fmt.Printf("    ВНИМАНИЕ: поиск отказал на %d парах — они в итог не вошли\n", failed)
+		}
 		if len(examples) > 0 {
 			fmt.Println("    потеряны:", strings.Join(examples, "; "))
 		}

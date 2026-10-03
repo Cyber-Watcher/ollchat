@@ -29,9 +29,8 @@ import (
 //   - живость книги определяется `LiveBooks`, а не `Books`: второй отдаёт
 //     реестр вместе с удалёнными, и тогда «мёртвых» не нашлось бы вовсе
 //     (на этом 27.09 ошибся доктор — печатал 1362 вместо 47);
-//   - замок сборки берёт вызывающий (обвязка `graph-after.sh`,
-//     `compact-after-catchup.sh`): журнал дозаписывается заходом, и править
-//     его под идущей сборкой нельзя.
+//   - замок сборки берёт сама перезапись (`graph.DropDeadBookMarks`): журнал
+//     дозаписывается заходом, и править его под идущей сборкой нельзя.
 func DropDeadMarks(stdout io.Writer, cfg *config.Config, name string, dry bool) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
@@ -101,8 +100,8 @@ func DropDeadMarks(stdout io.Writer, cfg *config.Config, name string, dry bool) 
 		if title == "" {
 			title = "(нет и в реестре)"
 		}
-		if len(title) > 70 {
-			title = title[:70]
+		if r := []rune(title); len(r) > 70 {
+			title = string(r[:70]) // по знакам: срез по байтам рвал русское название
 		}
 		fmt.Fprintf(stdout, "  %4d  %6d  %s\n", doc, by[doc], title)
 	}
@@ -115,7 +114,9 @@ func DropDeadMarks(stdout io.Writer, cfg *config.Config, name string, dry bool) 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "убрано отметок: %d (записей книг %d)\n", st.Marks, st.Books)
+	// Записей журнала может быть больше, чем отметок выше: у куска, отмеченного
+	// дважды, записи две, а отметка (последняя) одна.
+	fmt.Fprintf(stdout, "убрано записей журнала: %d (отметок %d, записей книг %d)\n", st.Marks, total, st.Books)
 	if st.Backup != "" {
 		fmt.Fprintf(stdout, "  прежний журнал: %s\n", st.Backup)
 	}

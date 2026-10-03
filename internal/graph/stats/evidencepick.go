@@ -19,6 +19,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
@@ -50,11 +51,10 @@ func look(ci kb.ChunkInfo, a, b string) (both, near, service bool) {
 	ib := strings.Index(low, strings.ToLower(b))
 	both = ia >= 0 && ib >= 0
 	if both {
-		d := ia - ib
-		if d < 0 {
-			d = -d
-		}
-		near = d <= 200
+		// Расстояние в знаках, не в байтах: в русском тексте байтов вдвое
+		// больше, и «до 200 знаков» на деле было около ста.
+		lo, hi := min(ia, ib), max(ia, ib)
+		near = utf8.RuneCountInString(low[lo:hi]) <= 200
 	}
 	service = ci.TOC || ci.Refs
 	return
@@ -152,7 +152,9 @@ func evidencePick(g *graph.Graph, c *kb.Collection, sample, shown int, seed int6
 			}
 			var edges []graph.Edge
 			for _, ed := range g.Edges().Of(p[0]) {
-				if ed.Dst == p[1] {
+				// Подтверждения из отброшенных книг выдача не показывает
+				// (search.go) — и здесь они в «показанные» не идут.
+				if ed.Dst == p[1] && !g.Dropped().Dropped(ed.Evidence.Doc) {
 					edges = append(edges, ed)
 				}
 			}

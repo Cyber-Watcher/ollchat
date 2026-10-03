@@ -42,6 +42,24 @@ func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 		*outMD = stem + ".redacted.md"
 	}
 
+	// Исходник не перезаписывается, и два результата не пишутся в один файл —
+	// те же отказы, что у инструмента scan_redact (tools/scanredact.go).
+	// Запись идёт переименованием, так что оригинал скана пропал бы без следа.
+	same := func(a, b string) bool {
+		aa, err1 := filepath.Abs(a)
+		bb, err2 := filepath.Abs(b)
+		return err1 == nil && err2 == nil && aa == bb
+	}
+	if wantPDF && same(*outPDF, path) {
+		return fmt.Errorf("-out-pdf совпадает с исходным документом — исходник не перезаписывается")
+	}
+	if wantMD && same(*outMD, path) {
+		return fmt.Errorf("-out-md совпадает с исходным документом — исходник не перезаписывается")
+	}
+	if wantPDF && wantMD && same(*outPDF, *outMD) {
+		return fmt.Errorf("-out-pdf и -out-md указывают на один файл — второй затёр бы первый")
+	}
+
 	ctx := context.Background()
 	fmt.Fprintf(stderr, "читаю %s\n", path)
 	pages, notes, err := Load(ctx, path, 0)

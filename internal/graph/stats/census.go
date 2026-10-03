@@ -184,16 +184,25 @@ func corroborationStats(c *kb.Collection, g *graph.Graph, pairsPath string) {
 			if isOverlap && isTranslation {
 				bothKinds++
 			}
-			if len(exs) < 400 {
-				kind := "соседние куски"
-				if isTranslation {
-					kind = "пара перевода"
-				}
-				exs = append(exs, ex{k, n, kind})
+			// Собираются ВСЕ: прежний предел в 400 брал первые 400 пар
+			// из обхода карты, и «самые подтверждённые» выбирались из случайной
+			// выборки — список менялся от запуска к запуску.
+			kind := "соседние куски"
+			if isTranslation {
+				kind = "пара перевода"
 			}
+			exs = append(exs, ex{k, n, kind})
 		}
 	}
-	sort.Slice(exs, func(i, j int) bool { return exs[i].n > exs[j].n })
+	sort.Slice(exs, func(i, j int) bool {
+		if exs[i].n != exs[j].n {
+			return exs[i].n > exs[j].n
+		}
+		if exs[i].k.a != exs[j].k.a {
+			return exs[i].k.a < exs[j].k.a
+		}
+		return exs[i].k.b < exs[j].k.b
+	})
 	for i, e := range exs {
 		if i >= 12 {
 			break
@@ -308,7 +317,7 @@ func typecheckStats(g *graph.Graph) {
 	fmt.Printf("  %-14s %-12s %-14s %9s %7s %9s\n", "источник", "связь", "цель", "записей", "доля", "пар")
 	for _, t := range list {
 		fmt.Printf("  %-14s %-12s %-14s %9d %6.2f%% %9d\n", t.src, graph.RelName(t.rel), t.dst,
-			count[t], 100*float64(count[t])/float64(total), len(pairs[t]))
+			count[t], pct(count[t], total), len(pairs[t]))
 	}
 	fmt.Println("  редкие сочетания (меньше 0.2%) с примерами:")
 	for _, t := range list {

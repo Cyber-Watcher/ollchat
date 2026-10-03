@@ -59,8 +59,11 @@ func TestMarkStatsSplitsKinds(t *testing.T) {
 	}
 
 	// Главное: «пропущено» больше не смешивает потерю со служебным.
-	if st.Skipped == st.Skipped+st.Service {
-		t.Fatal("виды отметок слиты в одно число — ради этого и заводился Stats")
+	// (Прежнее условие `st.Skipped == st.Skipped+st.Service` при Service=1
+	// было ложным всегда и ничего не проверяло.)
+	if _, _, merged := p.Counts(); st.Skipped >= merged || st.Skipped+st.Service > merged {
+		t.Fatalf("виды отметок слиты в одно число: пропущено %d, служебных %d, слитно %d",
+			st.Skipped, st.Service, merged)
 	}
 	// И прежний Counts по-прежнему работает, но складывает всё (это и было бедой).
 	done, empty, skipped := p.Counts()

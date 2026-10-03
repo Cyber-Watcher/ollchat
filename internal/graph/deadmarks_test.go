@@ -152,3 +152,51 @@ func TestDropDeadBookMarksNoDeadIsNoOp(t *testing.T) {
 		t.Fatalf("на графе без мёртвых книг что-то сделано: %+v", st)
 	}
 }
+
+// Перезапись журнала идёт под замком сборки: при живом владельце LOCK чистка
+// обязана отказать и не тронуть журнал. Признака WORK-<pid> мало — сборка его
+// не спрашивает, и подмена файла под ней увела бы её отметки в копию.
+func TestDropDeadBookMarksRefusesUnderBuildLock(t *testing.T) {
+	dir, _ := marksFixture(t)
+	alive := func(doc uint32) bool { return doc == 1 || doc == 2 }
+	release, err := holdBuildLock(dir) // владелец — этот процесс, он жив
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, progressFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DropDeadBookMarks(dir, alive, false); err == nil {
+		t.Fatal("чистка прошла при занятом замке сборки")
+	}
+	after, err := os.ReadFile(filepath.Join(dir, progressFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("журнал отметок изменён, хотя чистке отказано")
+	}
+	// dry ничего не пишет и под замком работать вправе.
+	if _, err := DropDeadBookMarks(dir, alive, true); err != nil {
+		t.Errorf("dry отказал под замком: %v", err)
+	}
+	release()
+	if _, err := DropDeadBookMarks(dir, alive, false); err != nil {
+		t.Fatalf("после снятия замка чистка не прошла: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, lockFile)); !os.IsNotExist(err) {
+		t.Errorf("чистка оставила замок сборки за собой: %v", err)
+	}
+}
+
+// Подсчёт мёртвых отметок — только чтение: журнала нет — он и не появляется.
+func TestDeadBookMarksDoesNotCreateJournal(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := DeadBookMarks(dir, func(uint32) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, progressFile)); !os.IsNotExist(err) {
+		t.Errorf("чтение создало журнал отметок: %v", err)
+	}
+}

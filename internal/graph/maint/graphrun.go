@@ -661,15 +661,6 @@ func Status(stdout io.Writer, cfg *config.Config, name, folder string, books boo
 	return nil
 }
 
-// printBooksProgress — строка по каталогу и, по просьбе, таблица по книгам.
-//
-// Числа — по одному правилу с `--graph-pending` (graph.WillTake): «разобрано» —
-// куски с отметкой любого вида, «осталось» — что сборка возьмёт. Строку
-// «каталог …: кусков N, разобрано N, осталось N» читает обвязка
-// (`graph-books-queue.sh`, `rest_of`) — её вид менять нельзя.
-//
-// Книга, которой уже нет на диске, помечается: её остаток не разберётся
-// никогда, и в плане карты он — мираж (этап 113, гипотеза В4).
 // outsideIndex — сколько из файлов, которых нет в индексе вовсе, лежит
 // в каталоге folder. Пустой folder — вся библиотека (см. kb.InFolder).
 // Копии уже проиндексированных книг сюда не попадают: их Pending держит
@@ -684,6 +675,15 @@ func outsideIndex(files []string, folder string) int {
 	return n
 }
 
+// printBooksProgress — строка по каталогу и, по просьбе, таблица по книгам.
+//
+// Числа — по одному правилу с `--graph-pending` (graph.WillTake): «разобрано» —
+// куски с отметкой любого вида, «осталось» — что сборка возьмёт. Строку
+// «каталог …: кусков N, разобрано N, осталось N» читает обвязка
+// (`graph-books-queue.sh`, `rest_of`) — её вид менять нельзя.
+//
+// Книга, которой уже нет на диске, помечается: её остаток не разберётся
+// никогда, и в плане карты он — мираж (этап 113, гипотеза В4).
 func printBooksProgress(stdout io.Writer, coll *kb.Collection, g *graph.Graph, folder string, books bool) {
 	rows, err := graph.BooksProgress(coll, g, kb.ChunkFilter{Folder: folder})
 	label := "каталог " + folder

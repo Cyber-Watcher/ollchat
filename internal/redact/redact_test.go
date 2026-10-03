@@ -559,3 +559,54 @@ func TestPDFRoundTrip(t *testing.T) {
 		t.Errorf("незамазанное поле не белое: %d", r>>8)
 	}
 }
+
+// Слово-признак само в ПДн не уходит: «доктора» — не имя врача, «Clinical» —
+// не клиника, «Marital» — не месяц. До 03.10.2026 каждое из них помечалось,
+// разносилось повтором по документу и закрашивалось везде. Имена выдуманы.
+func TestSignalWordsAreNotData(t *testing.T) {
+	words := doc(0, "Наблюдается у доктора Орловой с весны.",
+		"Clinical indication: cough",
+		"DOB: 03/04/1970 Marital status: married",
+		"Мнение второго доктора не запрашивалось.")
+	detect(words, Options{})
+	for text, k := range map[string]Kind{
+		"Орловой": KindDoctor, "доктора": KindNone, "Clinical": KindNone,
+		"03/04/1970": KindBirth, "Marital": KindNone,
+	} {
+		if got := kindOf(t, words, text); got != k {
+			t.Errorf("%q: %v, а должно быть %v", text, got, k)
+		}
+	}
+}
+
+// Месяц словом внутри даты рождения по-прежнему часть даты.
+func TestDateWordIsWholeMonth(t *testing.T) {
+	for _, s := range []string{"March", "mar", "Sept.", "декабря", "мая", "г.", "года", "June,"} {
+		if !dateWordRe.MatchString(s) {
+			t.Errorf("%q не признано словом даты", s)
+		}
+	}
+	for _, s := range []string{"Marital", "Decreased", "Мария", "Junior", "годовалый", "Maybe"} {
+		if dateWordRe.MatchString(s) {
+			t.Errorf("%q признано словом даты", s)
+		}
+	}
+}
+
+// Скан с разным разрешением по осям (факс): картинка для распознавания
+// обязана иметь пропорции страницы, иначе единый масштаб врёт по вертикали.
+func TestGrayAtKeepsPageProportions(t *testing.T) {
+	// Страница 612×792 pt; картинка 1224×792 — по ширине вдвое плотнее.
+	p := Page{Width: 612, Height: 792, Image: image.NewGray(image.Rect(0, 0, 1224, 792))}
+	img, k := grayAt(p, 72)
+	b := img.Bounds()
+	if got, want := float64(b.Dy())/k, p.Height; got < want-1 || got > want+1 {
+		t.Errorf("высота картинки %d при масштабе %.3f — это %.1f pt, а страница %.0f pt", b.Dy(), k, got, want)
+	}
+	// Обычный скан (точки квадратные) остаётся как был.
+	p = Page{Width: 612, Height: 792, Image: image.NewGray(image.Rect(0, 0, 2550, 3300))}
+	img, _ = grayAt(p, 72)
+	if img.Bounds().Dx() != 2550 || img.Bounds().Dy() != 3300 {
+		t.Errorf("обычный скан пересчитан: %v", img.Bounds())
+	}
+}

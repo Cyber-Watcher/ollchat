@@ -616,7 +616,6 @@ func (e *Edges) Between(a, b uint32) []Edge {
 	return out
 }
 
-// Count возвращает число записанных связей.
 // eachEdge обходит все связи по исходящим спискам. Порядок не гарантирован.
 func (e *Edges) eachEdge(fn func(Edge)) {
 	e.mu.RLock()
@@ -628,6 +627,7 @@ func (e *Edges) eachEdge(fn func(Edge)) {
 	}
 }
 
+// Count возвращает число записанных связей.
 func (e *Edges) Count() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

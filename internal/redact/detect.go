@@ -267,8 +267,13 @@ func (l *line) valueEnd(words []Word, s, e int, k Kind) int {
 	return e
 }
 
-var dateWordRe = regexp.MustCompile(`(?i)^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|` +
-	`янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек|г\.?$|года?$)`)
+// dateWordRe — слово внутри даты: месяц (полностью или сокращением) либо
+// «г.», «года». Слово сверяется ЦЕЛИКОМ: по одному началу «mar», «dec», «мар»
+// в дату рождения уходили «Marital», «Decreased», «Мария», стоящие следом.
+var dateWordRe = regexp.MustCompile(`(?i)^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|` +
+	`aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|` +
+	`янв(?:ар[ья])?|фев(?:рал[ья])?|мар(?:та?)?|апр(?:ел[ья])?|ма[йя]|июн[ья]?|июл[ья]?|авг(?:уста?)?|` +
+	`сен(?:т(?:ябр[ья])?)?|окт(?:ябр[ья])?|ноя(?:бр[ья])?|дек(?:абр[ья])?|г|года?)[.,]*$`)
 
 // datePat — дата в свободном тексте: 04.03.1990, 1972-04-09, 12 мая 1969 г.,
 // 2 February 1978, February 2, 1978.
@@ -317,7 +322,11 @@ var patterns = []rule{
 	{regexp.MustCompile(`\b(?:Dr\.?|Doctor)\s+[A-Z](?:[a-z]+|[A-Z]+)(?:\s+[A-Z](?:[a-z]+|[A-Z]+))?`), KindDoctor, 0},
 	{regexp.MustCompile(`\b[A-Z][a-z]+,?\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?,?\s+(?:MD|M\.D|DO|PhD|NP|PA-C|RN)\b`), KindDoctor, 0},
 	{regexp.MustCompile(`\b(?:Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?`), KindClient, 0},
-	{regexp.MustCompile(`(?:^|[^\p{L}])((?:[Вв]рач|[Дд]октор|ВРАЧ|ДОКТОР)(?:а|у|ом|е|А|У|ОМ|Е)?\s+[А-ЯЁ](?:[а-яё]+|[А-ЯЁ]+)(?:\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.)?)`), KindDoctor, 1},
+	// Группа — только фамилия с инициалами. Пока в неё входило и само слово
+	// «врача»/«доктора», оно помечалось как имя врача, разносилось по
+	// документу повтором (в skipWords лишь именительный падеж) — и каждое
+	// «врача» в тексте закрашивалось.
+	{regexp.MustCompile(`(?:^|[^\p{L}])(?:[Вв]рач|[Дд]октор|ВРАЧ|ДОКТОР)(?:а|у|ом|е|А|У|ОМ|Е)?\s+([А-ЯЁ](?:[а-яё]+|[А-ЯЁ]+)(?:\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.)?)`), KindDoctor, 1},
 	{regexp.MustCompile(`(?:^|[^\p{L}])(` + patronymicPat + `)(?:[^\p{L}]|$)`), KindPerson, 1},
 	{regexp.MustCompile(`(?:^|[^\p{L}])(` + ruAddressPat + `)`), KindAddress, 1},
 	{regexp.MustCompile(`(?i)\bborn(?:\s+on)?\s+(` + datePat + `)`), KindBirth, 1},
@@ -333,10 +342,14 @@ var patterns = []rule{
 // («NORTHWIND RADIOLOGY», «Contoso Medical Center», «Клиника Здоровье»). Само
 // по себе название не имя, но по клинике и дате выходят на врача, а врач
 // по просьбе пользователей — такое же персональное, как клиент.
+//
+// После признака обязана стоять граница слова: без неё «clinic» срабатывал
+// на «Clinical indication», слово уходило в образцы повтора, и каждое
+// «clinical» пропадало из документа.
 var orgRe = regexp.MustCompile(`(?:^|[^\p{L}])((?:\p{Lu}[\p{L}'&.-]*\s+){0,3}` +
 	`(?i:radiology|imaging|clinic|hospital|medical\s+(?:center|centre|group)|health\s*care|healthcare|practice|` +
 	`laborator(?:y|ies)|diagnostics?|клиника|больница|поликлиника|госпиталь|медицинский\s+центр|` +
-	`лаборатория|диагностический\s+центр|кабинет)(?:\s+\p{Lu}[\p{L}'&.-]*){0,2})`)
+	`лаборатория|диагностический\s+центр|кабинет)(?:\s+\p{Lu}[\p{L}'&.-]*){0,2})(?:[^\p{L}]|$)`)
 
 func byPatterns(words []Word, lines []line) {
 	for li := range lines {

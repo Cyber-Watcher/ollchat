@@ -217,7 +217,9 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 		return
 	}
 	if *evPick > 0 {
-		evidencePick(g, c, *evPick, cfg.Graph.Rules().MaxEvidences, 20260917, *oldSample)
+		// Правила — открытого графа: в них умолчание уже подставлено. Сырое
+		// значение из конфига без max_evidences — ноль, и «показанных» не было бы.
+		evidencePick(g, c, *evPick, g.Rules().MaxEvidences, 20260917, *oldSample)
 		return
 	}
 	if *typeUse != "" {
@@ -391,7 +393,11 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 		return
 	}
 
-	ents := g.Entities().All()
+	// Live, а не All: поглощённое склейкой понятие отдаёт через Of связи своего
+	// выжившего, и с All каждая связь выжившего считалась столько раз, сколько
+	// узлов он поглотил, плюс один — «на одном подтверждении» занижалось,
+	// а сами поглощённые шли в «без соседей».
+	ents := g.Entities().Live()
 	fmt.Printf("коллекция %s: понятий %d, связей %d\n", *coll, len(ents), g.Edges().Count())
 
 	// Рёбра берутся публичным обходом по каждому понятию: так они приходят
@@ -646,15 +652,26 @@ func topicStats(g *graph.Graph, limit int) {
 // точный betweenness на 225 тысячах узлов — часы, а нам нужен порядок величин
 // и пересечение верхушек, а не абсолютные числа.
 func betweenStats(g *graph.Graph, sources int) {
-	ents := g.Entities().All()
+	// Live: поглощённый склейкой узел получил бы соседей выжившего и встал
+	// бы в верхушку его двойником.
+	ents := g.Entities().Live()
+	if len(ents) == 0 {
+		fmt.Println("\nE3. Мосты против хабов: в графе нет понятий — считать нечего")
+		return
+	}
 	idx := make(map[uint32]int, len(ents))
 	for i, e := range ents {
 		idx[e.ID] = i
 	}
 	adj := make([][]int, len(ents))
 	for i, e := range ents {
+		// Neighbors отдаёт соседа дважды, если связь идёт в обе стороны
+		// (ключ — сосед и направление). В списке смежности он нужен один раз:
+		// иначе число кратчайших путей через такую пару удваивается.
+		seen := map[int]bool{}
 		for _, n := range g.Edges().Neighbors(e.ID) {
-			if j, ok := idx[n.ID]; ok && j != i {
+			if j, ok := idx[n.ID]; ok && j != i && !seen[j] {
+				seen[j] = true
 				adj[i] = append(adj[i], j)
 			}
 		}
@@ -733,7 +750,7 @@ func betweenStats(g *graph.Graph, sources int) {
 	fmt.Printf("\nE3. Мосты против хабов (источников %d, понятий %d)\n", sources, len(ents))
 	fmt.Printf("  верхушка %d по betweenness совпадает с верхушкой по степени: %d из %d\n", n, same, n)
 	fmt.Printf("\n  %-40s %14s %10s\n", "понятие (по betweenness)", "betweenness", "связей")
-	for _, i := range byBetween[:10] {
+	for _, i := range byBetween[:min(10, len(byBetween))] {
 		fmt.Printf("  %-40s %14.0f %10.0f\n", cut(ents[i].Name, 38), bc[i], deg[i])
 	}
 	// Сколько мостов попало бы под наш запрет по степени (500 связей).
@@ -766,7 +783,8 @@ func capStats(g *graph.Graph, path string) {
 	if _, err := toml.DecodeFile(path, &set); err != nil {
 		die(err)
 	}
-	ents := g.Entities().All()
+	// Live: с All связи выжившего считались и за каждый поглощённый им узел.
+	ents := g.Entities().Live()
 
 	caps := []int{4, 8, 16, 32, 64}
 	fmt.Printf("\nE1. Предел «N связей на узел» (понятий %d, пар в наборе %d)\n", len(ents), len(set.Case))
@@ -812,7 +830,7 @@ func capStats(g *graph.Graph, path string) {
 			}
 		}
 		fmt.Printf("  %-8d %14d %11.1f%% %13d/%d\n",
-			n, kept, 100*float64(total-kept)/float64(total), ok, pairs)
+			n, kept, pct(total-kept, total), ok, pairs)
 	}
 	fmt.Println("  «пар сохранено» — у скольких пар набора прямая связь осталась в пределах N")
 }
@@ -1289,6 +1307,26 @@ func bfsAvoidingHubs(g *graph.Graph, from, to uint32, maxHops, hubLimit int) int
 	return 0
 }
 
+// edgesAround — связи понятия в ОБЕ стороны, со снятыми склейками.
+// `Edges.Of` отдаёт только исходящие; прибор, которому нужно окружение
+// понятия, с одним Of видел произвольную его половину: понятие, на которое
+// только ссылаются, выходило вовсе «без связей».
+func edgesAround(g *graph.Graph, id uint32) []graph.Edge {
+	out := g.Edges().Of(id)
+	me := g.Merges().Resolve(id)
+	for _, n := range g.Edges().Neighbors(id) {
+		if !n.In {
+			continue
+		}
+		for _, ed := range g.Edges().Between(n.ID, id) {
+			if ed.Dst == me {
+				out = append(out, ed)
+			}
+		}
+	}
+	return out
+}
+
 func pct(a, b int) float64 {
 	if b == 0 {
 		return 0
@@ -1343,7 +1381,7 @@ func thresholdStats(ents []graph.Entity, conf map[edgeKey]int) {
 			}
 		}
 		fmt.Printf("  %-8d %12d %12d %13d (%4.1f%%)\n",
-			t, edgesAt[t], with, total-with, 100*float64(total-with)/float64(total))
+			t, edgesAt[t], with, total-with, pct(total-with, total))
 	}
 	fmt.Println("  «без соседей» — понятия, у которых при этом пороге карта понятий пуста")
 }

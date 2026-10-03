@@ -484,13 +484,14 @@ func textDots(stdout io.Writer, cfg *config.Config, collName string) error {
 	for k, v := range byBook {
 		list = append(list, kv{k, v})
 	}
-	for i := 0; i < len(list); i++ {
-		for j := i + 1; j < len(list); j++ {
-			if list[j].v > list[i].v {
-				list[i], list[j] = list[j], list[i]
-			}
+	// Второй признак обязателен: список собран обходом карты, и при равных
+	// числах порядок и состав первых 25 строк менялись между прогонами.
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].v != list[j].v {
+			return list[i].v > list[j].v
 		}
-	}
+		return list[i].k < list[j].k
+	})
 	fmt.Fprintln(stdout, "\nпо формату и языку:")
 	for _, k := range []string{"pdf", "pdf · рус", "pdf · англ", "epub", "epub · рус", "epub · англ", "текст"} {
 		if sl := byKind[k]; sl != nil && sl.total > 0 {

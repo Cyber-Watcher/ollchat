@@ -220,9 +220,13 @@ func vecSample(g *graph.Graph, sample int, minCos float64, seed int64, show int)
 	fmt.Printf("  ОТБОР НЕ ВИДИТ ВОВСЕ (нет синонима):    %5d (%.1f%%)\n",
 		unseen, 100*float64(unseen)/float64(len(pairs)))
 	fmt.Println()
-	fmt.Printf("  В пересчёте на весь граф: примерно %.0f пар выше %.2f, которых\n",
-		float64(unseen)/float64(sample)*float64(len(ids)), minCos)
-	fmt.Println("  нынешний отбор не предложит арбитру никогда.")
+	// Считаются ПОНЯТИЯ, а не пары: у каждого понятия выборки берётся один,
+	// ближайший сосед. Взаимные ближайшие соседи при пересчёте на граф дают
+	// одну пару дважды, а пары с не самым близким соседом не видны вовсе.
+	fmt.Printf("  В пересчёте на весь граф: примерно %.0f понятий, у которых ближайший\n",
+		float64(unseen)/float64(sample)*float64(len(ids)))
+	fmt.Printf("  сосед выше %.2f отбору не виден (пар — от половины этого числа:\n", minCos)
+	fmt.Println("  взаимные соседи считаются дважды). Арбитру их не предложат никогда.")
 
 	if show > 0 {
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].cos > pairs[j].cos })

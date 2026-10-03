@@ -15,6 +15,7 @@
 package census
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -36,9 +37,33 @@ const entVecDim = 1024
 // ── общее для всех трёх переписей ──────────────────────────────────────────
 
 // readEntityVectors читает сырые векторы понятий с диска: entities.vec лежит
-// подряд по номеру понятия, вектор id=1 — с нулевого байта.
+// подряд по номеру понятия, вектор id=1 — с нулевого байта. Паспорт
+// (entities.vecmeta) сверяется до счёта: при другой размерности смещения
+// режут чужие байты, и все косинусы становятся мусором без единой ошибки;
+// хвост файла за пределами паспорта — остаток прежней записи, он отрезается.
 func readEntityVectors(g *graph.Graph) ([]byte, error) {
-	return os.ReadFile(filepath.Join(g.Dir(), "entities.vec"))
+	var meta struct {
+		Dim   int `json:"dim"`
+		Count int `json:"count"`
+	}
+	mraw, err := os.ReadFile(filepath.Join(g.Dir(), "entities.vecmeta"))
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(mraw, &meta); err != nil {
+		return nil, fmt.Errorf("entities.vecmeta: %w", err)
+	}
+	if meta.Dim != entVecDim {
+		return nil, fmt.Errorf("векторы понятий размерности %d, перепись считает только %d", meta.Dim, entVecDim)
+	}
+	raw, err := os.ReadFile(filepath.Join(g.Dir(), "entities.vec"))
+	if err != nil {
+		return nil, err
+	}
+	if n := meta.Count * meta.Dim; n >= 0 && n < len(raw) {
+		raw = raw[:n]
+	}
+	return raw, nil
 }
 
 // entityVectorAt — вектор понятия id из сырых байт entities.vec; ok=false,
@@ -76,14 +101,15 @@ func cosine(a, b []int8) float64 {
 }
 
 // evenStep — шаг равномерной выборки не больше limit элементов из n; когда
-// урезать нечего, шаг 1 (перебор всех). limit=0 при n>0 — ошибка вызывающего
-// (та же, что была в перенесённой программе: она тоже делила на -cap как
-// есть, без своей проверки).
+// урезать нечего, шаг 1 (перебор всех). Шаг округляется ВВЕРХ: при делении
+// вниз выборка доходила до 2×limit−1 (1199 упоминаний при пределе 600 шли
+// все), а вывод обещал «не больше limit». limit<=0 — предела нет: ноль
+// вызывающий заменяет умолчанием сам, отрицательным предел выключают.
 func evenStep(n, limit int) int {
-	if n > limit {
-		return n / limit
+	if limit <= 0 || n <= limit {
+		return 1
 	}
-	return 1
+	return (n + limit - 1) / limit
 }
 
 // ensureOutDir создаёт каталог для списков перед первой записью, если он
@@ -757,7 +783,11 @@ func misattribMention(stdout io.Writer, cfg *config.Config, collName string, out
 		return err
 	}
 
-	pct := func(n int) float64 { return 100 * float64(n) / float64(total) }
+	// Знаменатель — разобранные упоминания, а не total из журнала: куски
+	// убранных книг обход не отдаёт, и с total три доли не сходились к 100 %
+	// (а на пустом графе печатался NaN).
+	checked := tSeen + tSoft + tNone
+	pct := func(n int) float64 { return 100 * float64(n) / float64(max(checked, 1)) }
 	fmt.Fprintf(stdout, "\nпонятие видно в своём куске: фразой %d (%.1f%%), по основам слов %d (%.1f%%), не видно %d (%.1f%%)\n\n",
 		tSeen, pct(tSeen), tSoft, pct(tSoft), tNone, pct(tNone))
 

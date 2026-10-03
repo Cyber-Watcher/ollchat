@@ -56,7 +56,9 @@ func jaccard(a, b map[string]bool) float64 {
 // thinChunks — равномерная выборка n кусков из cand по всему обходу: то же
 // прореживание шагом, что и в переписях census. Общая для обеих осей.
 func thinChunks[T any](cand []T, n int) []T {
-	if len(cand) <= n {
+	// n<=0 — без прореживания: при нуле шаг ниже делил на ноль (паника мимо
+	// stop, падал весь ollchat).
+	if n <= 0 || len(cand) <= n {
 		return cand
 	}
 	step := len(cand) / n

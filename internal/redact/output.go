@@ -90,5 +90,10 @@ func WriteFile(path string, data []byte) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		// Иначе рядом с целью остаётся скрытый файл с документом.
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
 }

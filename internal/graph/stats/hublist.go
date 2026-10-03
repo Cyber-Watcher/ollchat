@@ -96,7 +96,14 @@ func hubListStats(g *graph.Graph, c *kb.Collection, o hubListOpts) {
 		rows = append(rows, hubRow{ID: e.ID, Name: e.Name, Type: e.Type,
 			Docs: e.Docs, Count: e.Count, Degree: len(nb)})
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Degree > rows[j].Degree })
+	// При равной степени — по номеру: без второго признака состав списка
+	// на границе -hublist-limit менялся от запуска к запуску.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Degree != rows[j].Degree {
+			return rows[i].Degree > rows[j].Degree
+		}
+		return rows[i].ID < rows[j].ID
+	})
 	if o.Limit > 0 && len(rows) > o.Limit {
 		rows = rows[:o.Limit]
 	}

@@ -70,12 +70,16 @@ func tocCensus(stdout io.Writer, cfg *config.Config, collName string) error {
 	fmt.Fprintf(stdout, "кусков %d, похожих на оглавление %d (%.1f%%)\n",
 		total, tocN, 100*float64(tocN)/float64(max(total, 1)))
 	worst, worstN := uint32(0), 0
+	// При равных числах — меньший номер книги: обход карты иначе называл
+	// разные книги на разных прогонах.
 	for d, pb := range perBook {
-		if pb[1] > worstN {
+		if pb[1] > worstN || (pb[1] == worstN && worstN > 0 && d < worst) {
 			worst, worstN = d, pb[1]
 		}
 	}
-	fmt.Fprintf(stdout, "больше всего у книги %d: %d из %d кусков\n", worst, worstN, perBook[worst][0])
+	if worstN > 0 {
+		fmt.Fprintf(stdout, "больше всего у книги %d: %d из %d кусков\n", worst, worstN, perBook[worst][0])
+	}
 
 	gdir := filepath.Join(c.Dir(), "graph")
 	if data, err := os.ReadFile(filepath.Join(gdir, "mentions.log")); err == nil {
@@ -101,14 +105,19 @@ func tocCensus(stdout io.Writer, cfg *config.Config, collName string) error {
 		fmt.Fprintf(stdout, "связей (подтверждений) %d, из оглавлений %d (%.1f%%)\n", n, in, 100*float64(in)/float64(max(n, 1)))
 	}
 	if data, err := os.ReadFile(filepath.Join(gdir, "progress.log")); err == nil {
+		// Журнал отметок читается как у графа (graph.Progress): последняя
+		// запись о куске побеждает. Счёт по записям учитывал перезаписанный
+		// кусок дважды.
 		n, tocDone, tocEmpty := len(data)/progressRec, 0, 0
+		last := map[uint64]uint32{}
 		for i := 0; i < n; i++ {
 			doc := binary.LittleEndian.Uint32(data[i*progressRec:])
 			ord := binary.LittleEndian.Uint32(data[i*progressRec+4:])
-			mark := binary.LittleEndian.Uint32(data[i*progressRec+8:])
-			if !toc[chunkKey(doc, ord)] {
-				continue
+			if k := chunkKey(doc, ord); toc[k] {
+				last[k] = binary.LittleEndian.Uint32(data[i*progressRec+8:])
 			}
+		}
+		for _, mark := range last {
 			switch mark {
 			case markDone:
 				tocDone++
@@ -207,8 +216,8 @@ func measure(text string) lineStats {
 			continue
 		}
 		s.lines++
-		s.chars += len(l)
 		n := len([]rune(l))
+		s.chars += n // знаки, не байты: у русской главы байтов вдвое больше
 		if n < 60 {
 			s.short++
 		}

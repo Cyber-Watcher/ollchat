@@ -105,7 +105,7 @@ func topicEval(cfg *config.Config, g *graph.Graph, c *kb.Collection, path, want 
 		len(questions), level, lvl, len(coms.List))
 
 	// Счётчики по двум половинам: понятия преобладающей темы и все прочие.
-	var mainRel, mainAlien, restRel, restAlien int
+	var mainRel, mainAlien, restRel, restAlien, noMainRel, noMainAlien int
 	var mainAlienOld, restAlienOld int // прежняя мера: чужая ПЕРВАЯ выдержка
 	wordsOnly := 0
 	ownFolder := readQuestionFolders(path)
@@ -182,11 +182,18 @@ func topicEval(cfg *config.Config, g *graph.Graph, c *kb.Collection, path, want 
 			// засчитывалось бы теме с номером 0 (аудит 17.09.2026, S12).
 			ts, okS := topicOf[rel.Src]
 			td, okD := topicOf[rel.Dst]
-			if best >= 2 && ((okS && ts == main) || (okD && td == main)) {
+			switch {
+			case best < 2:
+				// Вопрос без преобладающей темы — отдельно, как и обещано
+				// выше: в «остальных» его связи разбавляли половину, с которой
+				// сравнивается главная тема.
+				noMainRel++
+				noMainAlien += alien
+			case (okS && ts == main) || (okD && td == main):
 				mainRel++
 				mainAlien += alien
 				mainAlienOld += alienOld
-			} else {
+			default:
 				restRel++
 				restAlien += alien
 				restAlienOld += alienOld
@@ -204,6 +211,7 @@ func topicEval(cfg *config.Config, g *graph.Graph, c *kb.Collection, path, want 
 	fmt.Printf("  вопросов с преобладающей темой: %d, без неё: %d\n", withMain, noMain)
 	fmt.Printf("  связи понятий ГЛАВНОЙ темы,  чужих: %s\n", share(mainAlien, mainRel))
 	fmt.Printf("  связи всех остальных понятий, чужих: %s\n", share(restAlien, restRel))
+	fmt.Printf("  связи вопросов без главной темы, чужих: %s — в сравнение не входят\n", share(noMainAlien, noMainRel))
 	fmt.Printf("  прежняя мера (первая выдержка): главная тема %s; остальные %s\n",
 		share(mainAlienOld, mainRel), share(restAlienOld, restRel))
 	if wordsOnly > 0 {

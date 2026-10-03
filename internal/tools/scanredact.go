@@ -57,6 +57,21 @@ func (t *scanRedactTool) Spec() ollama.Tool {
 	}}
 }
 
+// SafeArgs — аргументы для журналов без самих подсказок: сколько имён и строк
+// передано, но не какие. Путь и форматы остаются — по ним разбирают, что
+// сделано. Работает и на аргументах, которые Plan отверг: отказ тоже пишется
+// в журнал, и имена не должны попасть туда этой дорогой.
+func (t *scanRedactTool) SafeArgs(args map[string]any) string {
+	b, _ := json.Marshal(map[string]any{
+		"path":    argStringOr(args, "path", ""),
+		"formats": strings.ToLower(argStringOr(args, "formats", "pdf,md")),
+		"clients": len(splitList(argStringOr(args, "clients", ""))),
+		"doctors": len(splitList(argStringOr(args, "doctors", ""))),
+		"hide":    len(splitList(argStringOr(args, "hide", ""))),
+	})
+	return string(b)
+}
+
 func (t *scanRedactTool) Plan(args map[string]any) (*Plan, error) {
 	raw, err := requireString(args, "path")
 	if err != nil {
@@ -123,18 +138,15 @@ func (t *scanRedactTool) Plan(args map[string]any) (*Plan, error) {
 		outs = append(outs, rel(p))
 	}
 
-	// В журналы — без самих подсказок: сколько имён и строк передано, но
-	// не какие. Путь и форматы остаются — по ним разбирают, что сделано.
-	logArgs, _ := json.Marshal(map[string]any{
-		"path": raw, "formats": formats,
-		"clients": len(opt.Clients), "doctors": len(opt.Doctors), "hide": len(opt.Hide),
-	})
+	if outPDF != "" && outPDF == outMD {
+		return nil, fmt.Errorf("out_pdf и out_md указывают на один файл — второй затёр бы первый")
+	}
 
 	return &Plan{
 		Tool:    NameScanRedact,
 		Req:     req,
 		Extra:   extra,
-		LogArgs: string(logArgs),
+		LogArgs: t.SafeArgs(args),
 		Title:   fmt.Sprintf("%s(%s → %s)", NameScanRedact, rel(in), strings.Join(outs, ", ")),
 		Preview: fmt.Sprintf("Прочитает скан: %s\nЗапишет: %s\nРаспознаёт программа tesseract; "+
 			"персональные данные в PDF замазываются чёрным, в .md имена заменяются на CLIENT и DOCTOR, "+

@@ -9,6 +9,7 @@ package probes
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
@@ -82,7 +83,15 @@ func runDet(stdout io.Writer, cfg *config.Config, collName, gname, cname string,
 			keys[k.Pack()] = k
 		}
 	}
-	for _, key := range keys {
+	// Порядок обхода — по ссылке на кусок: расхождений печатается только
+	// первые show, и при обходе карты их состав менялся между прогонами.
+	packed := make([]uint64, 0, len(keys))
+	for k := range keys {
+		packed = append(packed, k)
+	}
+	slices.Sort(packed)
+	for _, pk := range packed {
+		key := keys[pk]
 		if !ref.Progress().Done(key) {
 			skipped++
 			continue

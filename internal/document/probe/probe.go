@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/document"
 )
@@ -87,7 +88,7 @@ func tail(stdout io.Writer, path string, unit int) error {
 		return fmt.Errorf("не разобрать %s: %w", path, err)
 	}
 	fmt.Fprintf(stdout, "вид %v, единиц %d (%s), год %d, знаков %d\n",
-		doc.Kind, doc.Units, doc.Unit, doc.Year, len(doc.Text))
+		doc.Kind, doc.Units, doc.Unit, doc.Year, utf8.RuneCountInString(doc.Text))
 	r := []rune(doc.Text)
 	if len(r) > tailRunes {
 		r = r[len(r)-tailRunes:] // хвост — последняя прочитанная единица

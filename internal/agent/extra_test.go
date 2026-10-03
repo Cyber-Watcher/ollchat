@@ -25,12 +25,24 @@ import (
 // Plan.LogArgs. До 03.10.2026 steps-*.jsonl хранил их открытым текстом.
 // Имена выдуманы.
 func TestLogArgsHideNamesFromJournals(t *testing.T) {
+	checkNamesHidden(t, `"path":"scan.pdf","clients":"Adaline Quorrow","doctors":"Bertrand Vexholm"`)
+}
+
+// То же — когда вызов отклонён ещё на разборе аргументов (Plan вернул ошибку).
+// До 03.10.2026 на этой ветке в событие и в журнал шагов уходили сырые
+// аргументы модели: LogArgs подставлялся только после удачного Plan.
+func TestLogArgsHideNamesWhenPlanFails(t *testing.T) {
+	checkNamesHidden(t, `"path":"scan.pdf","formats":"docx","clients":"Adaline Quorrow","doctors":"Bertrand Vexholm"`)
+}
+
+func checkNamesHidden(t *testing.T, callArgs string) {
+	t.Helper()
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		if atomic.AddInt32(&calls, 1) == 1 {
 			fmt.Fprint(w, `{"message":{"role":"assistant","tool_calls":[{"function":{"name":"scan_redact",`+
-				`"arguments":{"path":"scan.pdf","clients":"Adaline Quorrow","doctors":"Bertrand Vexholm"}}}]},"done":false}`+"\n")
+				`"arguments":{`+callArgs+`}}}]},"done":false}`+"\n")
 			fmt.Fprint(w, `{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}`+"\n")
 			return
 		}

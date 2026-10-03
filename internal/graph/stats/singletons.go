@@ -62,7 +62,7 @@ func singletonStats(g *graph.Graph) {
 		id := c.Members[0]
 		byTheme := map[int]float64{}
 		deg := 0
-		for _, ed := range g.Edges().Of(id) {
+		for _, ed := range edgesAround(g, id) {
 			other := ed.Dst
 			if other == id {
 				other = ed.Src

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/census"
@@ -44,6 +45,11 @@ var version = buildinfo.Unknown
 
 func main() {
 	if err := run(); err != nil {
+		// Справка по просьбе (`-- -h` у census, probes, graph-stats,
+		// scan-redact) — не сбой: она уже напечатана, код выхода 0.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, "ollchat: "+err.Error())
 		os.Exit(1)
 	}

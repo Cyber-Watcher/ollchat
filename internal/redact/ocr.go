@@ -166,6 +166,11 @@ func rereadInk(ctx context.Context, bin, lang, tmp string, p Page, page int, wor
 // grayAt переводит картинку страницы в серую и поднимает до dpi, если она
 // мельче; крупнее — оставляет как есть. Возвращает и масштаб, точек картинки
 // на точку страницы.
+//
+// Масштаб один на обе оси, поэтому высота берётся из пропорций СТРАНИЦЫ,
+// а не картинки: у скана с разным разрешением по осям (факс 204×98 dpi)
+// высота «как у картинки» сдвигала координаты слов по вертикали, и полосы
+// внизу страницы ложились мимо текста.
 func grayAt(p Page, dpi float64) (*image.Gray, float64) {
 	b := p.Image.Bounds()
 	scale := 1.0
@@ -173,8 +178,14 @@ func grayAt(p Page, dpi float64) (*image.Gray, float64) {
 		scale = dpi / native
 	}
 	w, h := int(float64(b.Dx())*scale+0.5), int(float64(b.Dy())*scale+0.5)
+	square := true // точки картинки квадратные: её пропорции совпадают со страницей
+	if p.Height > 0 {
+		if hp := int(float64(w)*p.Height/p.Width + 0.5); hp > h+1 || hp < h-1 {
+			h, square = hp, false
+		}
+	}
 	dst := image.NewGray(image.Rect(0, 0, w, h))
-	if scale == 1 {
+	if scale == 1 && square {
 		draw.Draw(dst, dst.Bounds(), p.Image, b.Min, draw.Src)
 	} else {
 		draw.CatmullRom.Scale(dst, dst.Bounds(), p.Image, b, draw.Src, nil)

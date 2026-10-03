@@ -434,3 +434,31 @@ func TestLinkNewRefusedOnProductionGraph(t *testing.T) {
 		t.Fatalf("модель спрашивали %d раз до отказа", asked)
 	}
 }
+
+// Остановка захода (Ctrl+C, срок, SIGTERM) — не ответ модели: кусок, который
+// был в работе, обязан остаться БЕЗ отметки и разобраться следующим заходом.
+// До 03.10.2026 он получал MarkSkipped навсегда, и каждая остановка теряла
+// столько кусков, сколько было рабочих.
+func TestCancelDoesNotMarkChunkSkipped(t *testing.T) {
+	g, _ := graph(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &model{answer: func(n int) (string, error) {
+		if n >= 3 {
+			cancel()
+			return "", ctx.Err()
+		}
+		return goodAnswer, nil
+	}}
+	_, _ = Build(ctx, chunksFor(20, "/AI/к.pdf"), g, m, BuildOpts{Workers: 1}, nil)
+	done, _, skipped := g.Progress().Counts()
+	if skipped != 0 {
+		t.Errorf("остановка захода пометила пропущенными %d кусков", skipped)
+	}
+	if done != 2 {
+		t.Errorf("с понятиями %d кусков, ожидалось 2 (разобранные до остановки)", done)
+	}
+	if n := g.SkipLog().Count(); n != 0 {
+		t.Errorf("в журнал пропусков записано %d причин — остановка не пропуск", n)
+	}
+}

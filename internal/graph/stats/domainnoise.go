@@ -63,7 +63,7 @@ func domainNoise(g *graph.Graph, c *kb.Collection, names []string, want string) 
 			fmt.Printf("  %-28s — нет в графе\n", cut(name, 28))
 			continue
 		}
-		edges := g.Edges().Of(ent.ID)
+		edges := edgesAround(g, ent.ID)
 		// Пара понятий может подтверждаться многими кусками: считаем по парам,
 		// иначе одна книга с десятком упоминаний перевесит десять книг с одним.
 		type pk struct{ a, b uint32 }

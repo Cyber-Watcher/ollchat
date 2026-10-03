@@ -220,3 +220,36 @@ func TestBuildWritesSkipReasons(t *testing.T) {
 		t.Error("время записи не поставлено")
 	}
 }
+
+// Запись, оборванная посреди строки, не должна ни склеиться со следующей,
+// ни спрятать всё, что записано после неё.
+func TestSkipLogReadsPastBrokenLine(t *testing.T) {
+	dir := t.TempDir()
+	s := openSkipLog(dir)
+	if err := s.Add(SkipRec{Doc: 1, Ord: 1, Kind: SkipParse, Why: "первая"}); err != nil {
+		t.Fatal(err)
+	}
+	// Падение на записи: кусок строки без перевода строки в конце.
+	f, err := os.OpenFile(filepath.Join(dir, skipLogFile), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"doc":2,"ord":2,"ki`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	s = openSkipLog(dir) // следующий заход
+	for i := 3; i <= 4; i++ {
+		if err := s.Add(SkipRec{Doc: uint32(i), Ord: 1, Kind: SkipParse, Why: "после обрыва"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s = openSkipLog(dir)
+	if n := s.Count(); n != 3 {
+		t.Fatalf("прочитано %d записей, ожидалось 3: первая и две после обрыва", n)
+	}
+	if s.bad == "" {
+		t.Error("о нечитаемой строке не сказано")
+	}
+}

@@ -106,12 +106,28 @@ func TestCosineOnQuantizedMatchesFloat(t *testing.T) {
 		return dot / math.Sqrt(na*nb)
 	}
 	worst := 0.0
-	for range 100 {
-		a, b := mkVec(), mkVec()
+	check := func(a, b []float32) {
 		got := Cosine(Quantize(a), Quantize(b))
 		want := cosFloat(a, b)
 		if d := math.Abs(got - want); d > worst {
 			worst = d
+		}
+	}
+	for range 100 {
+		check(mkVec(), mkVec())
+	}
+	// Независимые случайные векторы дают косинус около нуля, а там ошибка
+	// нормы почти не видна: она умножается на сам косинус. Пороги склейки
+	// и поиска лежат в 0,7–0,9, поэтому проверяются и пары с заданной
+	// близостью: b = c·a + √(1−c²)·шум.
+	for _, c := range []float64{0.3, 0.5, 0.7, 0.8, 0.9, 0.95} {
+		for range 20 {
+			a, noise := mkVec(), mkVec()
+			b := make([]float32, dim)
+			for i := range b {
+				b[i] = float32(c*float64(a[i]) + math.Sqrt(1-c*c)*float64(noise[i]))
+			}
+			check(a, b)
 		}
 	}
 	// Замер 30.09.2026: на 40 000 живых пар расхождение двух способов счёта

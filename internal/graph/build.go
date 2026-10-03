@@ -303,6 +303,14 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 				mu.Unlock()
 				stop()
 				return
+			case err != nil && ctx.Err() != nil:
+				// Заход остановлен (Ctrl+C, срок, SIGTERM): ошибка — следствие
+				// отмены, а не ответ модели. Кусок остаётся БЕЗ отметки
+				// и разберётся следующим заходом. Прежде он уходил в ветку
+				// ниже и получал MarkSkipped навсегда — каждая остановка
+				// теряла столько кусков, сколько было рабочих в пуле.
+				mu.Unlock()
+				return
 			case err != nil:
 				skipped++
 				_ = g.Progress().Mark(j.key, MarkSkipped)

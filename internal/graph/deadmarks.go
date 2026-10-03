@@ -30,12 +30,12 @@ import (
 // (у коллекции есть `LiveBooks`). Не трогает реестр понятий — там своё
 // уплотнение (`--graph-compact`). Не запускается при идущей сборке: журнал
 // пишется заходом, и переписывать его под ним нельзя (правило владельца
-// «уплотнение только когда граф не собирается»), поэтому команда берёт
-// замок сборки.
+// «уплотнение только когда граф не собирается»), поэтому DropDeadBookMarks
+// сам берёт замок сборки на время перезаписи.
 
 // DeadMarksStats — что нашлось и что убрано.
 type DeadMarksStats struct {
-	Marks  int      // отметок убрано
+	Marks  int      // записей журнала убрано (у куска их бывает несколько)
 	Books  int      // записей книг, которым они принадлежали
 	Backup string   // копия прежнего журнала
 	Dead   []uint32 // номера этих записей, по убыванию числа отметок
@@ -44,8 +44,10 @@ type DeadMarksStats struct {
 // DeadBookMarks — сколько отметок у каждой книги, которую alive не признаёт.
 // Читает журнал, ничего не меняя: нужен и отчёту, и dry-прогону команды.
 func DeadBookMarks(dir string, alive func(doc uint32) bool) (map[uint32]int, error) {
-	p, err := openProgress(dir)
-	if err != nil {
+	// Только чтение: openProgress открыл бы журнал на дозапись (и создал бы
+	// пустой файл там, где его нет), а закрыть его здесь некому.
+	p := &Progress{mark: map[uint64]uint32{}}
+	if err := p.load(filepath.Join(dir, progressFile)); err != nil {
 		return nil, err
 	}
 	out := map[uint32]int{}
@@ -62,13 +64,23 @@ func DeadBookMarks(dir string, alive func(doc uint32) bool) (map[uint32]int, err
 // DropDeadBookMarks убирает из `progress.log` отметки книг, которых alive
 // не признаёт живыми. dry — только посчитать.
 //
-// Вызывающий обязан держать замок сборки: журнал дозаписывается заходом,
-// и перезапись под ним потеряла бы отметки разобранных кусков — то есть часы
-// работы видеокарты.
+// Перезапись идёт под замком сборки, и берётся он здесь, ДО чтения журнала
+// (как у уплотнения реестра, compact.go): журнал дозаписывается заходом,
+// и подмена файла под ним увела бы отметки разобранных кусков в копию
+// «.bak-…» — то есть потеряла бы часы работы видеокарты. Признака WORK-<pid>,
+// который ставит команда, мало: сборка его не спрашивает. Идёт сборка —
+// отказ (LockedError). dry замка не берёт: он ничего не пишет.
 func DropDeadBookMarks(dir string, alive func(doc uint32) bool, dry bool) (DeadMarksStats, error) {
 	var st DeadMarksStats
 	if alive == nil {
 		return st, fmt.Errorf("чистка отметок без списка живых книг: так убралось бы всё")
+	}
+	if !dry {
+		release, err := holdBuildLock(dir)
+		if err != nil {
+			return st, err
+		}
+		defer release()
 	}
 	byDoc, err := DeadBookMarks(dir, alive)
 	if err != nil {

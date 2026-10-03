@@ -407,6 +407,23 @@ func (r *Registry) Plan(name string, args map[string]any) (*Plan, error) {
 	return plan, nil
 }
 
+// argsHider — инструмент, в аргументах которого бывают персональные данные.
+// SafeArgs отдаёт то, что можно показать и записать в журналы, и обязан
+// работать на ЛЮБЫХ аргументах, в том числе на тех, что Plan отверг.
+type argsHider interface {
+	SafeArgs(args map[string]any) string
+}
+
+// SafeArgs — аргументы вызова в виде, пригодном для журналов, когда плана нет
+// (Plan вернул ошибку, и Plan.LogArgs взять неоткуда). Пусто — инструмент
+// ничего не прячет, аргументы пишутся как есть.
+func (r *Registry) SafeArgs(name string, args map[string]any) string {
+	if h, ok := r.tools[name].(argsHider); ok {
+		return h.SafeArgs(args)
+	}
+	return ""
+}
+
 // describeParams перечисляет параметры инструмента для сообщения об ошибке.
 func describeParams(spec ollama.Tool) string {
 	props := spec.Function.Parameters.Properties

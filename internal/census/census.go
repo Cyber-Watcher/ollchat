@@ -74,7 +74,7 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 	all := fs.Bool("all", false, "с -only toc-epub: печатать все главы, не только подозрительные")
 	out := fs.String("out", "", "с режимами misattrib-*: каталог для списка кусков в формате --graph-forget-chunks")
 	showEnt := fs.Uint("show-entity", 0, "с -only misattrib-acronym: разобрать одно понятие по номеру")
-	capPer := fs.Int("cap", 600, "с -only misattrib-acronym: не больше стольких упоминаний на понятие (равномерная выборка)")
+	capPer := fs.Int("cap", 600, "с -only misattrib-acronym: не больше стольких упоминаний на понятие (равномерная выборка); 0 — умолчание 600, отрицательное — без предела")
 	// У alias и mention свои умолчания порогов (8 и 20, 0,10 и 0,08), а ключ
 	// один. Ноль здесь читается как «умолчание режима» — правило проекта
 	// «ноль значит умолчание, выключает отрицательное» (internal/CLAUDE.md).
@@ -109,7 +109,7 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 	case "toc-epub":
 		return tocEPUB(stdout, cfg, *root, *show, *all)
 	case "misattrib-acronym":
-		return misattribAcronym(stdout, cfg, collName, *out, *showEnt, *capPer)
+		return misattribAcronym(stdout, cfg, collName, *out, *showEnt, orInt(*capPer, 600))
 	case "misattrib-alias":
 		return misattribAlias(stdout, cfg, collName, *out, orInt(*minN, 8), orFloat(*gap, 0.10))
 	case "misattrib-mention":

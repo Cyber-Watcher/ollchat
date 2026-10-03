@@ -95,8 +95,10 @@ func tripleEval(cfg *config.Config, c *kb.Collection, g *graph.Graph, path strin
 		fmt.Printf("  %-3s %-48s первая: %s\n", mark, cut(cs.Query, 48), first)
 	}
 	fmt.Printf("\n  понятие не в графе %d; пар с прямой связью в графе (находимых) %d, без вектора %d\n", unknown, direct, noVec)
-	if direct > 0 {
-		fmt.Printf("  связь первой тройкой: %d (%.1f%%); в пятёрке: %d (%.1f%%)\n",
-			top1, pct(top1, direct), topK, pct(topK, direct))
+	// Знаменатель — пары, которые ПРОВЕРЯЛИСЬ: без вектора вопроса связь
+	// не искалась вовсе, и считать её «не найденной» значит занижать долю.
+	if checked := direct - noVec; checked > 0 {
+		fmt.Printf("  проверено пар %d; связь первой тройкой: %d (%.1f%%); в первых %d: %d (%.1f%%)\n",
+			checked, top1, pct(top1, checked), k, topK, pct(topK, checked))
 	}
 }

@@ -484,6 +484,12 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 
 	plan, err := r.Tools.Plan(name, call.Function.Arguments)
 	if err != nil {
+		// Плана нет — нет и plan.LogArgs, а аргументы с персональными
+		// данными не должны уйти в событие и журналы и на этой ветке:
+		// инструмент спрашивается напрямую.
+		if safe := r.Tools.SafeArgs(name, call.Function.Arguments); safe != "" {
+			argsJSON = safe
+		}
 		msg := fmt.Sprintf("Ошибка: %v", err)
 		emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name,
 			Title: fmt.Sprintf("%s(%s)", name, textx.Shorten(argsJSON, 60)), Args: argsJSON,
