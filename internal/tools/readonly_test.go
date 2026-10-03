@@ -16,6 +16,8 @@ func TestServedToolsAreReadOnly(t *testing.T) {
 		NameBash: true, NameWriteFile: true, NameEditFile: true,
 		NameReadFile: true, NameListDir: true, NameGrep: true,
 		NameViewImage: true, NameHTTPFetch: true, NameConfluence: true,
+		// Пишет замазанный PDF и .md рядом с исходником.
+		NameScanRedact: true,
 	}
 	for _, name := range ReadOnlyNames() {
 		if changesMachine[name] {

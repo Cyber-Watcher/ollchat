@@ -30,6 +30,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/kbremote"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/redact"
 	"github.com/Cyber-Watcher/ollchat/internal/session"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 	"github.com/Cyber-Watcher/ollchat/internal/ui"
@@ -120,6 +121,7 @@ type cliFlags struct {
 	graphBooks            *bool
 	graphStats            *string
 	docProbe              *string
+	scanRedact            *string
 	census                *string
 	probes                *string
 	graphComm             *string
@@ -348,6 +350,7 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphStatus = flag.String("graph-status", "", "показать состояние графа коллекции (\"all\" — всех)")
 	f.graphStats = flag.String("graph-stats", "", "исследовательские счёты по графу коллекции (бывший graphstats): --graph-stats books -- -hubs; свои ключи после «--», список: --graph-stats books -- -h")
 	f.docProbe = flag.String("doc-probe", "", "что наш разбор достаёт из файла книги (бывшие docprobe и pagedump): --doc-probe «книга.pdf» -- -unit 120 | -page 40")
+	f.scanRedact = flag.String("scan-redact", "", "замазать персональные данные в скане PDF и выписать текст в .md без них (то же, что инструмент scan_redact, без модели): --scan-redact «скан.pdf» -- -formats pdf,md; ключи: --scan-redact x -- -h")
 	f.census = flag.String("census", "", "перепись состояния коллекции и графа: --census books -- -only toc; список режимов: --census books -- -h")
 	f.probes = flag.String("probes", "", "замеры извлечения (КАРТА у режимов stability и seq): --probes books -- -only stability -axis temp; список: --probes books -- -h")
 	f.graphBooks = flag.Bool("graph-books", false, "с --graph-status: таблица по книгам — кусков, разобрано, осталось (с --graph-folder — по каталогу)")
@@ -833,6 +836,9 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.docProbe != "":
 		// Ни графа, ни коллекции: проба читает один файл, потому cfg не нужен.
 		return true, docprobe.Run(os.Stdout, *f.docProbe, flag.Args())
+	case *f.scanRedact != "":
+		// Как и проба разбора, читает один файл: cfg не нужен.
+		return true, redact.RunCLI(os.Stdout, os.Stderr, *f.scanRedact, flag.Args())
 	case *f.census != "":
 		return true, census.Run(os.Stdout, cfg, *f.census, flag.Args())
 	case *f.probes != "":

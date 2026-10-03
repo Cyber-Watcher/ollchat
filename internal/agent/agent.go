@@ -315,7 +315,7 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			}
 			step++
 			r.Steps.Write(steplog.Step{Turn: r.Turn, Step: step, Kind: steplog.KindTool, Model: r.Model,
-				Tool: call.Function.Name, Args: call.Function.ArgumentsJSON(),
+				Tool: call.Function.Name, Args: info.args,
 				Outcome: info.status, MS: info.ms, Note: info.note})
 			if ctx.Err() != nil {
 				// Ход прерван, пока работал инструмент. Дописывать историю
@@ -459,6 +459,9 @@ type callInfo struct {
 	status  string // steplog.Outcome*
 	note    string
 	ms      int64
+	// args — что писать о вызове в журнал шагов: аргументы модели или то,
+	// что инструмент дал вместо них (tools.Plan.LogArgs).
+	args string
 }
 
 func rejected(status, note string) callInfo {
@@ -467,9 +470,10 @@ func rejected(status, note string) callInfo {
 
 // executeCall готовит, согласует и выполняет один вызов инструмента.
 // Возвращаемая строка всегда пригодна для отправки модели: и успех, и ошибка.
-func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan<- Event) (string, []string, callInfo) {
+func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan<- Event) (_ string, _ []string, info callInfo) {
 	name := call.Function.Name
 	argsJSON := call.Function.ArgumentsJSON()
+	defer func() { info.args = argsJSON }()
 
 	if r.Tools == nil {
 		msg := "Инструменты отключены в настройках."
@@ -487,6 +491,12 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 		return msg, nil, rejected(steplog.OutcomeInvalid, err.Error())
 	}
 
+	// Аргументы с персональными данными (имена из подсказок модели
+	// scan_redact) не уходят ни в окно подтверждения, ни в журналы: туда идёт
+	// то, что дал инструмент. Модели они нужны — ей вызов отдан целиком.
+	if plan.LogArgs != "" {
+		argsJSON = plan.LogArgs
+	}
 	if !emit(ctx, out, Event{Kind: EventToolPlan, Tool: &ToolEvent{
 		Name: name, Title: plan.Title, Args: argsJSON, Preview: plan.Preview,
 	}}) {
@@ -494,6 +504,16 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 	}
 
 	decision := r.Guard.Check(plan.Req)
+	for _, req := range plan.Extra {
+		d := r.Guard.Check(req)
+		if d.Decision == permissions.DecisionDeny {
+			decision = d
+			break
+		}
+		if d.Decision == permissions.DecisionAsk && decision.Decision == permissions.DecisionAllow {
+			decision = d
+		}
+	}
 	switch decision.Decision {
 	case permissions.DecisionDeny:
 		msg := fmt.Sprintf("Действие запрещено настройками: %s", decision.Reason)
@@ -532,11 +552,13 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 				Output: msg, Skipped: true, Reason: "отклонено пользователем"}})
 			return msg, nil, rejected(steplog.OutcomeRejected, "отклонено пользователем")
 		case AnswerAlways:
-			if err := r.Guard.GrantSession(plan.Req.Kind, plan.Req.Target); err != nil {
-				msg := fmt.Sprintf("Действие не выполнено: %v", err)
-				emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
-					Output: msg, Skipped: true, Reason: err.Error()}})
-				return msg, nil, rejected(steplog.OutcomeDenied, err.Error())
+			for _, req := range append([]permissions.Request{plan.Req}, plan.Extra...) {
+				if err := r.Guard.GrantSession(req.Kind, req.Target); err != nil {
+					msg := fmt.Sprintf("Действие не выполнено: %v", err)
+					emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
+						Output: msg, Skipped: true, Reason: err.Error()}})
+					return msg, nil, rejected(steplog.OutcomeDenied, err.Error())
+				}
 			}
 		case AnswerAlwaysTool:
 			if err := r.Guard.GrantSessionTool(name); err != nil {

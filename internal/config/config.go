@@ -1361,7 +1361,7 @@ func Default() *Config {
 			CompactAt:     0.75,
 			CompactKeep:   6,
 			Tools: []string{"read_file", "list_dir", "grep", "write_file", "edit_file",
-				"bash", "http_fetch", "view_image", "kb_search", "kb_read"},
+				"bash", "http_fetch", "view_image", "scan_redact", "kb_search", "kb_read"},
 			BashTimeout: "120s",
 			MaxOutputKB: 64,
 		},

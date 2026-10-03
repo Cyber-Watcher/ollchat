@@ -35,6 +35,10 @@ const (
 	NameKBRead    = "kb_read"
 	NameViewImage = "view_image"
 
+	// NameScanRedact — обезличивание сканов: читает PDF и пишет рядом
+	// замазанный PDF и .md, поэтому в службу (ReadOnlyNames) не входит.
+	NameScanRedact = "scan_redact"
+
 	// Инструменты графа понятий. Только чтение: сборка занимает видеокарту
 	// на часы и запускается человеком, у модели такого инструмента нет.
 	NameSearch        = "search"
@@ -51,7 +55,7 @@ const (
 func AllNames() []string {
 	return []string{NameReadFile, NameListDir, NameGrep, NameWriteFile, NameEditFile,
 		NameBash, NameHTTPFetch, NameSearch, NameKBSearch, NameKBRead, NameViewImage,
-		NameWebSearch, NameGraphSearch, NameGraphEntity, NameGraphPath, NameGraphOverview,
+		NameScanRedact, NameWebSearch, NameGraphSearch, NameGraphEntity, NameGraphPath, NameGraphOverview,
 		NameGraphTopic, NameConfluence}
 }
 
@@ -62,6 +66,13 @@ type Plan struct {
 	Title   string              // краткая строка для интерфейса: read_file(go.mod)
 	Preview string              // подробности для подтверждения: diff или текст команды
 	Run     func(ctx context.Context) (string, error)
+
+	// Extra — ещё цели того же действия: инструмент, который читает один
+	// файл и пишет другие (scan_redact), проверяется по каждому. Запрет
+	// любой цели запрещает всё действие, «спросить» по любой — спрашивает.
+	// Без этого единственный Req пропускал бы мимо правил то, что в него
+	// не попало: запрет чтения исходника или запись второго файла.
+	Extra []permissions.Request
 
 	// Images отдаёт картинки, добытые во время Run, в base64. Строкой картинку
 	// не вернёшь, поэтому цикл агента подкладывает их в диалог отдельным
@@ -75,6 +86,13 @@ type Plan struct {
 	// инструменте, чтобы новый источник не остался непомеченным. Инструмент
 	// вправе выставить поле и внутри Run, когда природа вывода ясна только там.
 	Foreign bool
+
+	// LogArgs — что показывать в окне подтверждения и писать в журналы
+	// (шагов и диалога) вместо аргументов модели; пусто — сами аргументы.
+	// Нужно, когда в аргументах персональные данные: scan_redact получает
+	// от модели имена клиентов и врачей, и до 03.10.2026 они ложились
+	// открытым текстом в steps-*.jsonl.
+	LogArgs string
 }
 
 // Tool — инструмент, предоставляемый модели.
@@ -260,6 +278,8 @@ func NewRegistry(enabled []string, opts Options) (*Registry, error) {
 			t = &kbReadTool{opts: opts}
 		case NameViewImage:
 			t = &viewImageTool{opts: opts}
+		case NameScanRedact:
+			t = &scanRedactTool{opts: opts}
 		case NameWebSearch:
 			t = &webSearchTool{opts: opts}
 		case NameSearch:

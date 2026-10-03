@@ -50,6 +50,9 @@ type pageImage struct {
 	obj    int // номер объекта, по нему отсеиваются повторы
 	stream *Stream
 	w, h   int // размер самой картинки в точках
+	// ctm — куда картинка легла на странице: единичный квадрат картинки
+	// в пространстве страницы. Нужна сканам (ScanPages), тексту — нет.
+	ctm matrix
 }
 
 func newExtractor(d *Document) *extractor {
@@ -322,7 +325,7 @@ func (e *extractor) xobject(res Dict, name Name, ctm matrix, penX, penY float64)
 		}
 		w, _ := toInt(e.doc.Resolve(s.Dict["Width"]))
 		h, _ := toInt(e.doc.Resolve(s.Dict["Height"]))
-		e.images = append(e.images, pageImage{obj: num, stream: s, w: w, h: h})
+		e.images = append(e.images, pageImage{obj: num, stream: s, w: w, h: h, ctm: ctm})
 		e.markImage(len(e.images), ctm, w, h)
 		return
 	case "Form":

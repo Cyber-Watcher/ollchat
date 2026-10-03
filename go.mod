@@ -11,6 +11,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.20.0
 	github.com/signintech/gopdf v0.38.0
 	github.com/yuin/goldmark v1.7.13
+	golang.org/x/image v0.30.0
 	golang.org/x/term v0.45.0
 )
 
