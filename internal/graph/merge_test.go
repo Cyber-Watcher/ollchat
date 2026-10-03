@@ -1,6 +1,10 @@
 package graph
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // mergeFixture: два понятия-двойника, у каждого своя половина связей
 // и упоминаний, плюс третье понятие в стороне.
@@ -197,5 +201,61 @@ func TestMergeLiveVersusAll(t *testing.T) {
 		if e.ID == 2 {
 			t.Error("поглощённое понятие попало в Live")
 		}
+	}
+}
+
+// Круг в журнале (A→B и B→A): одно понятие пары выживает, и считаться
+// поглощённым оно не должно. До 03.10.2026 Count возвращал число записей,
+// и доктор занижал живые понятия на число кругов.
+func TestMergeCountSkipsCycleSurvivor(t *testing.T) {
+	g := mergeFixture(t)
+	// Круг пишется мимо Add — так он лежит в рабочем журнале с 18.09.2026.
+	line := `{"from":2,"to":3,"verdict":"ДА"}` + "\n" + `{"from":3,"to":2,"verdict":"ДА"}` + "\n" +
+		`{"from":4,"to":1,"verdict":"ДА"}` + "\n"
+	if err := os.WriteFile(filepath.Join(g.Dir(), mergesFile), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g = reopen(t, g)
+	defer g.Close()
+
+	live := len(g.Entities().Live())
+	if live != 2 {
+		t.Fatalf("живых понятий %d, ожидалось 2: из круга 2↔3 выживает одно, 4 поглощено", live)
+	}
+	if got := g.Merges().Count(); got != 2 {
+		t.Errorf("поглощено %d, ожидалось 2 (записей в журнале 3, одна — выживший круга)", got)
+	}
+	if st := g.Stats(0); st.Live() != live {
+		t.Errorf("сводка называет живых %d, а Live() отдаёт %d — доктор и поиск расходятся", st.Live(), live)
+	}
+}
+
+// Встречная склейка уже склеенной пары круга не создаёт — ни прямая,
+// ни через цепочку, ни внутри одной пачки.
+func TestMergeRefusesReverseDirection(t *testing.T) {
+	g := mergeFixture(t)
+	defer g.Close()
+
+	if n, err := g.Merges().Add([]MergeRec{{From: 2, To: 1}}); err != nil || n != 1 {
+		t.Fatalf("первая склейка: %d, %v", n, err)
+	}
+	if n, _ := g.Merges().Add([]MergeRec{{From: 1, To: 2}}); n != 0 {
+		t.Errorf("встречная склейка 1→2 записана (%d) — в журнале круг", n)
+	}
+	// Через цепочку: 3→2→1 уже есть, 1→3 замкнул бы круг из трёх.
+	if n, _ := g.Merges().Add([]MergeRec{{From: 3, To: 2}}); n != 1 {
+		t.Fatalf("склейка 3→2 не записана: %d", n)
+	}
+	if n, _ := g.Merges().Add([]MergeRec{{From: 1, To: 3}}); n != 0 {
+		t.Errorf("склейка 1→3 замкнула круг 3→2→1→3 (%d)", n)
+	}
+	// Внутри одной пачки.
+	g2 := mergeFixture(t)
+	defer g2.Close()
+	if n, _ := g2.Merges().Add([]MergeRec{{From: 2, To: 3}, {From: 3, To: 2}}); n != 1 {
+		t.Errorf("из пачки с парой навстречу записано %d, ожидалась 1", n)
+	}
+	if got := g.Merges().Count(); got != 2 {
+		t.Errorf("поглощено %d, ожидалось 2", got)
 	}
 }

@@ -537,7 +537,15 @@ func pendingByFolder(coll *kb.Collection, g *graph.Graph, roots []string,
 		}
 	}
 	// От большего к меньшему: сперва то, что займёт карту надолго.
-	sort.Slice(out, func(i, j int) bool { return out[i].pending > out[j].pending })
+	// При равном остатке — по имени каталога: список собран обходом карт,
+	// и закрытые каталоги (остаток 0) менялись местами от запуска к запуску
+	// (поймано 03.10.2026 сравнением вывода двух прогонов на одном снимке).
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].pending != out[j].pending {
+			return out[i].pending > out[j].pending
+		}
+		return out[i].folder < out[j].folder
+	})
 	return out
 }
 

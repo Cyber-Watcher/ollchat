@@ -59,6 +59,32 @@ if mp.exists():
             broken += 1
             continue
         merged.add(src)
+# Круги в журнале (03.10.2026): пара, записанная дважды навстречу (A→B и B→A),
+# или тройка по кругу. В круге одно понятие выживает — программа берёт
+# наименьший номер, — и вычитать его из живых нельзя. До этой правки вычитались
+# все `from` подряд, и счёт сходился с доктором только потому, что доктор
+# ошибался так же: оба занижали живые понятия на число кругов.
+to = {}
+if mp.exists():
+    for line in mp.open(encoding="utf-8"):
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        src, dst = r.get("from", r.get("From")), r.get("to", r.get("To"))
+        if src and dst and src != dst:
+            to[src] = dst
+survivors = set()
+for start in sorted(to):
+    seen, cur = [], start
+    while cur in to and cur not in seen:
+        seen.append(cur)
+        cur = to[cur]
+    if cur in seen:                      # цепочка пришла в саму себя — круг
+        survivors.add(min(seen[seen.index(cur):]))
+merged -= survivors
+if survivors:
+    print(f"кругов в журнале склеек: {len(survivors)} (в каждом одно понятие выживает)")
 live = set(ents) - merged
 # 13.09.2026: здесь стояло `if r.get("drop")`, а поля `drop` в merges.jsonl нет
 # вовсе (запись: from, to, cos, verdict, alias, why, level, at). Склейки не
