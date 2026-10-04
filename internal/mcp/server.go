@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,11 +73,18 @@ type Server struct {
 	// Steps — журнал вызовов: имя инструмента, аргументы, исход, время.
 	// nil — не писать. Служба смотрит наружу, и без этого журнала нельзя
 	// сказать, кто и что у неё спрашивал.
-	Steps    *steplog.Writer
-	mu       sync.Mutex
-	registry *tools.Registry
-	extra    []Tool // инструменты, которых нет в реестре ollchat: kb_status
-	inited   bool
+	Steps *steplog.Writer
+	// Policy — пределы параметров, потолок ответа и срок вызова (policy.go).
+	Policy Policy
+	// WatchFiles — файлы настроек, правка которых перезапускает службу так же,
+	// как подмена бинаря; Validate проверяет их до перезапуска, чтобы
+	// испорченная правка не уронила службу у клиента (reexec_linux.go).
+	WatchFiles []string
+	Validate   func() error
+	mu         sync.Mutex
+	registry   *tools.Registry
+	extra      []Tool // инструменты, которых нет в реестре ollchat: kb_status
+	inited     bool
 }
 
 // Tool — инструмент, добавленный самим сервером поверх реестра ollchat.
@@ -116,13 +125,15 @@ func (s *Server) Handle(ctx context.Context, raw []byte) []byte {
 func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
-		s.mu.Lock()
-		s.inited = true
-		s.mu.Unlock()
+		s.markInited()
 		return map[string]any{
 			"protocolVersion": protocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
+			// listChanged обещает клиенту уведомление о смене набора (этап 109, А1).
+			// Без этого флага клиент честно держал список, сложившийся при старте
+			// сеанса: 26.09.2026 весь день звались kb_search и graph_search, которых
+			// служба уже не отдавала.
+			"capabilities": map[string]any{"tools": map[string]any{"listChanged": true}},
+			"serverInfo":   map[string]any{"name": serverName, "version": serverVersion},
 			"instructions": "Библиотека технических книг пользователя и граф понятий по ней. " +
 				"Ищи в книгах перед тем, как отвечать по памяти: выдача содержит книгу и страницу, " +
 				"и на них можно сослаться.",
@@ -140,6 +151,27 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, *rpcError) 
 	default:
 		return nil, &rpcError{codeMethodNotFound, "неизвестный метод: " + req.Method}
 	}
+}
+
+func (s *Server) markInited() {
+	s.mu.Lock()
+	s.inited = true
+	s.mu.Unlock()
+}
+
+// toolsChanged — уведомление «набор инструментов сменился, перечитай».
+// Сам набор внутри одного процесса не меняется: он меняется вместе с бинарём,
+// поэтому шлют его транспорты — HTTP после перезапуска службы, stdio после
+// подмены бинаря (transport.go, reexec_linux.go).
+var toolsChanged = []byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`)
+
+// Fingerprint — отпечаток набора инструментов: имена, описания и схемы.
+// Совпал отпечаток — клиенту перечитывать нечего, даже если служба
+// перезапускалась.
+func (s *Server) Fingerprint() string {
+	b, _ := json.Marshal(s.list())
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:6])
 }
 
 // mcpTool — описание инструмента в терминах MCP.
@@ -162,7 +194,7 @@ func (s *Server) list() []mcpTool {
 			out = append(out, mcpTool{
 				Name:        spec.Function.Name,
 				Description: spec.Function.Description,
-				InputSchema: schemaOf(spec.Function.Parameters),
+				InputSchema: s.schemaFor(spec.Function.Name, spec.Function.Parameters),
 			})
 		}
 	}
@@ -170,11 +202,26 @@ func (s *Server) list() []mcpTool {
 		out = append(out, mcpTool{
 			Name:        t.Spec.Name,
 			Description: t.Spec.Description,
-			InputSchema: schemaOf(t.Spec.Parameters),
+			InputSchema: s.schemaFor(t.Spec.Name, t.Spec.Parameters),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// schemaFor — схема с диапазонами, переписанными по пределам службы.
+func (s *Server) schemaFor(tool string, p ollama.ToolParams) map[string]any {
+	if len(s.Policy.Limits[tool]) > 0 {
+		props := make(map[string]ollama.ToolProp, len(p.Properties))
+		for name, prop := range p.Properties {
+			if l, ok := s.Policy.limitOf(tool, name); ok {
+				prop.Description = describe(prop.Description, l)
+			}
+			props[name] = prop
+		}
+		p.Properties = props
+	}
+	return schemaOf(p)
 }
 
 // schemaOf переводит описание параметров в JSON Schema, как её ждёт MCP.
@@ -249,11 +296,19 @@ func (s *Server) callInner(ctx context.Context, raw json.RawMessage) (any, *rpcE
 	if p.Arguments == nil {
 		p.Arguments = map[string]any{}
 	}
+	notes := s.Policy.adjust(p.Name, p.Arguments)
+	result := func(text string, err error) map[string]any {
+		if err != nil {
+			return callResult("", errors.New(s.Policy.finish(err.Error(), notes)))
+		}
+		return callResult(s.Policy.finish(text, notes), nil)
+	}
 
 	for _, t := range s.extra {
 		if t.Spec.Name == p.Name {
-			text, err := t.Run(ctx, p.Arguments)
-			return callResult(text, err), nil
+			return result(s.Policy.run(ctx, func(ctx context.Context) (string, error) {
+				return t.Run(ctx, p.Arguments)
+			})), nil
 		}
 	}
 
@@ -271,8 +326,7 @@ func (s *Server) callInner(ctx context.Context, raw json.RawMessage) (any, *rpcE
 		}
 		return callResult("", err), nil
 	}
-	text, err := plan.Run(ctx)
-	return callResult(text, err), nil
+	return result(s.Policy.run(ctx, plan.Run)), nil
 }
 
 // toolNames — всё, что служба отдаёт клиенту: реестр ollchat и свои добавки.

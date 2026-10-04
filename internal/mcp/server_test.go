@@ -60,8 +60,31 @@ func TestHandshake(t *testing.T) {
 	if r["protocolVersion"] != protocolVersion {
 		t.Errorf("версия протокола = %v", r["protocolVersion"])
 	}
-	if _, ok := r["capabilities"].(map[string]any)["tools"]; !ok {
-		t.Error("сервер не объявил, что умеет инструменты")
+	tools, ok := r["capabilities"].(map[string]any)["tools"].(map[string]any)
+	if !ok {
+		t.Fatal("сервер не объявил, что умеет инструменты")
+	}
+	// Без этого флага клиент не ждёт уведомлений и держит список до перезапуска
+	// сеанса (этап 109, А1).
+	if tools["listChanged"] != true {
+		t.Errorf("listChanged не объявлен: %v", tools)
+	}
+}
+
+// Отпечаток набора: один и тот же у одинаковых наборов, другой — у разных,
+// в том числе когда сменилось одно описание.
+func TestFingerprint(t *testing.T) {
+	a, b := server(probe()).Fingerprint(), server(probe()).Fingerprint()
+	if a == "" || a != b {
+		t.Fatalf("отпечатки одного набора разные: %q и %q", a, b)
+	}
+	changed := probe()
+	changed.Spec.Description += "!"
+	if server(changed).Fingerprint() == a {
+		t.Error("смена описания не изменила отпечаток")
+	}
+	if server().Fingerprint() == a {
+		t.Error("пустой набор дал тот же отпечаток")
 	}
 }
 

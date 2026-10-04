@@ -530,7 +530,13 @@ func argBool(args map[string]any, key string, def bool) bool {
 // truncate обрезает вывод инструмента до предела, заданного настройками,
 // и честно сообщает модели, что часть данных отброшена.
 func (o Options) truncate(s string) string {
-	limit := o.MaxOutputKB * 1024
+	return Truncate(s, o.MaxOutputKB*1024)
+}
+
+// Truncate режет ответ до limit байт по границе символа и пишет, сколько
+// показано. limit ≤ 0 — без обрезки. Нужен и службе MCP: её потолок ответа
+// задаётся своим файлом настроек (этап 109).
+func Truncate(s string, limit int) string {
 	if limit <= 0 || len(s) <= limit {
 		return s
 	}

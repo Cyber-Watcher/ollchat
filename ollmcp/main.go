@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"net/http"
 	"os/signal"
@@ -42,17 +43,18 @@ func main() {
 		addr    = flag.String("http", "", "слушать HTTP по этому адресу; пусто — режим stdio")
 		list    = flag.Bool("tools", false, "показать список инструментов и выйти")
 		verbose = flag.Bool("v", false, "писать обращения клиентов в поток ошибок")
+		mcpConf = flag.String("mcp-config", "", "файл настроек службы (по умолчанию ollmcp.toml рядом с конфигом ollchat)")
 	)
 	flag.Usage = usage
 	flag.Parse()
 
-	if err := run(*cfgPath, *addr, *list, *verbose); err != nil {
+	if err := run(*cfgPath, *mcpConf, *addr, *list, *verbose); err != nil {
 		fmt.Fprintln(os.Stderr, "ollmcp: "+err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(cfgPath, addr string, list, verbose bool) error {
+func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 	path := cfgPath
 	if path == "" {
 		path = config.DefaultPath()
@@ -77,6 +79,22 @@ func run(cfgPath, addr string, list, verbose bool) error {
 	srv.Steps = steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollmcp", cfg.Log.Enabled)
 	defer srv.Steps.Close()
 
+	// Настройки службы: пределы, потолок ответа, срок вызова (этап 109).
+	if mcpConf == "" {
+		mcpConf = SettingsPath(path)
+	}
+	settings, err := LoadSettings(mcpConf)
+	if err != nil {
+		return err
+	}
+	if srv.Policy, err = settings.Policy(cfg.Agent.MaxOutputKB); err != nil {
+		return fmt.Errorf("%s: %w", mcpConf, err)
+	}
+	if settings.Watch() {
+		srv.WatchFiles = []string{mcpConf}
+		srv.Validate = func() error { _, err := LoadSettings(mcpConf); return err }
+	}
+
 	if list {
 		for _, t := range srv.Tools() {
 			fmt.Printf("%-16s %s\n", t.Name, firstLine(t.Description))
@@ -100,11 +118,23 @@ func run(cfgPath, addr string, list, verbose bool) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(mcp.Info(srv))
 	})
-	return serveOn(mux, addr, data.Token)
+	err = serveOn(mux, addr, data.Token, srv)
+	if errors.Is(err, errReplaced) {
+		// Тот же номер процесса и тот же порт после exec: сторож службы
+		// подмены не замечает, а клиенты узнают о возможной смене набора
+		// со следующим запросом (internal/mcp/transport.go, этап 109).
+		_ = srv.Steps.Close()
+		return mcp.Reexec()
+	}
+	return err
 }
 
+// errReplaced — служба остановлена, потому что ~/bin/ollmcp подменён новым
+// или правлены её настройки.
+var errReplaced = errors.New("бинарь или настройки сменились")
+
 // serveOn поднимает службу и ждёт сигнала останова.
-func serveOn(mux *http.ServeMux, addr, token string) error {
+func serveOn(mux *http.ServeMux, addr, token string, msrv *mcp.Server) error {
 	if token == "" {
 		fmt.Fprintln(os.Stderr, "ollmcp: ключ доступа НЕ ЗАДАН (OLLMCP_TOKEN)")
 	}
@@ -125,6 +155,14 @@ func serveOn(mux *http.ServeMux, addr, token string) error {
 		shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return srv.Shutdown(shut)
+	case <-mcp.WatchBinary(ctx, msrv):
+		// Начатые запросы доводятся до конца: поиск по книгам идёт секунды,
+		// обрывать его ради подмены незачем.
+		fmt.Fprintln(os.Stderr, "ollmcp: новый бинарь или настройки — дожидаюсь текущих запросов и перезапускаюсь")
+		shut, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_ = srv.Shutdown(shut)
+		return errReplaced
 	}
 }
 
@@ -146,6 +184,10 @@ func usage() {
   ollmcp                        режим stdio: клиент запускает сервер сам
   ollmcp --http 127.0.0.1:8377  постоянная служба для нескольких клиентов
   ollmcp --tools                показать доступные инструменты и выйти
+
+Пределы параметров, потолок ответа и срок вызова задаются файлом ollmcp.toml
+рядом с конфигом ollchat (или --mcp-config). Правка подхватывается сама:
+служба перезапускается на новых настройках, клиент получает свежий список.
 
 Настройки берутся из файла ollchat: где лежит база знаний, какая коллекция
 по умолчанию, чем считать смыслы, адрес SearXNG.
