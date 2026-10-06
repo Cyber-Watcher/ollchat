@@ -128,6 +128,7 @@ type cliFlags struct {
 	graphStats            *string
 	docProbe              *string
 	scanRedact            *string
+	scanRedactLLM         *string
 	census                *string
 	probes                *string
 	graphComm             *string
@@ -356,7 +357,8 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphStatus = flag.String("graph-status", "", "показать состояние графа коллекции (\"all\" — всех)")
 	f.graphStats = flag.String("graph-stats", "", "исследовательские счёты по графу коллекции (бывший graphstats): --graph-stats books -- -hubs; свои ключи после «--», список: --graph-stats books -- -h")
 	f.docProbe = flag.String("doc-probe", "", "что наш разбор достаёт из файла книги (бывшие docprobe и pagedump): --doc-probe «книга.pdf» -- -unit 120 | -page 40")
-	f.scanRedact = flag.String("scan-redact", "", "замазать персональные данные в скане PDF и выписать текст в .md без них (то же, что инструмент scan_redact, без модели): --scan-redact «скан.pdf» -- -formats pdf,md; ключи: --scan-redact x -- -h")
+	f.scanRedact = flag.String("scan-redact", "", "обезличить скан PDF без модели (то же, что инструмент scan_redact): замазанный PDF, .md без персональных данных и распознанные копии .ocr.md и .ocr.pdf: --scan-redact «скан.pdf» -- -formats pdf,md; ключи: --scan-redact x -- -h")
+	f.scanRedactLLM = flag.String("scan-redact-llm", "", "обезличить скан PDF С МОДЕЛЬЮ, как в диалоге: модель зовёт scan_redact и дозамазывает оставшиеся имена; ЗАНИМАЕТ КАРТУ: --scan-redact-llm «скан.pdf» -- -formats all; ключи: --scan-redact-llm x -- -h")
 	f.census = flag.String("census", "", "перепись состояния коллекции и графа: --census books -- -only toc; список режимов: --census books -- -h")
 	f.probes = flag.String("probes", "", "замеры извлечения (КАРТА у режимов stability и seq): --probes books -- -only stability -axis temp; список: --probes books -- -h")
 	f.graphBooks = flag.Bool("graph-books", false, "с --graph-status: таблица по книгам — кусков, разобрано, осталось (с --graph-folder — по каталогу)")
@@ -985,6 +987,12 @@ func run() error {
 	model := srv.Model
 	if *f.modelName != "" {
 		model = *f.modelName
+	}
+
+	// Обезличивание скана с моделью: нужны сервер, модель, песочница
+	// и правила — и больше ничего из того, что ниже.
+	if *f.scanRedactLLM != "" {
+		return runScanRedactLLM(cfg, srv, model, sandbox, guard, *f.scanRedactLLM, flag.Args())
 	}
 
 	// Токен Confluence на сеанс: приходит командой /confluencetoken и главнее

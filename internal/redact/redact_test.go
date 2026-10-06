@@ -38,6 +38,7 @@ func detect(words []Word, opt Options) []line {
 	byPatterns(words, lines)
 	byNameDate(words, lines, 2026)
 	byRepeat(words, byHints(words, lines, opt))
+	byNameDate(words, lines, 2026)
 	byUnreadable(words, lines)
 	return lines
 }
@@ -215,6 +216,57 @@ func TestMergeReread(t *testing.T) {
 	}
 }
 
+// Растровый фон — отдельные чёрные точки через две — после очистки белый,
+// а штрих буквы толщиной в четыре точки остаётся чёрным.
+func TestDespeckleKeepsStrokesDropsDots(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 60, 30))
+	for i := range img.Pix {
+		img.Pix[i] = 255
+	}
+	for y := 0; y < 30; y += 3 {
+		for x := 0; x < 30; x += 3 {
+			img.SetGray(x, y, color.Gray{Y: 0})
+		}
+	}
+	for y := 5; y < 25; y++ {
+		for x := 40; x < 44; x++ {
+			img.SetGray(x, y, color.Gray{Y: 0})
+		}
+	}
+	out := despeckle(img, img.Bounds())
+	dots := 0
+	for y := 0; y < 30; y++ {
+		for x := 0; x < 30; x++ {
+			if out.GrayAt(x, y).Y == 0 {
+				dots++
+			}
+		}
+	}
+	if dots != 0 {
+		t.Errorf("после очистки осталось точек растра: %d", dots)
+	}
+	if out.GrayAt(41, 15).Y != 0 || out.GrayAt(42, 15).Y != 0 {
+		t.Error("штрих буквы стёрт вместе с растром")
+	}
+}
+
+// Рамка повторного чтения задевает соседнее прочитанное слово: второй раз
+// оно в текст не попадает, а новое слово рядом — попадает.
+func TestRereadSkipsReadWords(t *testing.T) {
+	ws := []Word{{Block: 1, Par: 1, Line: 1, Text: "1234", Box: Rect{50, 100, 70, 110}}}
+	more := []Word{
+		{Block: rereadBlock, Par: 1, Line: 1, Text: "1234", Box: Rect{51, 100, 71, 110}},
+		{Block: rereadBlock, Par: 1, Line: 1, Text: "Lane", Box: Rect{75, 100, 95, 110}},
+	}
+	var got []string
+	for _, w := range mergeReread(ws, more) {
+		got = append(got, w.Text)
+	}
+	if s := strings.Join(got, " "); s != "1234 Lane" {
+		t.Errorf("после повторного чтения: %q", s)
+	}
+}
+
 // Фамилия врача заглавными, как tesseract читает шапку бланка, — и её повтор
 // обычным написанием в тексте. Имена выдуманы.
 func TestDoctorInCaps(t *testing.T) {
@@ -240,6 +292,106 @@ func TestDateAfterName(t *testing.T) {
 	}
 	if k := kindOf(t, words, "05.09.2026,"); k != KindNone {
 		t.Errorf("дата визита после имени: %v", k)
+	}
+}
+
+// Шапки факса и карточки приёма: подписи без двоеточия и возраст с полом
+// между именем и датой рождения (образец 06.10.2026; значения выдуманы).
+func TestBareLabelsAndAgeBeforeBirth(t *testing.T) {
+	words := doc(0,
+		"Appt. Date/Time 08/15/2026 (48yo, F) ID# 404040 DOB 03/04/1971 Service Dept.",
+		"Patient: Roe, Anna, 29 Y, F 02/03/1997 Accession ID: QX123",
+		"Faxed copy Acc No. 50505 DOS: 06/14/2026 for (id #606060, Type 2 diabetes",
+		"The ID 12 form, No. 7 on the list.",
+		"Report for Roe, Anna, 31Y,F 04/05/1995 Example Center",
+		"12 Example Maple Ave, Springfield, Example County, NV, 99999",
+		"PERFORMING LAB: Example Labs - 4321 Maple, other",
+		"77 ELM STREET NORTH SPRINGFIELD NV 99998 Ph (555) 010-0000")
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"404040": KindID, "03/04/1971": KindBirth, "02/03/1997": KindBirth,
+		"50505": KindID, "#606060,": KindID, "04/05/1995": KindBirth,
+		"Springfield,": KindAddress, "County,": KindAddress, "99999": KindAddress,
+		"STREET": KindAddress, "SPRINGFIELD": KindAddress, "99998": KindAddress, "4321": KindAddress,
+		"Service": KindNone, "08/15/2026": KindNone, "06/14/2026": KindNone, "12": KindNone, "7": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
+// Шапка крупным кеглем: имя распознано обрывками, дата рождения — без
+// подписи. Обрывки склеиваются и сверяются с найденным именем, дата
+// закрывается повтором найденной по подписи. Обычные слова, похожие
+// на имя, не склеиваются: среди них нет обрывков в одну-две буквы.
+func TestNameFragmentsAndRepeatedBirth(t *testing.T) {
+	words := doc(0,
+		"Patient: Roe, Annabel DOB: 02/03/1997",
+		"Ro e, An nab el, 29Y,F 02/03/1997",
+		"Annabelle Street fair was held on 02/03/2026.",
+		"Seen with Annabel MD 11/12/2026 09:41 AM")
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"An": KindClient, "nab": KindClient, "el,": KindClient, "Ro": KindClient, "e,": KindClient,
+		"Street": KindNone, "02/03/2026.": KindNone, "11/12/2026": KindNone, "09:41": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+	births := 0
+	for _, w := range words {
+		if w.Text == "02/03/1997" && w.Kind == KindBirth {
+			births++
+		}
+	}
+	if births != 2 {
+		t.Errorf("дата рождения закрыта %d раз из 2", births)
+	}
+
+	// Дата рождения, прочитанная с ошибкой в цифре, закрывается повтором.
+	words = doc(0, "Patient: Roe, Annabel DOB: 02/03/1997", "Sex DOB Age F 02/\\63/1997 29yo")
+	detect(words, Options{})
+	if k := kindOf(t, words, `02/\63/1997`); k != KindBirth {
+		t.Errorf("дата рождения с ошибкой распознавания: %v", k)
+	}
+}
+
+// Факс направления: врач заглавными с припиской MD, клиника с признаком
+// в названии, номер после подписи с апострофом вместо двоеточия. «Patient's»
+// подписью не считается. Все названия выдуманы.
+func TestFaxDoctorsOrgsApostrophe(t *testing.T) {
+	words := doc(0,
+		"To Provider JANE Q ROE MD From MEI-LIN DOE, MD",
+		"Northwind Cancer Center 12 Example Ln",
+		"Accession ID' QX7654321 Ref",
+		"The patient's chart was reviewed.")
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"JANE": KindDoctor, "ROE": KindDoctor, "MEI-LIN": KindDoctor, "DOE,": KindDoctor,
+		"Northwind": KindOrg, "Cancer": KindOrg, "QX7654321": KindID,
+		"chart": KindNone, "reviewed.": KindNone, "Provider": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
+// Слово адреса повторяется только точно: улица «Dancer» не закрывает
+// аллерген «Dander», а имя с ошибкой распознавания закрывается.
+func TestRepeatAddressExactNameNear(t *testing.T) {
+	words := doc(0,
+		"Patient: Corwin Example",
+		"12 Dancer Ave, Springfield, NV 99999",
+		"Allergies: cat Dander, pollen. Seen with Corwln today.")
+	detect(words, Options{})
+	if k := kindOf(t, words, "Dander,"); k != KindNone {
+		t.Errorf("аллерген закрыт как %v", k)
+	}
+	if k := kindOf(t, words, "Corwln"); k != KindClient {
+		t.Errorf("имя с ошибкой распознавания: %v", k)
 	}
 }
 
@@ -334,8 +486,8 @@ func TestMarkdownHidesEverything(t *testing.T) {
 		"Electronically signed by: John Roe MD 01/02/2026 Workstation: WSX000001",
 		"12 Example Ln Springfield, ZZ 00000",
 	)
-	lines := detect(words, Options{})
-	md := buildMD("образец", words, lines, nil, 1)
+	detect(words, Options{})
+	md := buildMD("образец", words, nil, 1, false)
 	for _, bad := range []string{"DOE", "JANE", "AB1234567", "MRN", "John", "Roe", "WSX000001",
 		"Workstation", "Example", "Springfield", "00000"} {
 		if strings.Contains(md, bad) {
@@ -352,13 +504,14 @@ func TestMarkdownHidesEverything(t *testing.T) {
 
 func TestMarkdownDropsWordsUnderInk(t *testing.T) {
 	words := doc(0, "Requested measurements review")
-	lines := detect(words, Options{})
+	detect(words, Options{})
 	ink := []Region{{Page: 0, Box: Rect{0, 40, 600, 70}}}
-	md := buildMD("образец", words, lines, ink, 1)
+	md := buildMD("образец", words, ink, 1, false)
 	if strings.Contains(md, "measurements") {
 		t.Errorf("слово под областью чернил попало в .md:\n%s", md)
 	}
-	if !strings.Contains(md, "областей без распознанного текста") {
+	// Документ английский — и пометка английская.
+	if !strings.Contains(md, "Hidden areas without recognized text") {
 		t.Errorf("о скрытых областях не сказано:\n%s", md)
 	}
 }

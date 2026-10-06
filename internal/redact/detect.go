@@ -132,8 +132,11 @@ const labelVocab = `(?:patient|name|client|insured|subscriber|mrn|dob|date|of|bi
 
 // «;» вместо «:» — частая ошибка распознавания моноширинного шрифта
 // (образец: «Patient;» в шапке второго листа).
+//
+// Апостроф — тоже двоеточие, прочитанное с ошибкой («Accession ID' …»,
+// образец 06.10.2026), но только с пробелом следом: «Patient's» — не подпись.
 var labelRe = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])(` + labelVocab +
-	`(?:[\s#.]+` + labelVocab + `){0,3}\s*[#.№]?\s*[:;])`)
+	`(?:[\s#.]+` + labelVocab + `){0,3}\s*[#.№]?\s*(?:[:;]|['’]\s))`)
 
 var pdLabels = []struct {
 	re   *regexp.Regexp
@@ -146,7 +149,7 @@ var pdLabels = []struct {
 	{full(`mrn|acc(ession)?( (no|number))?|member id|policy( (no|number))?|insurance( (id|no|number))?|` +
 		`group( (no|number))?|ssn|account( (no|number))?|chart( (no|number))?|claim( (no|number))?|` +
 		`npi|workstation|id|полис( омс| дмс)?|снилс|паспорт|номер( карты)?|карта`), KindID},
-	{full(`dob|date of birth|birth ?date|born|дата рождения|родил(ся|ась)`), KindBirth},
+	{full(`dob|d\.o\.b|date of birth|birth ?date|born|дата рождения|родил(ся|ась)`), KindBirth},
 	{full(`((referring|home|postal|mailing) )?address|addr|residence|resident|адрес|прописана?|проживает|зарегистрирована?`), KindAddress},
 	{full(`phone|telephone|tel|fax|mobile|cell|телефон|тел\.?|факс`), KindPhone},
 	{full(`e-?mail|почта|эл\.? почта`), KindEmail},
@@ -157,7 +160,7 @@ func full(s string) *regexp.Regexp { return regexp.MustCompile(`^(?:` + s + `)$`
 var spaceRe = regexp.MustCompile(`\s+`)
 
 func labelKind(label string) Kind {
-	name := strings.ToLower(strings.TrimRight(label, ":;#№. \t"))
+	name := strings.ToLower(strings.TrimRight(label, ":;#№. \t'’"))
 	name = spaceRe.ReplaceAllString(strings.ReplaceAll(name, "#", ""), " ")
 	for _, l := range pdLabels {
 		if l.re.MatchString(name) {
@@ -167,10 +170,44 @@ func labelKind(label string) Kind {
 	return KindNone
 }
 
+// labelBareRe — подписи, после которых значение идёт без двоеточия:
+// «DOB 03/04/1971», «Acc No. 50505», «ID# 404040», «(id #404040» (значения
+// здесь выдуманы) — так написаны шапка факса и карточка приёма в образце
+// 06.10.2026, и номера
+// с датами рождения уходили в .md. Только явные подписи номера и даты
+// рождения и только перед цифрой: «No» или «ID» в тексте подписью не
+// считаются, а «ID» без «#» — только перед четырьмя цифрами и больше.
+var labelBareRe = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])((?:dob|d\.o\.b\.?|mrn|ssn|npi|` +
+	`acc(?:ession)?\s*(?:no\.?|#|number)|account\s*(?:no\.?|#)|member\s*id|id(?:\s*#)?|снилс|полис)` +
+	`\s*[#№]?)\s*(\d+)`)
+
+// labelMatches — подписи строки по порядку: с двоеточием и без него.
+func labelMatches(text string) [][]int {
+	ms := labelRe.FindAllStringSubmatchIndex(text, -1)
+	for _, m := range labelBareRe.FindAllStringSubmatchIndex(text, -1) {
+		label := strings.ToLower(text[m[2]:m[3]])
+		if strings.TrimSpace(label) == "id" && m[5]-m[4] < 4 {
+			continue
+		}
+		inside := false
+		for _, o := range ms {
+			if m[2] < o[3] && o[2] < m[3] {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			ms = append(ms, m[:4])
+		}
+	}
+	sort.Slice(ms, func(a, b int) bool { return ms[a][2] < ms[b][2] })
+	return ms
+}
+
 func byLabels(words []Word, lines []line) {
 	for li := range lines {
 		l := &lines[li]
-		ms := labelRe.FindAllStringSubmatchIndex(l.text, -1)
+		ms := labelMatches(l.text)
 		for j, m := range ms {
 			k := labelKind(l.text[m[2]:m[3]])
 			if k == KindNone {
@@ -235,6 +272,13 @@ func byCells(words []Word, lines []line) {
 		}
 		v := &lines[best]
 		end := v.valueEnd(words, 0, len(v.text), k)
+		// Номер, телефон и дата без единой цифры — не значение, а соседний
+		// заголовок: в строке «Service Dept. DOB Provider» дата рождения
+		// доставалась слову «Service» (образец 06.10.2026).
+		if (k == KindID || k == KindPhone || k == KindBirth) && !strings.ContainsAny(v.text[:end], "0123456789") &&
+			!(k == KindBirth && dateWordRe.MatchString(strings.Fields(v.text[:end] + " .")[0])) {
+			continue
+		}
 		if n := v.mark(words, 0, end, k, "подпись в клетке"); n > 0 && k.removed() {
 			for _, wi := range lines[i].idx {
 				words[wi].LabelOf = k
@@ -303,6 +347,11 @@ type rule struct {
 	group int
 }
 
+// usStates — коды штатов США: по ним «город ШТАТ индекс» узнаётся и без
+// запятой.
+const usStates = `(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|` +
+	`NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)`
+
 var patterns = []rule{
 	{regexp.MustCompile(`[\w.+-]+@[\w-]+(?:\.[\w-]+)+`), KindEmail, 0},
 	{regexp.MustCompile(`\+\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{2,4}[\s.-]?\d{2,4}(?:[\s.-]?\d{2,4})?`), KindPhone, 0},
@@ -313,14 +362,23 @@ var patterns = []rule{
 	{regexp.MustCompile(`\b\d{3}-\d{3}-\d{3}[\s-]\d{2}\b`), KindID, 0}, // СНИЛС
 	{regexp.MustCompile(`\b[A-Z]{1,6}-?\d{5,}\b`), KindID, 0},
 	{regexp.MustCompile(`\b\d{7,}\b`), KindID, 0},
-	{regexp.MustCompile(`\b\d{1,6}\s+(?:[A-Z][\w.]*\s+){1,3}(?:Ln|Lane|St|Street|Ave|Avenue|Rd|Road|` +
+	// Улица: суффикс и заглавными — «12 MAPLE STREET», как в шапке аптеки
+	// образца 06.10.2026 (значения выдуманы).
+	{regexp.MustCompile(`\b\d{1,6}\s+(?:[A-Z][\w.]*\s+){1,3}(?i:Ln|Lane|St|Street|Ave|Avenue|Rd|Road|` +
 		`Blvd|Boulevard|Dr|Drive|Ct|Court|Way|Pl|Place|Pkwy|Parkway|Hwy|Highway|Cir|Circle|Ter|Terrace|` +
-		`Trl|Trail|Row|Close|Crescent|Cres|Square|Sq|Mews|Gardens)\b\.?(?:\s*(?:Ste|Suite|Apt|Unit|#)\s*\w+)?`), KindAddress, 0},
-	{regexp.MustCompile(`\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b`), KindAddress, 0},
+		`Trl|Trail|Row|Close|Crescent|Cres|Square|Sq|Mews|Gardens)\b\.?(?:\s*(?i:Ste|Suite|Apt|Unit|#)\s*\w+)?`), KindAddress, 0},
+	// Город, штат, индекс — с округом между ними и запятой или без:
+	// «Springfield, Example County, NV, 99999», «NORTH SPRINGFIELD NV 99998». Без
+	// запятой — только перед настоящим кодом штата.
+	{regexp.MustCompile(`\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*(?:,\s*[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*){0,2}` +
+		`(?:,\s*[A-Z]{2}|\s+` + usStates + `),?\s+\d{5}(?:-\d{4})?\b`), KindAddress, 0},
 	// Фамилия после «Dr», «врача», «доктора» — и заглавными целиком: шапку
 	// бланка tesseract читает «доктора ГРОМОВОЙ» (синтетический набор, зерно 2).
 	{regexp.MustCompile(`\b(?:Dr\.?|Doctor)\s+[A-Z](?:[a-z]+|[A-Z]+)(?:\s+[A-Z](?:[a-z]+|[A-Z]+))?`), KindDoctor, 0},
 	{regexp.MustCompile(`\b[A-Z][a-z]+,?\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?,?\s+(?:MD|M\.D|DO|PhD|NP|PA-C|RN)\b`), KindDoctor, 0},
+	// То же заглавными, с двойным именем: «JANE Q ROE MD», «MEI-LIN ROE, MD» —
+	// так врачей печатает факс направления (образец 06.10.2026).
+	{regexp.MustCompile(`\b[A-Z]{2,}(?:-[A-Z]{2,})?(?:\s+[A-Z]\.?)?\s+[A-Z]{2,}(?:-[A-Z]{2,})?,?\s+(?:MD|M\.D|DO|NP|PA-C|RN)\b`), KindDoctor, 0},
 	{regexp.MustCompile(`\b(?:Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?`), KindClient, 0},
 	// Группа — только фамилия с инициалами. Пока в неё входило и само слово
 	// «врача»/«доктора», оно помечалось как имя врача, разносилось по
@@ -348,6 +406,9 @@ var patterns = []rule{
 // «clinical» пропадало из документа.
 var orgRe = regexp.MustCompile(`(?:^|[^\p{L}])((?:\p{Lu}[\p{L}'&.-]*\s+){0,3}` +
 	`(?i:radiology|imaging|clinic|hospital|medical\s+(?:center|centre|group)|health\s*care|healthcare|practice|` +
+	// «Northwind Cancer Center», «… CARE OBGYN OFFICE», страховая «… HEALTHPLAN»
+	// (образец 06.10.2026; названия здесь выдуманы по виду).
+	`(?:cancer|oncology|surgical|surgery|wellness|women'?s|care)\s+(?:center|centre)|ob-?gyn|ob/gyn|health\s*plan|` +
 	`laborator(?:y|ies)|diagnostics?|клиника|больница|поликлиника|госпиталь|медицинский\s+центр|` +
 	`лаборатория|диагностический\s+центр|кабинет)(?:\s+\p{Lu}[\p{L}'&.-]*){0,2})(?:[^\p{L}]|$)`)
 
@@ -379,11 +440,35 @@ const nameDateMinAge = 2
 
 var nameDateRe = regexp.MustCompile(`^(?:\d{1,2}[./-]\d{1,2}[./-](\d{4})|(\d{4})-\d{2}-\d{2})[,.;]?$`)
 
+// ageSexRe — слово возраста или пола между именем и датой рождения:
+// «29», «Y,», «(57yo,», «F)», «лет,», «Ж». Больше nameDateSkip таких слов
+// подряд не пропускается: дальше уже не шапка, а текст.
+var ageSexRe = regexp.MustCompile(`(?i)^\(?(?:\d{1,3}\s*(?:y|yo|yr|yrs|years?|г|лет|года?)?|` +
+	`y|yo|yr|yrs|years?|f|m|male|female|лет|года?|ж|м|жен|муж)` +
+	// возраст и пол одним словом: «29Y,F», «(57yo,F)»
+	`(?:[,/]\s*(?:f|m|ж|м))?[,.;)]*$`)
+
+const nameDateSkip = 4
+
 func byNameDate(words []Word, lines []line, year int) {
 	for _, l := range lines {
 		for n := 1; n < len(l.idx); n++ {
-			prev, w := &words[l.idx[n-1]], &words[l.idx[n]]
-			if !prev.Kind.person() || !strings.HasSuffix(prev.Text, ",") || w.Kind != KindNone {
+			prev := &words[l.idx[n-1]]
+			if !prev.Kind.person() {
+				continue
+			}
+			// Между именем и датой бывают возраст и пол: «Doe, Jane, 29 Y, F
+			// 02/03/1997» — вид шапки лабораторного бланка в образце 06.10.2026.
+			j := n
+			for j < len(l.idx) && j-n < nameDateSkip && words[l.idx[j]].Kind == KindNone &&
+				ageSexRe.MatchString(words[l.idx[j]].Text) {
+				j++
+			}
+			if j >= len(l.idx) {
+				continue
+			}
+			w := &words[l.idx[j]]
+			if w.Kind != KindNone || (j == n && !strings.HasSuffix(prev.Text, ",")) {
 				continue
 			}
 			m := nameDateRe.FindStringSubmatch(w.Text)
@@ -503,6 +588,14 @@ func byRepeat(words []Word, extra map[string]Kind) {
 			}
 		}
 	}
+	// Дата рождения, найденная по подписи, повторяется в шапке каждого листа
+	// уже без подписи (образец 06.10.2026: «…, 29Y,F <дата>»). После norm
+	// она — одни цифры, и проверка выше её пропускает.
+	for _, w := range words {
+		if n := norm(w.Text); w.Kind == KindBirth && len(n) >= 6 && allDigits(n) {
+			seeds[n] = KindBirth
+		}
+	}
 	keys := make([]string, 0, len(seeds))
 	for k := range seeds {
 		keys = append(keys, k)
@@ -526,8 +619,108 @@ func byRepeat(words []Word, extra map[string]Kind) {
 			continue
 		}
 		for _, s := range keys {
-			if len([]rune(s)) >= 5 && near(n, s) {
-				w.Kind, w.Why = seeds[s], "повтор"
+			// С ошибкой в букву повторяются только имена и номера. Слова
+			// адреса и названия — обычные слова словаря: улица «Dancer»
+			// с одной ошибкой — аллерген «Dander» в списке аллергий (образец
+			// 06.10.2026; слово закрашивалось, а проверка поднимала тревогу).
+			// Дата рождения — тоже: прочитанная как «02/\63/19xx» вместо
+			// «02/03/19xx» (вид из образца, цифры выдуманы) на одном листе
+			// прошла мимо и правил, и встроенной проверки, а
+			// отдельное распознавание замазанного PDF прочло её чисто.
+			if k := seeds[s]; (k.person() || k == KindID || k == KindBirth) && len([]rune(s)) >= 5 && near(n, s) {
+				w.Kind, w.Why = k, "повтор"
+				break
+			}
+		}
+	}
+	byFragments(words, seeds, keys)
+
+	// Номер дома перед словом адреса, найденным повтором: «- 1234 Maple,»
+	// без «Ave» шаблон улицы не узнаёт, а повтор чисел не разносит (образец
+	// 06.10.2026, адрес лаборатории в подвале листов 7–11).
+	for i := 0; i+1 < len(words); i++ {
+		w, next := &words[i], words[i+1]
+		n := norm(w.Text)
+		if w.Kind == KindNone && next.Kind == KindAddress && allDigits(n) && len(n) <= 6 &&
+			w.Page == next.Page && w.Block == next.Block && w.Par == next.Par && w.Line == next.Line {
+			w.Kind, w.Why = KindAddress, "номер дома"
+		}
+	}
+}
+
+// Обрывки имени. Крупный кегль tesseract режет на куски: «Ex amp l e,
+// An nab eln,29Y,F» вместо «Example, Annabel, 29Y,F» (вид — как в шапке
+// бланка образца 06.10.2026, листы 6–11, имя выдумано; настоящее оставалось
+// в PDF). Слово за словом такое имя
+// не узнаётся, поэтому сравнивается склейка соседних обрывков одной строки:
+// совпала с найденным именем или начинается с него (одна ошибка допускается,
+// хвост — мусор вроде возраста) — закрываются все её обрывки. Чтобы не
+// склеивать обычные слова, среди обрывков должен быть хотя бы один из одной
+// или двух букв, а промежутки — уже fragGapK высоты слова.
+const (
+	fragMax   = 5
+	fragGapK  = 0.6
+	fragShort = 2
+)
+
+func byFragments(words []Word, seeds map[string]Kind, keys []string) {
+	sameLine := func(a, b Word) bool {
+		return a.Page == b.Page && a.Block == b.Block && a.Par == b.Par && a.Line == b.Line
+	}
+	for i := 0; i < len(words); i++ {
+		joined, short := "", false
+		for j := i; j < len(words) && j-i < fragMax; j++ {
+			w := words[j]
+			if j > i {
+				p := words[j-1]
+				if !sameLine(p, w) || w.Box.X0-p.Box.X1 > fragGapK*max(w.Box.Y1-w.Box.Y0, p.Box.Y1-p.Box.Y0) {
+					break
+				}
+			}
+			n := norm(w.Text)
+			before := len([]rune(joined)) // букв до последнего обрывка
+			joined += n
+			if l := len([]rune(n)); l > 0 && l <= fragShort {
+				short = true
+			}
+			if j == i || !short {
+				continue
+			}
+			jr := []rune(joined)
+			hitAt := false
+			for _, s := range keys {
+				k := seeds[s]
+				sr := []rune(s)
+				if !k.person() || len(sr) < 3 {
+					continue
+				}
+				// Короткое имя — только точной склейкой: с ошибкой в одну
+				// букву на трёх-четырёх буквах совпадёт что угодно.
+				hit := joined == s
+				if len(sr) >= 5 {
+					hit = hit || near(joined, s)
+					// Склейка длиннее имени — сравнивается её начало, но только
+					// если имя кончается внутри последнего обрывка: его хвост —
+					// возраст, пол, запятая. Иначе к имени «Royce» в «Royce
+					// MD 11/12/2026» пристраивались бы и подпись, и дата.
+					for _, cut := range []int{len(sr), len(sr) + 1} {
+						if !hit && len(jr) > cut && before < len(sr) && near(string(jr[:cut]), s) {
+							hit = true
+						}
+					}
+				}
+				if !hit {
+					continue
+				}
+				for m := i; m <= j; m++ {
+					if words[m].Kind == KindNone {
+						words[m].Kind, words[m].Why = k, "повтор обрывками"
+					}
+				}
+				hitAt = true
+				break
+			}
+			if hitAt {
 				break
 			}
 		}

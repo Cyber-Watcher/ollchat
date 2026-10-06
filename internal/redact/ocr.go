@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"golang.org/x/image/draw"
 )
@@ -87,6 +89,74 @@ func pickLangs(ctx context.Context, bin, lang string) (string, error) {
 	return lang, nil
 }
 
+// Языки по умолчанию — английский и русский вместе, но на английском
+// документе вместе они вредят: крупный шрифт шапки tesseract читает
+// вперемешку с кириллицей (возраст и пол «29 Y, F» выходили «29 У, Е», так
+// же и буквы имени), правила имени не узнают,
+// и оно остаётся в PDF (образец 06.10.2026, 39 листов; кириллицы среди
+// уверенно прочитанных букв на каждом листе не больше 0,074). Поэтому
+// первые листы читаются обоими языками, и если кириллицы среди уверенных
+// букв меньше langCyrMax, документ читается одним английским. Русский
+// остаётся на eng+rus: латиница в нём законна — препараты, единицы.
+const (
+	langSampleLetters = 400 // столько уверенных букв хватает для решения
+	langSamplePages   = 3   // больше листов на пробу не тратится
+	langSampleConf    = 60  // буквы слов уверенней этого — в счёт
+	langCyrMax        = 0.15
+)
+
+// chooseLang выбирает языки для документа, когда их не задали. Вторым
+// значением — уже распознанные пробные листы, если язык остался тем же:
+// второй раз их читать незачем.
+func chooseLang(ctx context.Context, bin, lang, tmp string, pages []Page) (string, map[int][]Word, error) {
+	if lang != "eng+rus" {
+		return lang, nil, nil
+	}
+	read := map[int][]Word{}
+	cyr, all := 0, 0
+	for i := 0; i < len(pages) && i < langSamplePages && all < langSampleLetters; i++ {
+		ws, err := ocrPage(ctx, bin, lang, tmp, pages[i], i)
+		if err != nil {
+			return "", nil, fmt.Errorf("страница %d: %w", i+1, err)
+		}
+		read[i] = ws
+		c, a := letters(ws)
+		cyr, all = cyr+c, all+a
+	}
+	if all > 0 && float64(cyr)/float64(all) < langCyrMax {
+		return "eng", nil, nil
+	}
+	return lang, read, nil
+}
+
+// letters считает буквы уверенно прочитанных слов: кириллицу и всего
+// (кириллица плюс латиница).
+func letters(ws []Word) (cyr, all int) {
+	for _, w := range ws {
+		if w.Conf < langSampleConf {
+			continue
+		}
+		for _, r := range w.Text {
+			switch {
+			case unicode.Is(unicode.Cyrillic, r):
+				cyr++
+				all++
+			case unicode.Is(unicode.Latin, r):
+				all++
+			}
+		}
+	}
+	return cyr, all
+}
+
+// english — документ английский: кириллицы среди уверенных букв меньше
+// langCyrMax. Тот же счёт, что у chooseLang, но по всему документу:
+// по нему выбирается язык служебных пометок в .md.
+func english(ws []Word) bool {
+	cyr, all := letters(ws)
+	return all > 0 && float64(cyr)/float64(all) < langCyrMax
+}
+
 // ocrPage распознаёт страницу и возвращает слова с рамками в точках страницы.
 func ocrPage(ctx context.Context, bin, lang, tmp string, p Page, page int) ([]Word, error) {
 	img, pxPerPt := grayAt(p, ocrDPI)
@@ -135,16 +205,30 @@ func rereadInk(ctx context.Context, bin, lang, tmp string, p Page, page int, wor
 		if h > rereadLineH {
 			psm = "6"
 		}
-		tsv, err := runTesseract(ctx, bin, lang, tmp, crop, psm)
+		read := func(img *image.Gray) ([]Word, bool, error) {
+			tsv, err := runTesseract(ctx, bin, lang, tmp, img, psm)
+			if err != nil {
+				return nil, false, err
+			}
+			ws := parseTSV(tsv, page, k)
+			sum := 0.0
+			for _, w := range ws {
+				sum += w.Conf
+			}
+			return ws, len(ws) > 0 && sum/float64(len(ws)) >= rereadLineConf, nil
+		}
+		ws, ok, err := read(crop)
 		if err != nil {
 			return nil, err
 		}
-		ws := parseTSV(tsv, page, k)
-		sum := 0.0
-		for _, w := range ws {
-			sum += w.Conf
+		// Подпись на растровом фоне (rereadJunk): вторая попытка — по
+		// вырезке без точек растра.
+		if !ok {
+			if ws, ok, err = read(despeckle(img, rect)); err != nil {
+				return nil, err
+			}
 		}
-		if len(ws) == 0 || sum/float64(len(ws)) < rereadLineConf {
+		if !ok {
 			continue
 		}
 		dx, dy := float64(rect.Min.X)/k, float64(rect.Min.Y)/k
@@ -161,6 +245,116 @@ func rereadInk(ctx context.Context, bin, lang, tmp string, p Page, page int, wor
 		}
 	}
 	return out, nil
+}
+
+// Строки на растровом фоне. Подписи полей в бланках набраны на сером фоне,
+// а на однобитном скане фон — россыпь точек: tesseract читает из такой
+// клетки мусор («Cmm», «kAR», уверенность 0–30), правило неразборчивых строк
+// закрывает его чёрным, и подписи «Diagnosis», «Patient Name» уходили под
+// чёрное вместе с клеткой (образец 06.10.2026, лист 15: 389 из 813 слов
+// с уверенностью ниже 30). Очистка всей страницы не годится: уменьшение
+// с порогом сняло мусор листа 15, но уверенных слов на нём стало 302 вместо
+// 369, на листе 6 — 179 вместо 199. Поэтому заново читаются только строки,
+// которых tesseract не прочёл: вырезка строки сглаживается окном 3×3 —
+// отдельные точки растра светлеют, сплошные штрихи букв остаются тёмными, —
+// переводится в чёрно-белое и читается одной строкой. Прочитанное уверенно
+// встаёт на место мусора.
+const (
+	junkLineConf  = 45  // средняя уверенность строки ниже — строка не прочитана
+	junkThreshold = 115 // после сглаживания темнее — штрих буквы
+)
+
+func rereadJunk(ctx context.Context, bin, lang, tmp string, p Page, page int, ws []Word) ([]Word, error) {
+	type span struct{ from, to int }
+	var bad []span
+	for i := 0; i < len(ws); {
+		j := i
+		sum := 0.0
+		for j < len(ws) && ws[j].Block == ws[i].Block && ws[j].Par == ws[i].Par && ws[j].Line == ws[i].Line {
+			sum += ws[j].Conf
+			j++
+		}
+		if sum/float64(j-i) < junkLineConf {
+			bad = append(bad, span{i, j})
+		}
+		i = j
+	}
+	if len(bad) == 0 {
+		return ws, nil
+	}
+	img, k := grayAt(p, ocrDPI)
+	out := make([]Word, 0, len(ws))
+	last := 0
+	for _, s := range bad {
+		box := ws[s.from].Box
+		for _, w := range ws[s.from+1 : s.to] {
+			box = Rect{min(box.X0, w.Box.X0), min(box.Y0, w.Box.Y0), max(box.X1, w.Box.X1), max(box.Y1, w.Box.Y1)}
+		}
+		h := box.Y1 - box.Y0
+		if h < rereadMinH || h > rereadMaxH {
+			continue
+		}
+		rect := image.Rect(int((box.X0-rereadPad)*k), int((box.Y0-rereadPad)*k),
+			int((box.X1+rereadPad)*k)+1, int((box.Y1+rereadPad)*k)+1).Intersect(img.Bounds())
+		if rect.Empty() {
+			continue
+		}
+		psm := "7"
+		if h > rereadLineH {
+			psm = "6"
+		}
+		tsv, err := runTesseract(ctx, bin, lang, tmp, despeckle(img, rect), psm)
+		if err != nil {
+			return nil, err
+		}
+		got := parseTSV(tsv, page, k)
+		sum := 0.0
+		for _, w := range got {
+			sum += w.Conf
+		}
+		if len(got) == 0 || sum/float64(len(got)) < rereadLineConf {
+			continue
+		}
+		out = append(out, ws[last:s.from]...)
+		dx, dy := float64(rect.Min.X)/k, float64(rect.Min.Y)/k
+		for _, w := range got {
+			if w.Conf < rereadWordConf {
+				continue
+			}
+			// Место в тексте — то же, что у строки, которую слова заменили.
+			w.Block, w.Par, w.Line = ws[s.from].Block, ws[s.from].Par, ws[s.from].Line
+			w.Box = Rect{w.Box.X0 + dx, w.Box.Y0 + dy, w.Box.X1 + dx, w.Box.Y1 + dy}
+			out = append(out, w)
+		}
+		last = s.to
+	}
+	return append(out, ws[last:]...), nil
+}
+
+// despeckle вырезает прямоугольник картинки, сглаживает окном 3×3 и переводит
+// в чёрно-белое по junkThreshold.
+func despeckle(img *image.Gray, rect image.Rectangle) *image.Gray {
+	out := image.NewGray(image.Rect(0, 0, rect.Dx(), rect.Dy()))
+	for y := 0; y < rect.Dy(); y++ {
+		for x := 0; x < rect.Dx(); x++ {
+			sum, n := 0, 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					pt := image.Pt(rect.Min.X+x+dx, rect.Min.Y+y+dy)
+					if pt.In(img.Bounds()) {
+						sum += int(img.GrayAt(pt.X, pt.Y).Y)
+						n++
+					}
+				}
+			}
+			v := uint8(255)
+			if sum/n < junkThreshold {
+				v = 0
+			}
+			out.SetGray(x, y, color.Gray{Y: v})
+		}
+	}
+	return out
 }
 
 // grayAt переводит картинку страницы в серую и поднимает до dpi, если она
@@ -227,6 +421,32 @@ func scaleGray(p Page, dpi float64) (*image.Gray, float64) {
 	return dst, float64(w) / p.Width
 }
 
+// dropCovered отбрасывает слова повторного чтения, легшие на уже прочитанные.
+// Рамка чернил берётся с запасом (rereadPad), в неё попадают края соседних
+// слов, и tesseract читал их второй раз: в .md выходили номер дома дважды
+// и «36-51 36-51» в норме анализа (образец 06.10.2026: 406 пар слов,
+// перекрытых наполовину, на 38 листах из 39). Слово считается лёгшим на другое, если
+// они перекрываются хотя бы на половину меньшего из двух.
+func dropCovered(ws, more []Word) []Word {
+	area := func(r Rect) float64 { return max(0, r.X1-r.X0) * max(0, r.Y1-r.Y0) }
+	var out []Word
+	for _, m := range more {
+		covered := false
+		for _, w := range ws {
+			ix := min(m.Box.X1, w.Box.X1) - max(m.Box.X0, w.Box.X0)
+			iy := min(m.Box.Y1, w.Box.Y1) - max(m.Box.Y0, w.Box.Y0)
+			if ix > 0 && iy > 0 && ix*iy >= 0.5*min(area(m.Box), area(w.Box)) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // mergeReread ставит слова повторного чтения на их место в тексте страницы.
 // Дописанные в конец, они уходили в .md после всех строк страницы («episodes»
 // из середины письма оказывалось под подписью, синтетический набор
@@ -235,6 +455,7 @@ func scaleGray(p Page, dpi float64) (*image.Gray, float64) {
 // встаёт перед первой строкой ниже неё. Строки повторного чтения переносятся
 // целиком, чтобы их слова не перемешались.
 func mergeReread(ws, more []Word) []Word {
+	more = dropCovered(ws, more)
 	out := append([]Word(nil), ws...)
 	key := func(w Word) [3]int { return [3]int{w.Block, w.Par, w.Line} }
 	var groups [][]Word

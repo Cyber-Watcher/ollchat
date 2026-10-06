@@ -18,10 +18,12 @@ import (
 func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 	fs := flag.NewFlagSet("scan-redact", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	formats := fs.String("formats", "pdf,md", "что сделать: pdf, md или pdf,md")
-	outPDF := fs.String("out-pdf", "", "куда записать PDF; по умолчанию <имя>.redacted.pdf рядом с исходным")
-	outMD := fs.String("out-md", "", "куда записать .md; по умолчанию <имя>.redacted.md рядом с исходным")
-	lang := fs.String("lang", "", "языки tesseract: eng, rus, eng+rus; по умолчанию eng и rus из установленных")
+	formats := fs.String("formats", DefaultFormats, "что сделать — "+FormatsHelp)
+	outPDF := fs.String("out-pdf", "", "куда записать PDF с замазанными данными; по умолчанию <имя>.redacted.pdf рядом с исходным")
+	outMD := fs.String("out-md", "", "куда записать .md без персональных данных; по умолчанию <имя>.redacted.md рядом с исходным")
+	outOCRPDF := fs.String("out-ocr-pdf", "", "куда записать текстовый PDF распознанного (с персональными данными); по умолчанию <имя>.ocr.pdf")
+	outOCRMD := fs.String("out-ocr-md", "", "куда записать .md распознанного (с персональными данными); по умолчанию <имя>.ocr.md")
+	lang := fs.String("lang", "", "языки tesseract: eng, rus, eng+rus; по умолчанию решают первые листы — английский документ читается одним eng, прочие eng+rus")
 	clients := fs.String("clients", "", "имена клиентов сверх найденного, через «;»")
 	doctors := fs.String("doctors", "", "имена врачей сверх найденного, через «;»")
 	hide := fs.String("hide", "", "прочие строки, которые скрыть, через «;»")
@@ -29,35 +31,22 @@ func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	f := strings.ToLower(*formats)
-	wantPDF, wantMD := strings.Contains(f, "pdf"), strings.Contains(f, "md")
-	if !wantPDF && !wantMD {
-		return fmt.Errorf("-formats: pdf, md или pdf,md, а не %q", *formats)
+	want, err := ParseFormats(*formats)
+	if err != nil {
+		return fmt.Errorf("-formats: %w", err)
 	}
-	stem := strings.TrimSuffix(path, filepath.Ext(path))
-	if *outPDF == "" {
-		*outPDF = stem + ".redacted.pdf"
+	out := DefaultOutputs(path, want)
+	for _, o := range []struct {
+		dst  *string
+		flag string
+	}{{&out.PDF, *outPDF}, {&out.MD, *outMD}, {&out.OCRPDF, *outOCRPDF}, {&out.OCRMD, *outOCRMD}} {
+		if *o.dst != "" && o.flag != "" {
+			*o.dst = o.flag
+		}
 	}
-	if *outMD == "" {
-		*outMD = stem + ".redacted.md"
-	}
-
-	// Исходник не перезаписывается, и два результата не пишутся в один файл —
-	// те же отказы, что у инструмента scan_redact (tools/scanredact.go).
-	// Запись идёт переименованием, так что оригинал скана пропал бы без следа.
-	same := func(a, b string) bool {
-		aa, err1 := filepath.Abs(a)
-		bb, err2 := filepath.Abs(b)
-		return err1 == nil && err2 == nil && aa == bb
-	}
-	if wantPDF && same(*outPDF, path) {
-		return fmt.Errorf("-out-pdf совпадает с исходным документом — исходник не перезаписывается")
-	}
-	if wantMD && same(*outMD, path) {
-		return fmt.Errorf("-out-md совпадает с исходным документом — исходник не перезаписывается")
-	}
-	if wantPDF && wantMD && same(*outPDF, *outMD) {
-		return fmt.Errorf("-out-pdf и -out-md указывают на один файл — второй затёр бы первый")
+	// Те же отказы, что у инструмента scan_redact (tools/scanredact.go).
+	if err := out.Check(path); err != nil {
+		return err
 	}
 
 	ctx := context.Background()
@@ -66,30 +55,26 @@ func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := Process(ctx, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), pages, Options{
+	title := filepath.Base(Stem(path))
+	res, err := Process(ctx, title, pages, Options{
 		Lang: *lang, Clients: split(*clients), Doctors: split(*doctors), Hide: split(*hide),
 		Progress: func(s string) { fmt.Fprintln(stderr, s) },
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "страниц %d, слов %d\n", len(pages), len(res.Words))
+	fmt.Fprintf(stdout, "страниц %d, слов %d, язык распознавания %s\n", len(pages), len(res.Words), res.Lang)
 	fmt.Fprint(stdout, res.CountsLine())
-	if wantPDF {
-		data, err := PDF(pages, res.Redacted)
-		if err != nil {
-			return err
+	fmt.Fprintln(stderr, "пишу файлы")
+	written, err := WriteOutputs(out, title, pages, res)
+	for _, w := range written {
+		fmt.Fprintf(stdout, "%s: %s (%d байт)\n", w.What, w.Path, w.Bytes)
+		if w.Note != "" {
+			fmt.Fprintf(stdout, "  оговорка: %s\n", w.Note)
 		}
-		if err := WriteFile(*outPDF, data); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "PDF: %s (%d байт)\n", *outPDF, len(data))
 	}
-	if wantMD {
-		if err := WriteFile(*outMD, []byte(res.MD)); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, ".md: %s (%d байт)\n", *outMD, len(res.MD))
+	if err != nil {
+		return err
 	}
 	for _, n := range notes {
 		fmt.Fprintf(stdout, "заметка: %s\n", n)

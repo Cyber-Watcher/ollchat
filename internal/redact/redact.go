@@ -57,7 +57,7 @@ type Region struct {
 
 // Options — настройки обработки.
 type Options struct {
-	Lang      string // языки tesseract: «eng», «rus», «eng+rus»; пусто — eng и rus из установленных
+	Lang      string // языки tesseract: «eng», «rus», «eng+rus»; пусто — решают первые листы (chooseLang)
 	Tesseract string // путь к программе; пусто — искать в PATH
 
 	// Подсказки: имена и строки, которые надо скрыть сверх найденного.
@@ -75,7 +75,9 @@ type Result struct {
 	Words    []Word
 	Ink      []Region
 	Redacted []image.Image // страницы с замазанным, в разрешении исходника
-	MD       string
+	MD       string        // обезличенный текст
+	OCRMD    string        // распознанный текст целиком, С персональными данными
+	Lang     string        // какими языками распознано
 	Check    Check
 }
 
@@ -115,11 +117,26 @@ func Process(ctx context.Context, title string, pages []Page, opt Options) (*Res
 		}
 	}
 
+	// Языки не заданы — решают первые листы (ocr.go: chooseLang).
+	var sample map[int][]Word
+	if strings.TrimSpace(opt.Lang) == "" && lang == "eng+rus" {
+		say("пробую языки по первым листам")
+		if lang, sample, err = chooseLang(ctx, bin, lang, tmp, pages); err != nil {
+			return nil, err
+		}
+		say("язык распознавания: %s", lang)
+	}
+
 	var words []Word
 	for i, p := range pages {
 		say("распознаю страницу %d из %d", i+1, len(pages))
-		ws, err := ocrPage(ctx, bin, lang, tmp, p, i)
-		if err != nil {
+		ws, ok := sample[i]
+		if !ok {
+			if ws, err = ocrPage(ctx, bin, lang, tmp, p, i); err != nil {
+				return nil, fmt.Errorf("страница %d: %w", i+1, err)
+			}
+		}
+		if ws, err = rereadJunk(ctx, bin, lang, tmp, p, i, ws); err != nil {
 			return nil, fmt.Errorf("страница %d: %w", i+1, err)
 		}
 		more, err := rereadInk(ctx, bin, lang, tmp, p, i, ws)
@@ -137,6 +154,9 @@ func Process(ctx context.Context, title string, pages []Page, opt Options) (*Res
 	byNameDate(words, lines, time.Now().Year())
 	seeds := byHints(words, lines, opt)
 	byRepeat(words, seeds)
+	// Ещё раз после повтора: имя в шапке бланка часто узнаётся только
+	// повтором найденного, а дата рождения стоит сразу за ним.
+	byNameDate(words, lines, time.Now().Year())
 	byUnreadable(words, lines)
 	var ink []Region
 	for i, p := range pages {
@@ -147,15 +167,20 @@ func Process(ctx context.Context, title string, pages []Page, opt Options) (*Res
 	for i, p := range pages {
 		red[i] = paint(p, i, words, ink)
 	}
-	md := buildMD(title, words, lines, ink, len(pages))
+	md := buildMD(title, words, ink, len(pages), false)
 
 	say("проверяю итог повторным распознаванием")
 	check, err := verify(ctx, bin, lang, tmp, pages, red, words, md)
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Words: words, Ink: ink, Redacted: red, MD: md, Check: check}, nil
+	return &Result{Words: words, Ink: ink, Redacted: red, MD: md,
+		OCRMD: buildMD(title, words, ink, len(pages), true), Lang: lang, Check: check}, nil
 }
+
+// LeakMark — начало строки проверки, когда скрытое нашлось в итоге: по нему
+// ключ --scan-redact-llm узнаёт утечку в ответе инструмента.
+const LeakMark = "ВНИМАНИЕ, проверка нашла скрытое в итоге"
 
 // Line — итог проверки одной строкой: для человека и модели.
 func (c Check) Line() string {
@@ -169,7 +194,7 @@ func (c Check) Line() string {
 		}
 		return strings.Join(s, ", ")
 	}
-	return fmt.Sprintf("ВНИМАНИЕ, проверка нашла скрытое в итоге: в PDF — %s; в .md — %s. "+
+	return fmt.Sprintf(LeakMark+": в PDF — %s; в .md — %s. "+
 		"Файлы записаны, но показывать их наружу нельзя, пока это не исправлено.\n",
 		none(c.LeaksPDF), none(c.LeaksMD))
 }
