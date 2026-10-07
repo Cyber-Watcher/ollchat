@@ -48,7 +48,7 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 	// Порт открывается первым делом: отказ «без ключа — только петля»
 	// и занятый порт должны быть видны сразу, а не после сборки службы.
 	token := kbserve.Token()
-	ln, _, err := kbserve.Listen(addr, token)
+	ln, loopback, err := kbserve.Listen(addr, token)
 	if err != nil {
 		return err
 	}
@@ -126,10 +126,9 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	// Сервер общий с ollmcp: проверки от чужих веб-страниц (Origin, имя
+	// машины на петле, JSON в теле) и сроки — в одном месте.
+	srv := kbserve.NewHTTPServer(mux, loopback)
 	errc := make(chan error, 1)
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {

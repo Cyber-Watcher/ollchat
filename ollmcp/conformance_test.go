@@ -439,6 +439,33 @@ func TestConformanceHTTP(t *testing.T) {
 		t.Errorf("GET /mcp: %v %v, ждали 405", r, err)
 	}
 
+	// Чужие веб-страницы: межсайтовый запрос, подмена DNS, «простой» POST.
+	// Ключ у них верный — отказ должен быть и с ним (спецификация MCP требует
+	// проверять Origin).
+	browser := func(mut func(*http.Request)) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, h.url+"/mcp",
+			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+		req.Header.Set("Authorization", "Bearer conformance")
+		req.Header.Set("Content-Type", "application/json")
+		mut(req)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	if code := browser(func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }); code != http.StatusForbidden {
+		t.Errorf("чужой Origin: %d, ждали 403", code)
+	}
+	if code := browser(func(r *http.Request) { r.Host = "attacker.example:8377" }); code != http.StatusForbidden {
+		t.Errorf("подменённое имя на петле: %d, ждали 403", code)
+	}
+	if code := browser(func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }); code != http.StatusUnsupportedMediaType {
+		t.Errorf("POST text/plain: %d, ждали 415", code)
+	}
+
 	const both = "application/json, text/event-stream"
 	resp := h.post(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, "", both)
 	session := resp.Header.Get("Mcp-Session-Id")

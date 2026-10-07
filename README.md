@@ -4428,9 +4428,14 @@ curl -s http://localhost:8377/health
 Проверять надо **не только что поднялось, но и что раздаётся**:
 
 ```bash
-curl -s -H "Authorization: Bearer $КЛЮЧ" -X POST http://localhost:8377/mcp \
+curl -s -H "Authorization: Bearer $КЛЮЧ" -H 'Content-Type: application/json' \
+  -X POST http://localhost:8377/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -o '"name":"[a-z_]*"'
 ```
+
+Тело `POST` служба принимает только с `Content-Type: application/json`, а запросы
+с чужим `Origin` (веб-страницы) отвергает; на петлевом адресе она отвечает только
+на имена `localhost`, `127.0.0.1` и `[::1]` — так закрыта подмена DNS из браузера.
 
 Должны быть только чтение — `kb_search`, `kb_read`, пять `graph_*` и `web_search`.
 Если там оказался `bash` или `write_file`, служба собрана неправильно и её надо
