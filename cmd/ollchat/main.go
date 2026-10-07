@@ -545,7 +545,7 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphMergeFile = flag.String("graph-merge-file", "",
 		"с --graph-merge: файл разбора (verdicts.tsv); без него — показать уже склеенное")
 	f.graphMergeLevel = flag.String("graph-merge-level", "strict",
-		"с --graph-merge: строгость отбора — strict, alias, vector, mixed, soft, all-yes")
+		"с --graph-merge: строгость отбора — strict, alias, vector, mixed, mutual (взаимный синоним и близость ≥ 0.70), soft, all-yes")
 	f.graphMergeMinSame = flag.Float64("graph-merge-min-cos-same", 0,
 		"с --graph-merge: отдельный порог близости для пар внутри одного языка (0 — не применять)")
 	f.graphMergeDrop = flag.Bool("graph-merge-drop", false,
