@@ -1,6 +1,7 @@
 package epub
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,6 +23,37 @@ func bounded(t *testing.T, d time.Duration, f func()) {
 	case <-time.After(d):
 		t.Fatalf("разбор не уложился в %v — работа снова не ограничена", d)
 	}
+}
+
+// repeatedSpine — книга, где одна глава перечислена в spine n раз, а ещё
+// раз — под другим id того же файла.
+func repeatedSpine(t *testing.T, n int) []byte {
+	refs := strings.Repeat(`<itemref idref="one"/>`, n) + `<itemref idref="again"/>`
+	pkg := `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/>` +
+		`<manifest><item href="ch1.xhtml" id="one" media-type="application/xhtml+xml"/>` +
+		`<item href="./ch1.xhtml" id="again" media-type="application/xhtml+xml"/></manifest>` +
+		`<spine>` + refs + `</spine></package>`
+	return buildEPUB(t, true, map[string]string{
+		"META-INF/container.xml": container,
+		"OEBPS/content.opf":      pkg,
+		"OEBPS/ch1.xhtml":        "<html><body><p>" + strings.Repeat("слово ", 20000) + "</p></body></html>",
+	})
+}
+
+// Глава, перечисленная в spine много раз, читается один раз: книга в 3,7 КБ,
+// повторявшая одну главу, давала 288 МБ текста.
+func TestSpineDeduplicated(t *testing.T) {
+	book := repeatedSpine(t, 5000)
+	bounded(t, 20*time.Second, func() {
+		res, err := Extract(book, Options{})
+		if err != nil {
+			t.Errorf("извлечение: %v", err)
+			return
+		}
+		if res.TotalSections != 1 || len(res.Sections) != 1 {
+			t.Errorf("разделов %d, а глава одна", res.TotalSections)
+		}
+	})
 }
 
 // hugeGIF — GIF в несколько десятков байт, где и экран, и кадр — 65535×65535.

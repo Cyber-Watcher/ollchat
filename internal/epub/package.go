@@ -93,20 +93,30 @@ func (b *book) readPackage() (*pkgInfo, error) {
 			ncxHref = href
 		}
 	}
+	// Глава входит в порядок чтения один раз. Spine, где одна глава
+	// перечислена тысячи раз (или под разными id одного файла), читал её
+	// столько же раз: книга в 3,7 КБ давала 288 МБ текста.
+	seen := map[string]bool{}
+	add := func(href string) {
+		if !seen[href] {
+			seen[href] = true
+			info.spine = append(info.spine, href)
+		}
+	}
 	for _, ref := range doc.Spine.Items {
 		if strings.EqualFold(ref.Linear, "no") {
 			// Обложки и служебные страницы читать незачем.
 			continue
 		}
 		if href, ok := byID[ref.IDRef]; ok {
-			info.spine = append(info.spine, href)
+			add(href)
 		}
 	}
 	if len(info.spine) == 0 {
 		// Spine пуст или битый — берём все главы из манифеста по порядку.
 		for _, it := range doc.Manifest.Items {
 			if it.MediaType == "application/xhtml+xml" {
-				info.spine = append(info.spine, info.resolve(it.Href))
+				add(info.resolve(it.Href))
 			}
 		}
 	}
