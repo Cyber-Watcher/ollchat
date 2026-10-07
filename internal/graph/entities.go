@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -145,6 +146,10 @@ type Entities struct {
 	// floor — наибольший номер понятия, о котором известно, что он занят, хотя
 	// записи в реестре может и не быть; новые номера выдаются выше (reserve).
 	floor uint32
+
+	// dirty — понятия, чьи счётчики изменились после их последней записи
+	// в файл (Touch); их и только их дописывает SaveCounters.
+	dirty map[uint32]bool
 
 	// byStem — то же, но по основам слов: «переранжирование» и
 	// «переранжировать» дают один ключ. Нужен входу в граф: вопрос задают
@@ -824,6 +829,7 @@ func (e *Entities) Add(name, typ string, aliases ...string) (uint32, bool, error
 		return 0, false, err
 	}
 	e.put(ent)
+	delete(e.dirty, ent.ID) // номер мог быть занят без записи (reserve)
 	return ent.ID, true, nil
 }
 
@@ -971,6 +977,7 @@ func (e *Entities) mergeAliases(id uint32, aliases []string) error {
 		return err
 	}
 	e.put(ent)
+	delete(e.dirty, id) // записан целиком, со счётчиками
 	return nil
 }
 
@@ -987,22 +994,40 @@ func (e *Entities) Touch(id uint32, newDoc bool) {
 	if newDoc {
 		e.list[id-1].Docs++
 	}
+	if e.dirty == nil {
+		e.dirty = map[uint32]bool{}
+	}
+	e.dirty[id] = true
 }
 
-// SaveCounters переписывает счётчики всех сущностей одной пачкой дозаписи.
-// Зовётся в конце волны сборки, а не после каждого куска.
+// SaveCounters дописывает счётчики понятий, изменившихся с их последней
+// записи, одной пачкой. Зовётся в конце волны сборки, а не после каждого куска.
+//
+// До 07.10.2026 дописывались ВСЕ понятия реестра после каждого захода —
+// и реестр распух вдвадцатеро: 523 МБ и 41 с на открытие при 161 тысяче
+// понятий (замер 02.09.2026, compact.go; аудит, 4.5). Нетронутому понятию
+// новая строка не нужна: побеждает последняя запись, а она и так верна.
 func (e *Entities) SaveCounters() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	ids := make([]uint32, 0, len(e.dirty))
+	for id := range e.dirty {
+		ids = append(ids, id)
+	}
+	// По возрастанию номера, как и прежде: порядок записей в файле
+	// не зависит от обхода карты и повторяется от захода к заходу.
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	now := time.Now().Unix()
-	for i := range e.list {
-		if e.list[i].ID == 0 {
+	for _, id := range ids {
+		if id == 0 || uint32(len(e.list)) < id || e.list[id-1].ID == 0 {
+			delete(e.dirty, id)
 			continue
 		}
-		e.list[i].At = now
-		if err := e.append(e.list[i]); err != nil {
+		e.list[id-1].At = now
+		if err := e.append(e.list[id-1]); err != nil {
 			return err
 		}
+		delete(e.dirty, id)
 	}
 	return e.w.Flush()
 }

@@ -2,8 +2,10 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +104,53 @@ func TestNewIDsSkipReferencedNumbers(t *testing.T) {
 	}
 	if id != 6 {
 		t.Fatalf("новому понятию выдан №%d, ожидался №6: №5 занят упоминанием, мусор не в счёт", id)
+	}
+}
+
+// registryLineCount — сколько строк в реестре понятий графа.
+func registryLineCount(t *testing.T, g *Graph) int {
+	t.Helper()
+	must(t, g.Entities().Flush())
+	raw, err := os.ReadFile(filepath.Join(g.Dir(), entitiesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(raw), "\n")
+}
+
+// Конец захода дописывает в реестр только понятия, чьи счётчики изменились.
+// До 07.10.2026 дописывался весь реестр после каждого захода — двадцатикратное
+// разбухание: 523 МБ и 41 с на открытие (аудит, 4.5).
+func TestSaveCountersAppendsOnlyTouched(t *testing.T) {
+	g, coll := graph(t)
+	for i := 0; i < 50; i++ {
+		if _, _, err := g.Entities().Add(fmt.Sprintf("понятие %d", i), TypeConcept); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := registryLineCount(t, g)
+	must(t, g.Entities().SaveCounters())
+	if n := registryLineCount(t, g); n != base {
+		t.Fatalf("заход без упоминаний дописал %d строк реестра", n-base)
+	}
+	g.Entities().Touch(7, false)
+	g.Entities().Touch(7, false)
+	g.Entities().Touch(9, true)
+	must(t, g.Entities().SaveCounters())
+	if n := registryLineCount(t, g); n != base+2 {
+		t.Fatalf("дописано %d строк, ожидалось 2 — по одной на понятие с новыми счётчиками", n-base)
+	}
+	must(t, g.Close())
+
+	again, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if e, _ := again.Entities().Get(7); e.Count != 2 {
+		t.Errorf("счётчик понятия 7 после переоткрытия %d, ожидалось 2", e.Count)
+	}
+	if e, _ := again.Entities().Get(9); e.Count != 1 || e.Docs != 1 {
+		t.Errorf("счётчики понятия 9 после переоткрытия: %d упоминаний, %d книг", e.Count, e.Docs)
 	}
 }
