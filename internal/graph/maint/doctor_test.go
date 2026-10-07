@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -300,5 +302,49 @@ func TestShellQuote(t *testing.T) {
 		if got := shellQuote(in); got != want {
 			t.Errorf("shellQuote(%q) = %s, ожидалось %s", in, got, want)
 		}
+	}
+}
+
+// Битая разметка тем — ошибка, а не «темы не размечены» (аудит 07.10.2026,
+// раздел 4.6). Прежде она молча давала REPARTITION=yes, докатка пересчитывала
+// разметку поверх битого файла, описания тем не переносились, а битый файл
+// уходил в communities.prev.json поверх прежней, ещё целой копии.
+func TestBrokenCommunitiesIsAnError(t *testing.T) {
+	f := newMaintFixture(t)
+	var out bytes.Buffer
+	if err := Repartition(&out, f.cfg, f.name); err != nil {
+		t.Fatalf("без разметки тем: %v", err)
+	}
+	if !strings.HasSuffix(out.String(), repartitionYes+"\n") {
+		t.Errorf("без разметки тем пересчёт нужен:\n%s", out.String())
+	}
+
+	path := filepath.Join(f.dir, graph.CommunityFile)
+	if err := os.WriteFile(path, []byte(`{"list": [{"id": 1, "members": [1, 2`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := dirHash(t, f.dir)
+	out.Reset()
+	err := Repartition(&out, f.cfg, f.name)
+	if err == nil || !strings.Contains(err.Error(), graph.PrevCommunityFile) {
+		t.Errorf("битая разметка: ошибка %v, ожидался отказ с объяснением", err)
+	}
+	if strings.Contains(out.String(), "REPARTITION=") {
+		t.Errorf("по битой разметке выдана метка для докатки:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := DoctorTo(&out, io.Discard, f.cfg, f.name); err != nil {
+		t.Fatal(err)
+	}
+	doctor := out.String()
+	if !strings.Contains(doctor, "разметка НЕ ЧИТАЕТСЯ") || strings.Contains(doctor, "не размечены") {
+		t.Errorf("доктор путает битую разметку с отсутствующей:\n%s", doctor)
+	}
+	if strings.Contains(doctor, "ollchat --graph-communities") {
+		t.Errorf("доктор советует пересчёт поверх битой разметки:\n%s", doctor)
+	}
+	if dirHash(t, f.dir) != before {
+		t.Error("проверка разметки изменила каталог графа")
 	}
 }

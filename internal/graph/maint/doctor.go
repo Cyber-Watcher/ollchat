@@ -297,8 +297,15 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		}
 	}
 
+	// Битая разметка — не «темы не размечены»: совет пересчитать поверх неё
+	// выбросил бы описания тем, а битый файл ушёл бы в копию поверх прежней,
+	// ещё целой (см. brokenCommunities). До 07.10.2026 доктор их не различал.
+	var brokenTopics error
 	switch {
-	case cerr != nil || comms == nil || len(comms.List) == 0:
+	case cerr != nil:
+		brokenTopics = brokenCommunities(g, cerr)
+		fmt.Fprintf(stdout, "  темы: разметка НЕ ЧИТАЕТСЯ — %v\n", cerr)
+	case comms == nil || len(comms.List) == 0:
 		needCommunities = true
 		fmt.Fprintln(stdout, "  темы: не размечены — обзор тем работать не будет")
 	default:
@@ -407,6 +414,13 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		} else {
 			step(fmt.Sprintf("ollchat --graph-build %s", name),
 				fmt.Sprintf("разобрать оставшиеся %d кусков", cov.pending))
+		}
+	}
+	if brokenTopics != nil {
+		n++
+		fmt.Fprintf(stdout, "  %d. разобраться с файлом разметки тем, прежде чем что-либо пересчитывать:\n", n)
+		for _, l := range strings.Split(brokenTopics.Error(), "\n")[1:] {
+			fmt.Fprintf(stdout, "     %s\n", l)
 		}
 	}
 	if needCommunities {
