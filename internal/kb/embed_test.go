@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeEmbedder — эмбеддер без сети: вектор собирается из слов текста.
@@ -907,6 +908,102 @@ func TestCreateVecWriterShrinksMetaBeforeTruncate(t *testing.T) {
 	if v != nil && v.Count() != 0 {
 		t.Fatalf("паспорт обещает %d векторов при пустом файле", v.Count())
 	}
+}
+
+// gatedEmbedder — эмбеддер, который на пачке текстов ждёт, пока его отпустят:
+// так выглядит многочасовой счёт смыслов, застигнутый посреди волны.
+type gatedEmbedder struct {
+	*fakeEmbedder
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) > 0 && texts[0] != "размерность" {
+		g.once.Do(func() { close(g.entered) })
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return g.fakeEmbedder.Embed(ctx, texts)
+}
+
+// Поиск в том же процессе не ждёт конца счёта смыслов.
+//
+// Embed держал замок коллекции на запись весь счёт — часами, — и в интерфейсе
+// с идущим /kb embed стояли и /search, и kb_search модели, и подмешивание.
+func TestSearchNotBlockedByEmbed(t *testing.T) {
+	_, coll, _ := embedFixture(t)
+	gate := &gatedEmbedder{fakeEmbedder: newFakeEmbedder(32),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		_, err := coll.Embed(context.Background(), gate, EmbedOpts{Batch: 2, Workers: 1}, nil)
+		done <- err
+	}()
+	<-gate.entered
+
+	searched := make(chan error, 1)
+	go func() {
+		_, err := coll.Search("channel", DefaultSearchOpts())
+		searched <- err
+	}()
+	waited := false
+	select {
+	case err := <-searched:
+		if err != nil {
+			t.Errorf("поиск во время счёта смыслов: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("поиск ждёт конца счёта смыслов")
+		waited = true
+	}
+	close(gate.release)
+	if err := <-done; err != nil {
+		t.Fatalf("счёт смыслов: %v", err)
+	}
+	if waited {
+		<-searched
+	}
+	if got := coll.VecMeta().Count; got != coll.ChunkCount() {
+		t.Fatalf("после счёта в памяти %d векторов при %d кусках", got, coll.ChunkCount())
+	}
+}
+
+// Сбой пачки посреди счёта не оставляет коллекцию без векторов в памяти:
+// прежде они обнулялись на старте и так и оставались пустыми до переоткрытия.
+func TestEmbedFailureKeepsVectorsInMemory(t *testing.T) {
+	_, coll, books := embedFixture(t)
+	emb := newFakeEmbedder(32)
+	if _, err := coll.Embed(context.Background(), emb, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := coll.VecMeta().Count
+	makeBook(t, books, "tail.pdf", longPage("select statement and timeouts"))
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Проба размерности проходит, пачки — нет: сервер упал посреди счёта.
+	failing := &batchFailer{emb}
+	if _, err := coll.Embed(context.Background(), failing, EmbedOpts{Batch: 1, Workers: 1}, nil); err == nil {
+		t.Fatal("сбой эмбеддера не дошёл до вызывающего")
+	}
+	if got := coll.VecMeta().Count; got != before {
+		t.Fatalf("после сбоя в памяти %d векторов, а посчитано было %d", got, before)
+	}
+}
+
+// batchFailer отвечает на пробу размерности и падает на пачках.
+type batchFailer struct{ *fakeEmbedder }
+
+func (b *batchFailer) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) > 0 && texts[0] == "размерность" {
+		return b.fakeEmbedder.Embed(ctx, texts)
+	}
+	return nil, errors.New("сервер недоступен")
 }
 
 // stampedEmbedder — эмбеддер, который знает отпечаток своих весов, как
