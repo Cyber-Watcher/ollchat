@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -352,27 +351,7 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 		return 0, nil
 	}
 
-	f, err := os.OpenFile(m.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	w := bufio.NewWriter(f)
-	for _, r := range fresh {
-		b, err := json.Marshal(r)
-		if err != nil {
-			f.Close()
-			return 0, err
-		}
-		if _, err := w.Write(append(b, '\n')); err != nil {
-			f.Close()
-			return 0, err
-		}
-	}
-	if err := w.Flush(); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := f.Close(); err != nil {
+	if err := appendJSONL(m.path, fresh, false); err != nil {
 		return 0, err
 	}
 	if fi, err := os.Stat(m.path); err == nil {

@@ -105,20 +105,7 @@ func (d *DroppedBooks) add(r DropRec) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	r.At = time.Now().Unix()
-	f, err := os.OpenFile(d.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	line, err := json.Marshal(r)
-	if err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
+	if err := appendJSONL(d.path, []DropRec{r}, false); err != nil {
 		return err
 	}
 	d.recs = append(d.recs, r)

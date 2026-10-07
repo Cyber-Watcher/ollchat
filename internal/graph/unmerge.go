@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -185,28 +184,11 @@ func (m *Merges) undo(pairs [][2]uint32, why string, dry bool, res *UnmergeResul
 // appendUndone дописывает снятые склейки в журнал снятого и пишет его на диск.
 func appendUndone(path string, undone []MergeRec, why string) error {
 	now := time.Now().Unix()
-	uf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
+	recs := make([]UndoneMerge, len(undone))
+	for i, r := range undone {
+		recs[i] = UndoneMerge{MergeRec: r, UndoneAt: now, UndoneBy: why}
 	}
-	uw := bufio.NewWriter(uf)
-	for _, r := range undone {
-		b, err := json.Marshal(UndoneMerge{MergeRec: r, UndoneAt: now, UndoneBy: why})
-		if err != nil {
-			uf.Close()
-			return err
-		}
-		uw.Write(append(b, '\n'))
-	}
-	if err := uw.Flush(); err != nil {
-		uf.Close()
-		return err
-	}
-	if err := uf.Sync(); err != nil {
-		uf.Close()
-		return err
-	}
-	return uf.Close()
+	return appendJSONL(path, recs, true)
 }
 
 // RawEntity отдаёт запись понятия БЕЗ наложения склеек: у поглощённого —

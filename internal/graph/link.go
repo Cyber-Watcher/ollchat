@@ -322,16 +322,7 @@ func (l *Links) add(r LinkRec) error {
 	if r.At == 0 {
 		r.At = time.Now().Unix()
 	}
-	b, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(b, '\n')); err != nil {
+	if err := appendJSONL(l.path, []LinkRec{r}, false); err != nil {
 		return err
 	}
 	l.apply(r)

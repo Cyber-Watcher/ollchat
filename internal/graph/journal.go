@@ -3,6 +3,7 @@ package graph
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -111,6 +112,63 @@ func (t *journalTail) prepare(f *os.File, path string) error {
 	}
 	t.ready = true
 	return nil
+}
+
+// appendJSONL дописывает записи в журнал JSONL, который открывается только
+// на время записи: склейки, снятые склейки, запреты синонимов, отброшенные
+// книги, связывания, группы. sync — записать и на диск.
+//
+// Если файл кончается не переводом строки — прошлая запись оборвалась
+// (kill -9 посреди пачки, сбой питания), — перед новыми записями встаёт
+// перевод строки. Иначе первая новая запись склеилась бы с обрывком в одну
+// битую строку и при чтении пропала бы: так было до 07.10.2026 (аудит, №3;
+// у реестра понятий то же лечит journalTail.prepare). Обрывок здесь не
+// срезается: эти журналы пишутся без замка, и срез мог бы снести запись,
+// которую в этот миг дописывает другой процесс, а лишний перевод строки
+// безвреден — пустую строку чтение пропускает. Пачка размечается целиком
+// до записи и уходит в файл разом: ошибка разметки посреди пачки не оставит
+// в журнале её половину.
+func appendJSONL[T any](path string, recs []T, sync bool) error {
+	var buf bytes.Buffer
+	for _, r := range recs {
+		b, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	out := buf.Bytes()
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	if fi.Size() > 0 && len(out) > 0 {
+		last := []byte{0}
+		if _, err := f.ReadAt(last, fi.Size()-1); err != nil {
+			f.Close()
+			return err
+		}
+		if last[0] != '\n' {
+			out = append([]byte{'\n'}, out...)
+		}
+	}
+	if _, err := f.Write(out); err != nil {
+		f.Close()
+		return err
+	}
+	if sync {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return err
+		}
+	}
+	return f.Close()
 }
 
 // eachLine зовёт fn на каждую строку из r (без перевода строки) и возвращает,

@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -180,28 +179,15 @@ func DenyAliases(dir string, recs []AliasDeny, dry bool) ([]DenyEffect, error) {
 		return effects, nil
 	}
 
-	f, err := os.OpenFile(filepath.Join(dir, aliasDenyFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
+	stamped := make([]AliasDeny, len(recs))
 	now := time.Now().Unix()
-	for _, r := range recs {
+	for i, r := range recs {
 		if r.At == 0 {
 			r.At = now
 		}
-		line, err := json.Marshal(r)
-		if err != nil {
-			return nil, err
-		}
-		w.Write(line)
-		w.WriteByte('\n')
+		stamped[i] = r
 	}
-	if err := w.Flush(); err != nil {
-		return nil, err
-	}
-	if err := f.Sync(); err != nil {
+	if err := appendJSONL(filepath.Join(dir, aliasDenyFile), stamped, true); err != nil {
 		return nil, err
 	}
 	syncDir(dir)

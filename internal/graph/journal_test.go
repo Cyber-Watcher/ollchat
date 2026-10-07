@@ -236,3 +236,77 @@ func TestStaleGraphRefusesAppend(t *testing.T) {
 		t.Errorf("журнал упоминаний изменился: %d → %d байт", before.Size(), after.Size())
 	}
 }
+
+// Журналы JSONL, которые открываются на время записи (склейки, снятые
+// склейки, запреты синонимов, отброшенные книги, группы, связывания), после
+// обрыва прошлой записи не теряют следующую. До 07.10.2026 она склеивалась
+// с обрывком в одну битую строку и при чтении пропадала (аудит, №3).
+func TestJSONLAppendAfterTornLine(t *testing.T) {
+	g, coll := graph(t)
+	dir := g.Dir()
+	alpha, _, _ := g.Entities().Add("Альфа", TypeConcept, "alpha")
+	beta, _, _ := g.Entities().Add("Бета", TypeConcept)
+	gamma, _, _ := g.Entities().Add("Гамма", TypeConcept)
+	must(t, g.Close())
+
+	// Каждый журнал кончается обрывком записи — как после kill -9 посреди
+	// пачки склеек или сбоя питания.
+	for name, torn := range map[string]string{
+		mergesFile:       `{"from":7,"to"`,
+		undoneMergesFile: `{"from":7`,
+		aliasDenyFile:    `{"id":1,"ali`,
+		droppedBooksFile: `{"book":9,"pa`,
+		groupsFile:       `{"id":4,"mem`,
+		linksFile:        `{"norm":"дельта","na`,
+	} {
+		must(t, os.WriteFile(filepath.Join(dir, name), []byte(torn), 0o644))
+	}
+
+	g, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := g.Merges().Add([]MergeRec{{From: beta, To: alpha}}); err != nil || n != 1 {
+		t.Fatalf("склейка: записано %d, %v", n, err)
+	}
+	must(t, g.DropBook(5, "/AI/книга.pdf", "проба"))
+	if _, err := g.Groups().Add(GroupRec{Members: []uint32{alpha, gamma}}); err != nil {
+		t.Fatal(err)
+	}
+	must(t, g.Links().add(LinkRec{Norm: "гамма-лучи", Name: "гамма-лучи", To: gamma, Verdict: LinkYes}))
+	must(t, appendUndone(filepath.Join(dir, undoneMergesFile), []MergeRec{{From: gamma, To: alpha}}, "проба"))
+	must(t, g.Close())
+	if _, err := DenyAliases(dir, []AliasDeny{{ID: alpha, Alias: "alpha"}}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err = Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if got := g.Merges().Resolve(beta); got != alpha {
+		t.Errorf("склейка после обрывка потеряна: %d ведёт к %d", beta, got)
+	}
+	if !g.Dropped().Dropped(5) {
+		t.Error("отбрасывание книги после обрывка потеряно")
+	}
+	if sib := g.Groups().Siblings(alpha); len(sib) != 1 || sib[0] != gamma {
+		t.Errorf("группа после обрывка потеряна: соседи %v", sib)
+	}
+	if to, ok := g.Links().Linked("гамма-лучи"); !ok || to != gamma {
+		t.Errorf("связывание после обрывка потеряно: %d, %v", to, ok)
+	}
+	if !denyOf(t, dir)[alpha]["alpha"] {
+		t.Error("запрет синонима после обрывка потерян")
+	}
+	// У снятой склейки поля from и to те же, что у склейки: след читается
+	// тем же разбором.
+	undone, _, err := readMergeRecs(filepath.Join(dir, undoneMergesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(undone) != 1 || undone[0].From != gamma {
+		t.Errorf("след снятой склейки после обрывка: %+v", undone)
+	}
+}
