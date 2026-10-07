@@ -57,6 +57,30 @@ func objStmDoc(n string) []byte {
 	return b.Bytes()
 }
 
+// Огромный /Colors переполнял длину строки предиктора до нуля, и цикл по
+// строкам TIFF стоял на месте вечно; огромный /Columns просил под строку
+// терабайт. Обычный предиктор при этом работает как прежде.
+func TestPredictorHostileParams(t *testing.T) {
+	d := &Document{}
+	bounded(t, 5*time.Second, func() {
+		if _, err := d.predict([]byte{1, 2, 3, 4}, Dict{"Predictor": int64(2), "Colors": int64(1 << 61)}); err == nil {
+			t.Error("TIFF с /Colors 2^61: ожидалась ошибка параметров")
+		}
+		out, err := d.predict([]byte{2, 1, 2}, Dict{"Predictor": int64(12), "Columns": int64(1 << 40)})
+		if err == nil && len(out) > 3 {
+			t.Errorf("строка на 2^40 столбцов из трёх байт дала %d байт", len(out))
+		}
+		if _, err := d.predict([]byte{0, 1}, Dict{"Predictor": int64(12), "BitsPerComponent": int64(64)}); err == nil {
+			t.Error("BitsPerComponent 64: ожидалась ошибка параметров")
+		}
+	})
+	// Обрезанный поток: одна неполная строка раскрывается как есть.
+	out, err := d.predict([]byte{1, 5, 1}, Dict{"Predictor": int64(11), "Columns": int64(100)})
+	if err != nil || !bytes.Equal(out, []byte{5, 6}) {
+		t.Errorf("неполная строка: %v, %v", out, err)
+	}
+}
+
 // /N объектного потока берётся из файла: до правки под него заранее
 // выделялась память — полтора терабайта на файл в килобайт.
 func TestObjectStreamHugeCount(t *testing.T) {

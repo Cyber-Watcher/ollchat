@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // errImageStream сообщает, что поток — картинка, а не текст.
@@ -142,8 +143,21 @@ func (d *Document) predict(data []byte, parm Dict) ([]byte, error) {
 	if v, ok := toInt(d.Resolve(parm["Columns"])); ok && v > 0 {
 		columns = v
 	}
+	// Параметры берутся из файла, и верить им нельзя: огромный /Colors
+	// переполнял длину строки до нуля, и цикл по строкам TIFF стоял на месте
+	// вечно, а огромный /Columns просил под одну строку терабайт. Поэтому
+	// составляющих не больше, чем бывает у цветовых моделей (32 — предел
+	// DeviceN), отсчёт — из допустимых спецификацией, а столбцов столько,
+	// чтобы произведение не переполнилось.
+	if colors > maxColors || !validBPC(bpc) || columns > math.MaxInt32 {
+		return nil, fmt.Errorf("предиктор: недопустимые параметры (Colors %d, BitsPerComponent %d, Columns %d)",
+			colors, bpc, columns)
+	}
 	bpp := (colors*bpc + 7) / 8 // байт на пиксель, не меньше одного
 	rowLen := (colors*bpc*columns + 7) / 8
+	if len(data) == 0 {
+		return data, nil
+	}
 
 	if pred == 2 { // предиктор TIFF
 		if bpc != 8 {
@@ -159,6 +173,13 @@ func (d *Document) predict(data []byte, parm Dict) ([]byte, error) {
 	}
 
 	// Предикторы PNG: каждая строка начинается с байта фильтра.
+	//
+	// Строка длиннее самих данных бывает только у обрезанного потока: такая
+	// строка одна, и неполная. Память под неё берётся по данным, а не по
+	// /Columns, — иначе поток в три байта просил гигабайты.
+	if rowLen >= len(data) {
+		rowLen = len(data) - 1
+	}
 	out := make([]byte, 0, len(data))
 	prev := make([]byte, rowLen)
 	for pos := 0; pos+1 <= len(data); pos += rowLen + 1 {
@@ -203,6 +224,18 @@ func (d *Document) predict(data []byte, parm Dict) ([]byte, error) {
 		prev = row
 	}
 	return out, nil
+}
+
+// maxColors — больше составляющих цвета не бывает: 32 — предел DeviceN.
+const maxColors = 32
+
+// validBPC — разрядность отсчёта из тех, что допускает спецификация.
+func validBPC(bpc int) bool {
+	switch bpc {
+	case 1, 2, 4, 8, 16:
+		return true
+	}
+	return false
 }
 
 func paeth(a, b, c byte) byte {
