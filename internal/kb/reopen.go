@@ -65,11 +65,6 @@ func stampOf(dir string) stamp {
 	}
 }
 
-// same сообщает, что состояние на диске не менялось.
-func (s stamp) same(o stamp) bool {
-	return s.sameIndex(o) && sameFile(s.vecs, o.vecs)
-}
-
 // sameIndex — то же без векторов: каталог, реестр и индекс по словам.
 func (s stamp) sameIndex(o stamp) bool {
 	return sameIdentity(s.dir, o.dir) && sameFile(s.meta, o.meta) &&

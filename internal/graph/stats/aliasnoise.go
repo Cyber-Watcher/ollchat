@@ -58,7 +58,6 @@ type aliasSuspect struct {
 	ownerID   uint32
 	alias     string // сам синоним
 	otherName string // понятие, чьим именем он является
-	otherID   uint32
 	abbrev    string // аббревиатура, через которую пришло раскрытие
 	shared    int    // общих книг у пары (0 — главный признак)
 	ownerDeg  int    // связей у понятия-владельца

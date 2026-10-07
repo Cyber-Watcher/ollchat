@@ -304,7 +304,7 @@ func TestPartsGivesUnitNumbers(t *testing.T) {
 		t.Fatalf("Parts вернул склеенный текст длиной %d", len(doc.Text))
 	}
 
-	doc, parts, err = Parts(writeTemp(t, "book.epub", sampleEPUB(t)), 0)
+	_, parts, err = Parts(writeTemp(t, "book.epub", sampleEPUB(t)), 0)
 	if err != nil {
 		t.Fatalf("EPUB: %v", err)
 	}

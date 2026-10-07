@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,7 +58,13 @@ func buildBinary(t *testing.T) string {
 			return
 		}
 		builtBin = filepath.Join(dir, "ollmcp")
-		gobin := filepath.Join(runtime.GOROOT(), "bin", "go")
+		// Тот go, что в PATH: runtime.GOROOT устарел и после переноса
+		// бинаря теста указывал бы в никуда.
+		gobin, err := exec.LookPath("go")
+		if err != nil {
+			builtErr = err
+			return
+		}
 		out, err := exec.Command(gobin, "build", "-o", builtBin, ".").CombinedOutput()
 		if err != nil {
 			builtErr = &buildError{string(out), err}

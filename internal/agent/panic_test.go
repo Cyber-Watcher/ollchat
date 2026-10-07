@@ -21,8 +21,10 @@ func (panicTool) Spec() ollama.Tool {
 
 func (p panicTool) Plan(map[string]any) (*tools.Plan, error) {
 	if !p.inRun {
-		var m map[string]int
-		m["x"] = 1 // запись в пустую карту — та самая паника из жизни
+		// Паника посреди Plan, как от записи в пустую карту в настоящем
+		// инструменте. Явный panic, а не сама запись: такую запись линтер
+		// справедливо считает ошибкой, а здесь паника и нужна.
+		panic("assignment to entry in nil map")
 	}
 	return &tools.Plan{
 		Tool:  "boom",
