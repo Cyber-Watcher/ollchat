@@ -126,6 +126,24 @@ func TestNodeLightSnapshot(t *testing.T) {
 	}
 }
 
+// Токен сверяется целиком: префикс, хвост и голый токен без «Bearer » —
+// отказ, свой — пропуск.
+func TestNodeTokenCompare(t *testing.T) {
+	s := testServer(t, time.Second, nil)
+	for _, h := range []string{"Bearer секре", "Bearer секретт", "секрет", "Bearer", "bearer секрет"} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/node", nil)
+		r.Header.Set("Authorization", h)
+		if s.authorized(r) {
+			t.Errorf("заголовок %q принят", h)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/node", nil)
+	r.Header.Set("Authorization", "Bearer секрет")
+	if !s.authorized(r) {
+		t.Error("свой токен не принят")
+	}
+}
+
 // Кэш стареет.
 func TestNodeCacheExpires(t *testing.T) {
 	var calls int32

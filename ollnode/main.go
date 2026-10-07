@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -158,11 +159,14 @@ func (s *server) node(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(rep)
 }
 
-// authorized — сравнение токена. Постоянного времени сравнение здесь не нужно:
-// токен длинный и случайный, а служба стоит во внутренней сети за туннелем.
+// authorized — сравнение токена постоянного времени.
+//
+// Прежде здесь стояло обычное ==: «токен длинный, служба за туннелем». Но
+// README допускает и --listen 0.0.0.0, а сравнение строк выходит на первом
+// несовпавшем байте — по времени ответа токен подбирается байт за байтом.
 func (s *server) authorized(r *http.Request) bool {
-	h := r.Header.Get("Authorization")
-	return h == "Bearer "+s.token
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
 }
 
 func (s *server) snapshot(ctx context.Context, light bool) *nodeprobe.Report {
