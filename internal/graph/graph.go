@@ -793,13 +793,6 @@ func (g *Graph) Lock() error {
 		return err
 	}
 	g.lock, g.staleLock = f, stale
-	// Под замком писать больше некому — самое время привести в порядок
-	// хвосты журналов, оставленные оборванным прошлым заходом (journal.go).
-	// Не вышло — замок снимается: дописывать в такой граф нельзя.
-	if err := g.prepareJournals(); err != nil {
-		_ = g.Unlock()
-		return err
-	}
 	return nil
 }
 
@@ -901,7 +894,10 @@ func openForBuild(collDir, name string, chunks int, rules Rules, o CreateOpts, c
 
 // prepareJournals приводит в порядок хвосты всех журналов перед дозаписью:
 // срезает оборванную запись и сверяет, что файлы те же, что читались при
-// открытии (journal.go). Зовётся под замком сборки.
+// открытии (journal.go). Зовётся под замком сборки — тем, кто будет писать
+// в журналы (Build, OpenForBuild); сам Lock журналов не трогает: замок берут
+// и работы, которые журналы не пишут вовсе (склейки), и отказ им из-за
+// дописанного сборкой хвоста был бы ложным.
 func (g *Graph) prepareJournals() error {
 	for _, prepare := range []func() error{
 		g.ents.prepare, g.ment.prepare, g.edge.prepare, g.prog.prepare, g.alias.prepare,

@@ -95,23 +95,39 @@ func TestOpenForBuildLocksBeforeReading(t *testing.T) {
 	}
 }
 
-// Граф, открытый без замка, после подмены журналов замок не получает:
+// Сборка по графу, открытому без замка до подмены журналов, не идёт:
 // дописывать в переименованные копии хуже, чем честно отказаться.
-func TestLockRefusesReplacedJournals(t *testing.T) {
+func TestBuildRefusesReplacedJournals(t *testing.T) {
 	coll, chunk := buildFixture(t)
 	g, err := Open(coll, 1000, Rules{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer g.Close()
-	if _, err := ForgetChunks(g.Dir(), func(k ChunkKey) bool { return k == chunk }, false); err != nil {
+	st, err := ForgetChunks(g.Dir(), func(k ChunkKey) bool { return k == chunk }, false)
+	if err != nil {
 		t.Fatalf("чистка: %v", err)
 	}
-	if err := g.Lock(); !errors.Is(err, ErrStale) {
-		t.Fatalf("замок на графе с подменёнными журналами: %v, ожидался ErrStale", err)
+	sizes := map[string]int64{}
+	for _, b := range st.Backups {
+		fi, err := os.Stat(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sizes[b] = fi.Size()
+	}
+	m := &model{answer: func(int) (string, error) { return goodAnswer, nil }}
+	_, err = Build(context.Background(), chunksFor(2, "/AI/книга.pdf"), g, m, BuildOpts{Workers: 1}, nil)
+	if !errors.Is(err, ErrStale) {
+		t.Fatalf("сборка на графе с подменёнными журналами: %v, ожидался ErrStale", err)
 	}
 	if g.Locked() {
 		t.Error("после отказа признак сборки остался висеть")
+	}
+	for b, size := range sizes {
+		if fi, _ := os.Stat(b); fi.Size() != size {
+			t.Errorf("сборка дописала в копию %s", filepath.Base(b))
+		}
 	}
 }
 

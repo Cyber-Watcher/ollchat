@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -61,11 +62,9 @@ func TestTornTailsCutBeforeAppend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Сборка берёт замок — под ним хвосты и приводятся в порядок.
+	// Сборка берёт замок и пишет; хвост каждого журнала приводится в порядок
+	// перед первой записью в него.
 	must(t, g.Lock())
-	if notes := g.TornTails(); len(notes) != 5 {
-		t.Errorf("исправлений хвостов %d, ожидалось 5 — по одному на журнал: %q", len(notes), notes)
-	}
 	c, isNew, err := g.Entities().Add("Гамма", TypeConcept)
 	if err != nil || !isNew || c != 3 {
 		t.Fatalf("новое понятие: %d, %v, %v — ожидался №3", c, isNew, err)
@@ -76,6 +75,9 @@ func TestTornTailsCutBeforeAppend(t *testing.T) {
 	must(t, g.Progress().Mark(second, MarkEmpty))
 	if _, err := g.Aliases().Add(c, second, "gamma"); err != nil {
 		t.Fatal(err)
+	}
+	if notes := g.TornTails(); len(notes) != 5 {
+		t.Errorf("исправлений хвостов %d, ожидалось 5 — по одному на журнал: %q", len(notes), notes)
 	}
 	must(t, g.Unlock())
 	must(t, g.Close())
@@ -192,10 +194,11 @@ func TestRegistryLineWithoutNewlineKept(t *testing.T) {
 	}
 }
 
-// Журнал дописал другой процесс после того, как граф был открыт: замок
-// сборки не берётся, иначе дозапись по устаревшему состоянию в памяти выдала
-// бы уже занятые номера понятий, а срез хвоста снёс бы чужие записи.
-func TestLockRefusesJournalGrownSinceOpen(t *testing.T) {
+// Журнал дописал другой процесс после того, как граф был открыт: сборка
+// по такому графу не идёт и не пишет ни записи, иначе дозапись по устаревшему
+// состоянию в памяти выдала бы уже занятые номера понятий, а срез хвоста
+// снёс бы чужие записи.
+func TestStaleGraphRefusesAppend(t *testing.T) {
 	g, coll := graph(t)
 	a, _, _ := g.Entities().Add("Альфа", TypeConcept)
 	must(t, g.Close())
@@ -212,12 +215,24 @@ func TestLockRefusesJournalGrownSinceOpen(t *testing.T) {
 	}
 	must(t, other.Mentions().Add(a, ChunkKey{Doc: 1, Ord: 1}))
 	must(t, other.Close())
+	path := filepath.Join(stale.Dir(), mentionsFile)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	err = stale.Lock()
+	m := &model{answer: func(int) (string, error) { return goodAnswer, nil }}
+	_, err = Build(context.Background(), chunksFor(2, "/AI/книга.pdf"), stale, m, BuildOpts{Workers: 1}, nil)
 	if !errors.Is(err, ErrStale) {
-		t.Fatalf("ожидался ErrStale, получено %v", err)
+		t.Fatalf("сборка по устаревшему графу: %v, ожидался ErrStale", err)
 	}
 	if stale.Locked() {
 		t.Error("после отказа признак сборки остался висеть")
+	}
+	if err := stale.Mentions().Add(a, ChunkKey{Doc: 9, Ord: 9}); !errors.Is(err, ErrStale) {
+		t.Fatalf("запись в устаревший журнал: %v, ожидался ErrStale", err)
+	}
+	if after, _ := os.Stat(path); after.Size() != before.Size() {
+		t.Errorf("журнал упоминаний изменился: %d → %d байт", before.Size(), after.Size())
 	}
 }
