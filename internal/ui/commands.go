@@ -66,7 +66,7 @@ func kbHelpBlock(has sectionCheck) string {
   библиотеке разом: /kb add go /путь/к/книгам — и модель сможет искать в этих
   книгах инструментом kb_search, отвечая со ссылками на книгу и страницу.
   Индексация идёт в фоне: чат при этом работает, ход виден в строке состояния,
-  Esc или /kb stop останавливает. Доливка книг стоит ровно столько, сколько
+  Esc дважды или /kb stop останавливает. Доливка книг стоит ровно столько, сколько
   новых книг: /kb sync go перечитает только то, что появилось, а пропавшее
   уберёт из выдачи. Каталоги, откуда можно брать книги, перечисляются
   в настройке kb.roots — ни модель, ни команда этот список не расширяют.
@@ -215,7 +215,7 @@ func commandHandlers() []cmdHandler {
 			return nil
 		}},
 		{names: []string{"confluencetoken", "token"}, run: (*Model).confluenceTokenCmd},
-		{names: []string{"quit", "exit", "q"}, run: func(*Model, string) tea.Cmd { return tea.Quit }},
+		{names: []string{"quit", "exit", "q"}, run: (*Model).quitCmd},
 		{names: []string{"servers"}, run: func(m *Model, _ string) tea.Cmd { return m.openServerPicker() }},
 		{names: []string{"server"}, run: func(m *Model, arg string) tea.Cmd {
 			if arg == "" {
@@ -302,6 +302,21 @@ func (m *Model) runCommand(input string) tea.Cmd {
 	}
 	m.addBlock(block{kind: blockError, text: "неизвестная команда " + fields[0] + " — попробуйте /help"})
 	return nil
+}
+
+// quitCmd — /quit: выход.
+//
+// Идущая фоновая работа при выходе обрывается, а это бывают часы индексации
+// или уплотнения. Поэтому о ней предупреждаем — один раз на задачу: второй
+// /quit выходит.
+func (m *Model) quitCmd(_ string) tea.Cmd {
+	if m.job != nil && m.quitWarnedJob != m.job.gen {
+		m.quitWarnedJob = m.job.gen
+		m.addBlock(block{kind: blockHint, text: "идёт " + m.job.title +
+			" — выход оборвёт её. Выйти всё равно: /quit ещё раз; остановить работу: /kb stop"})
+		return nil
+	}
+	return tea.Quit
 }
 
 // modeCmd — /mode: показать или сменить режим подтверждений.

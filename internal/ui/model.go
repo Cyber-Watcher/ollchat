@@ -295,6 +295,11 @@ type Model struct {
 	// job — идущая долгая задача (индексация книг). Она живёт отдельно от хода
 	// генерации: ресурсы разные, поэтому чат во время индексации работает.
 	job *kbJob
+	// jobEscAt — когда первый Esc нацелился на задачу: останавливает её только
+	// второй в пределах jobStopWindow (см. handleKey). quitWarnedJob —
+	// поколение задачи, о которой /quit уже предупредил.
+	jobEscAt      time.Time
+	quitWarnedJob int
 
 	// archive — идущий архив коллекции с графом, см. archive.go.
 	archive *archiveJob

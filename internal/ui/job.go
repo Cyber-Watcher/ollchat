@@ -44,6 +44,14 @@ type jobProgressMsg struct {
 	p   kb.Progress
 }
 
+// jobStopWindow — в какой срок второй Esc останавливает задачу.
+//
+// Одним Esc прерывают ответ модели. Если ответ успел кончиться за миг до
+// нажатия, Esc доставался задаче и без вопроса убивал многочасовую
+// индексацию или уплотнение (аудит 07.10.2026). Второе нажатие подряд
+// случайным не бывает, а две секунды — запас на то, чтобы прочесть подсказку.
+const jobStopWindow = 2 * time.Second
+
 // jobDoneMsg — работа завершилась.
 type jobDoneMsg struct {
 	gen int
@@ -71,7 +79,7 @@ func (m *Model) startJob(title string, run func(ctx context.Context, report func
 	if m.job != nil {
 		p := m.job.last
 		m.addBlock(block{kind: blockError, text: fmt.Sprintf(
-			"уже идёт: %s (%d из %d) — остановить можно клавишей Esc или командой /kb stop",
+			"уже идёт: %s (%d из %d) — остановить можно двойным Esc или командой /kb stop",
 			m.job.title, p.DocsDone, p.DocsTotal)})
 		return nil
 	}
@@ -246,10 +254,10 @@ func (m *Model) jobStatus() string {
 	}
 	p := m.job.last
 	if p.DocsTotal > 0 {
-		return fmt.Sprintf("%s %d/%d · Esc — остановить", p.Phase, p.DocsDone, p.DocsTotal)
+		return fmt.Sprintf("%s %d/%d · Esc×2 — остановить", p.Phase, p.DocsDone, p.DocsTotal)
 	}
 	if p.Phase != "" {
-		return p.Phase + " · Esc — остановить"
+		return p.Phase + " · Esc×2 — остановить"
 	}
-	return "индексация · Esc — остановить"
+	return "индексация · Esc×2 — остановить"
 }

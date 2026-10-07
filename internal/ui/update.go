@@ -418,9 +418,19 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.abortCompaction("Ctrl+C")
 		m.statusMsg = "нажмите Ctrl+C ещё раз для выхода"
+		if m.job != nil {
+			// Выход обрывает и фоновую работу: часы индексации не должны
+			// пропадать без единого слова об этом.
+			m.statusMsg = "идёт " + m.job.title + " — Ctrl+C ещё раз выйдет и оборвёт её"
+		}
 		return m, nil
 	}
 	m.quitConfirm = false
+	// Остановку задачи готовит только Esc, нажатый подряд: любая другая
+	// клавиша между ними её отменяет.
+	if !key.Matches(msg, keys.esc) {
+		m.jobEscAt = time.Time{}
+	}
 
 	// Окно сохранения в PDF перехватывает управление первым: пока в нём
 	// набирают имя файла, Esc обязан закрывать окно, а не прерывать генерацию.
@@ -480,16 +490,33 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.addBlock(block{kind: blockNotice, text: "генерация прервана"})
 			return m, nil
 		}
+		// Подмешивание — тоже часть хода, и строка состояния обещает, что Esc
+		// его прерывает. Раньше нажатие проваливалось ниже и без вопроса
+		// останавливало индексацию, идущую рядом.
+		if m.mixing {
+			m.stopStreaming()
+			m.addBlock(block{kind: blockNotice, text: "вопрос отменён: знания к нему ещё готовились"})
+			return m, nil
+		}
 		// Сжатие истории — часть хода: Esc прерывает его, а не индексацию,
 		// идущую рядом.
 		if m.compacting {
 			m.abortCompaction("Esc")
 			return m, nil
 		}
-		// Вне генерации Esc останавливает индексацию книг: другой длительной
-		// работы в приложении нет.
+		// Вне хода Esc останавливает фоновую задачу — но только второй подряд
+		// в пределах jobStopWindow. Одним Esc прерывают ответ, и если тот
+		// успел кончиться, нажатие убивало многочасовую индексацию или
+		// уплотнение без вопроса (аудит 07.10.2026).
 		if m.job != nil {
-			m.stopJob("остановлено")
+			now := m.now()
+			if !m.jobEscAt.IsZero() && now.Sub(m.jobEscAt) <= jobStopWindow {
+				m.jobEscAt = time.Time{}
+				m.stopJob("остановлено")
+				return m, nil
+			}
+			m.jobEscAt = now
+			m.statusMsg = "идёт " + m.job.title + " — Esc ещё раз в течение 2 с остановит её"
 			return m, nil
 		}
 		return m, nil
