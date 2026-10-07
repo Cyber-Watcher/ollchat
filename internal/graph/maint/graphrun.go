@@ -142,7 +142,11 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// Назначение и пометка проставляются только при создании: у графа, который
 	// уже собран, паспорт менять нельзя — иначе рабочий однажды станет опытным
 	// по опечатке в ключе, и доктор о нём замолчит.
-	g, err := graph.OpenOrCreateKind(coll.Dir(), name, chunks, cfg.Graph.Rules(), graph.CreateOpts{Kind: graph.Kind(kind), Note: note})
+	//
+	// Признак сборки берётся ДО чтения журналов (graph.OpenForBuild): пока граф
+	// открывается, чистка успевала подменить журналы, и заход часами писал
+	// в переименованные копии (аудит 07.10.2026, №9).
+	g, err := graph.OpenForBuild(coll.Dir(), name, chunks, cfg.Graph.Rules(), graph.CreateOpts{Kind: graph.Kind(kind), Note: note})
 	if err != nil {
 		return err
 	}
@@ -173,6 +177,10 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// подобрана за кем-то, а не начата с чистого листа.
 	if s := g.StaleLock(); s != "" {
 		fmt.Fprintf(stdout, "снят признак идущей сборки: %s\n", s)
+	}
+	// Срезанный обрывок записи — тоже след упавшего прогона, и тоже не молча.
+	for _, s := range g.TornTails() {
+		fmt.Fprintf(stdout, "журнал после обрыва — %s\n", s)
 	}
 	fmt.Fprintf(stdout, "коллекция %s, модель извлечения %s\n", name, ex.Model())
 	if named && pool != nil {

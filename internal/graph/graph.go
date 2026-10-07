@@ -766,43 +766,22 @@ const lockFile = "LOCK"
 //
 // Сборка графа идёт часами и пишет в те же журналы. Два прогона разом
 // перемешали бы записи так, что разобрать их было бы нельзя.
+//
+// Граф, открытый OpenForBuild, признак уже держит — с самого открытия;
+// тогда Lock ничего не делает.
 func (g *Graph) Lock() error {
+	if g.lock != nil {
+		return nil
+	}
 	// Идущий архив коллекции дожидаемся, а не отказываем: см. work.go.
 	if err := kb.WaitArchive(filepath.Dir(g.dir), kb.ArchiveWait); err != nil {
 		return err
 	}
-	path := filepath.Join(g.dir, lockFile)
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if os.IsExist(err) {
-		// Признак есть — но это ещё не значит, что сборка идёт. Прогон,
-		// убитый по kill -9, при отключении питания или снятый OOM, снять
-		// его за собой не успевает, и без разбора человек получал бы отказ
-		// «сборка графа уже идёт» на пустом месте, без единой подсказки,
-		// что делать. Поэтому смотрим, жив ли записанный процесс.
-		owner := readLock(path)
-		if owner.alive() {
-			return &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
-		}
-		// Хозяин мёртв — признак наш. Снимаем и берём себе.
-		g.staleLock = owner.describe()
-		if rmErr := os.Remove(path); rmErr != nil {
-			return fmt.Errorf("остался признак сборки от неживого процесса, "+
-				"и его не удалось убрать: %w", rmErr)
-		}
-		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	}
+	f, stale, err := takeLock(g.dir)
 	if err != nil {
-		if os.IsExist(err) {
-			// Кто-то успел занять признак между нашей уборкой и попыткой:
-			// значит, сборка всё-таки идёт.
-			return &LockedError{Path: path}
-		}
 		return err
 	}
-
-	fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
-	g.lock = f
+	g.lock, g.staleLock = f, stale
 	// Под замком писать больше некому — самое время привести в порядок
 	// хвосты журналов, оставленные оборванным прошлым заходом (journal.go).
 	// Не вышло — замок снимается: дописывать в такой граф нельзя.
@@ -811,6 +790,102 @@ func (g *Graph) Lock() error {
 		return err
 	}
 	return nil
+}
+
+// takeLock занимает признак сборки в каталоге графа: файл с номером процесса,
+// созданный с O_EXCL. Признак неживого процесса снимается и занимается заново;
+// stale — что было в снятом признаке. Файл возвращается открытым: Graph.Lock
+// держит его до Unlock, прочие закрывают сразу.
+func takeLock(dir string) (f *os.File, stale string, err error) {
+	path := filepath.Join(dir, lockFile)
+	f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if os.IsExist(err) {
+		// Признак есть — но это ещё не значит, что сборка идёт. Прогон,
+		// убитый по kill -9, при отключении питания или снятый OOM, снять
+		// его за собой не успевает, и без разбора человек получал бы отказ
+		// «сборка графа уже идёт» на пустом месте, без единой подсказки,
+		// что делать. Поэтому смотрим, жив ли записанный процесс.
+		owner := readLock(path)
+		if owner.alive() {
+			return nil, "", &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
+		}
+		// Хозяин мёртв — признак наш. Снимаем и берём себе.
+		stale = owner.describe()
+		if rmErr := os.Remove(path); rmErr != nil {
+			return nil, "", fmt.Errorf("остался признак сборки от неживого процесса, "+
+				"и его не удалось убрать: %w", rmErr)
+		}
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	}
+	if err != nil {
+		if os.IsExist(err) {
+			// Кто-то успел занять признак между нашей уборкой и попыткой:
+			// значит, сборка всё-таки идёт.
+			return nil, "", &LockedError{Path: path}
+		}
+		return nil, "", err
+	}
+	fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+	return f, stale, nil
+}
+
+// OpenForBuild открывает граф для сборки — или заводит, если его ещё нет, —
+// заняв признак сборки ДО чтения журналов. Признак снимается концом Build
+// или закрытием графа.
+//
+// **Зачем замок до открытия.** Открытие живого графа — десятки секунд (41 с,
+// замер 02.09.2026), и всё это время журналы уже открыты на дозапись. Пока
+// сборка открывала граф, чистка (--graph-forget-chunks, уплотнение, перенос
+// номеров книг) успевала подменить журналы: прежние уходили в «.bak-…», новые
+// вставали на место, а сборка потом спокойно брала замок и часами дописывала
+// в переименованные файлы — живой граф молча терял весь заход (аудит
+// 07.10.2026, №9, воспроизведено). А сборка, закончившая заход в то же окно,
+// оставляла бы в памяти устаревший реестр, и новые понятия получили бы уже
+// выданные номера. Под замком подменять и дописывать некому: прочитанное
+// при открытии и есть то, что на диске.
+func OpenForBuild(collDir, name string, chunks int, rules Rules, o CreateOpts) (*Graph, error) {
+	return openForBuild(collDir, name, chunks, rules, o, nil)
+}
+
+// openForBuild — то же с ходом открытия: тесту он нужен, чтобы вмешаться
+// посреди чтения журналов.
+func openForBuild(collDir, name string, chunks int, rules Rules, o CreateOpts, cb func(OpenProgress)) (*Graph, error) {
+	if err := rules.Validate(); err != nil {
+		return nil, err
+	}
+	dir := rules.Dir(collDir)
+	if _, err := os.Stat(filepath.Join(dir, metaFile)); os.IsNotExist(err) {
+		// Графа ещё нет — и подменять в нём нечего. Заводим и занимаем
+		// признак у нового; Lock заодно сверит, что журналы на месте.
+		g, err := CreateKind(collDir, name, chunks, rules, o)
+		if err != nil {
+			return nil, err
+		}
+		if err := g.Lock(); err != nil {
+			g.Close()
+			return nil, err
+		}
+		return g, nil
+	}
+	if err := kb.WaitArchive(collDir, kb.ArchiveWait); err != nil {
+		return nil, err
+	}
+	f, stale, err := takeLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	g, err := openCollection(collDir, chunks, rules, cb)
+	if err != nil {
+		f.Close()
+		os.Remove(filepath.Join(dir, lockFile))
+		return nil, err
+	}
+	g.lock, g.staleLock = f, stale
+	if err := g.prepareJournals(); err != nil {
+		g.Close()
+		return nil, err
+	}
+	return g, nil
 }
 
 // prepareJournals приводит в порядок хвосты всех журналов перед дозаписью:

@@ -214,27 +214,13 @@ func (g *Graph) DeadEntities() []uint32 {
 // подменяет файлы реестра. Формат и правила — те же, что у Graph.Lock:
 // живой хозяин — отказ, признак от мёртвого процесса снимается.
 func holdBuildLock(dir string) (release func(), err error) {
-	path := filepath.Join(dir, lockFile)
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
-			f.Close()
-			return func() { os.Remove(path) }, nil
-		}
-		if !os.IsExist(err) {
-			return nil, err
-		}
-		owner := readLock(path)
-		if owner.alive() {
-			return nil, &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
-		}
-		if rmErr := os.Remove(path); rmErr != nil {
-			return nil, fmt.Errorf("остался признак сборки от неживого процесса, "+
-				"и его не удалось убрать: %w", rmErr)
-		}
+	f, _, err := takeLock(dir)
+	if err != nil {
+		return nil, err
 	}
-	return nil, &LockedError{Path: path}
+	f.Close()
+	path := filepath.Join(dir, lockFile)
+	return func() { os.Remove(path) }, nil
 }
 
 // lastPerID читает реестр и оставляет последнюю запись на каждый номер.
