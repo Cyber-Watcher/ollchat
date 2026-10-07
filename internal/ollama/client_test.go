@@ -84,3 +84,32 @@ func TestClientReportsUnreachableServer(t *testing.T) {
 		t.Fatalf("недоступный сервер: %v", err)
 	}
 }
+
+// Транспорт собирается из http.DefaultTransport: срок соединения и TLS,
+// прокси из окружения (HTTPS_PROXY, NO_PROXY) и HTTP/2. Прежний пустой
+// http.Transport{} ничего этого не умел. Ожидание заголовков по-прежнему
+// своё у быстрых вызовов и у чата.
+func TestTransportFromDefault(t *testing.T) {
+	c := New("http://ollama.example:11434", 7*time.Second, 9*time.Second, nil)
+	for name, hc := range map[string]*http.Client{"быстрые вызовы": c.http, "чат": c.chatHTTP} {
+		tr, ok := hc.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("%s: транспорт %T", name, hc.Transport)
+		}
+		if tr.Proxy == nil {
+			t.Errorf("%s: прокси из окружения не читается", name)
+		}
+		if tr.DialContext == nil || tr.TLSHandshakeTimeout <= 0 {
+			t.Errorf("%s: нет срока соединения или рукопожатия TLS", name)
+		}
+		if !tr.ForceAttemptHTTP2 {
+			t.Errorf("%s: HTTP/2 выключен", name)
+		}
+	}
+	if got := c.http.Transport.(*http.Transport).ResponseHeaderTimeout; got != 7*time.Second {
+		t.Errorf("ожидание заголовков быстрых вызовов %v, ожидалось 7s", got)
+	}
+	if got := c.chatHTTP.Transport.(*http.Transport).ResponseHeaderTimeout; got != 9*time.Second {
+		t.Errorf("ожидание заголовков чата %v, ожидалось 9s", got)
+	}
+}
