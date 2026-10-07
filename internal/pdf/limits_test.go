@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,6 +80,51 @@ func TestPredictorHostileParams(t *testing.T) {
 	if err != nil || !bytes.Equal(out, []byte{5, 6}) {
 		t.Errorf("неполная строка: %v, %v", out, err)
 	}
+}
+
+// /W с началом −2⁶³: разность end−start переполнялась, проходила проверку
+// длины, и цикл по ширинам шёл около 2⁶³ витков.
+func TestCIDWidthsOverflow(t *testing.T) {
+	doc := docWith("/F1 5 0 R", "BT /F1 12 Tf 72 720 Td <0003> Tj ET",
+		"<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H "+
+			"/DescendantFonts [6 0 R] /ToUnicode 7 0 R >>",
+		"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X "+
+			"/W [-9223372036854775808 0 500 0 9223372036854775807 600 1 [700 800]] >>",
+		stream("", "begincmap\n1 beginbfchar\n<0003> <0414>\nendbfchar\nendcmap"))
+	bounded(t, 5*time.Second, func() {
+		if got := pageText(t, doc); got != "Д" {
+			t.Errorf("получено %q", got)
+		}
+	})
+}
+
+// pageText — текст первой страницы. В отличие от extract годится внутри
+// bounded: ошибку отмечает, но горутину теста не останавливает.
+func pageText(t *testing.T, data []byte) string {
+	t.Helper()
+	res, err := Extract(data, Options{})
+	if err != nil {
+		t.Errorf("извлечение: %v", err)
+		return ""
+	}
+	return res.Pages[0].Text
+}
+
+// Диапазон /ToUnicode, кончающийся на <FFFFFFFF>: счётчик uint32
+// переполнялся, цикл не кончался и набивал таблицу до нехватки памяти.
+// Строка назначения длиннее 512 байт обрезается, как велит спецификация.
+func TestToUnicodeRangeAtTop(t *testing.T) {
+	long := "<" + strings.Repeat("0041", 4000) + ">"
+	doc := docWith("/F1 5 0 R", "BT /F1 12 Tf 72 720 Td <00030004> Tj ET",
+		"<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /ToUnicode 6 0 R >>",
+		stream("", "begincmap\n1 beginbfrange\n<FFFFFFF0> <FFFFFFFF> <0041>\nendbfrange\n"+
+			"2 beginbfchar\n<0003> <0414>\n<0004> "+long+"\nendbfchar\nendcmap"))
+	bounded(t, 5*time.Second, func() {
+		got := pageText(t, doc)
+		if !strings.HasPrefix(got, "Д") || len(got) != len("Д")+maxUniDst/2 {
+			t.Errorf("получено %d байт: %.40q…", len(got), got)
+		}
+	})
 }
 
 // /N объектного потока берётся из файла: до правки под него заранее
