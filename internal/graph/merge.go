@@ -364,22 +364,3 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 
 // Merges отдаёт журнал склеек.
 func (g *Graph) Merges() *Merges { return g.merges }
-
-// removeFile снимает файл из каталога графа. Нужен, чтобы отменить склейку.
-func removeFile(dir, name string) error {
-	err := os.Remove(filepath.Join(dir, name))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// DropMerges снимает все склейки: граф возвращается в прежний вид.
-//
-// Затем граф надо открыть заново — наложение читается при открытии.
-func (g *Graph) DropMerges() error {
-	if g == nil {
-		return nil
-	}
-	return removeFile(g.dir, mergesFile)
-}

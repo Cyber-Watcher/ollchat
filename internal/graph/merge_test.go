@@ -129,7 +129,7 @@ func TestMergeIsRemovable(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeFile(dir, mergesFile); err != nil {
+	if err := os.Remove(filepath.Join(dir, mergesFile)); err != nil {
 		t.Fatal(err)
 	}
 	g2, err := open(dir, Meta{Version: FormatVersion}, Rules{})
