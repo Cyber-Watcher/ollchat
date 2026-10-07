@@ -1130,7 +1130,10 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 			}
 			continue
 		}
-		eds := append(g.Edges().Between(a.ID, b.ID), g.Edges().Between(b.ID, a.ID)...)
+		// Between уже отдаёт связи в обе стороны; второй вызов навстречу до
+		// 07.10.2026 удваивал каждую, и -chains-list печатал вдвое больше
+		// связей каждого типа.
+		eds := g.Edges().Between(a.ID, b.ID)
 		if onlyDocs != nil {
 			kept := eds[:0]
 			for _, ed := range eds {
