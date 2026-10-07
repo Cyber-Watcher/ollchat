@@ -98,6 +98,9 @@ func FuzzExtract(f *testing.F) {
 	for _, seed := range fuzzSeeds() {
 		f.Add(seed)
 	}
+	// Зашифрованная книга: обстрел доходит и до расшифровки строк и картинок.
+	encrypted, _ := encryptedDoc(f)
+	f.Add(encrypted)
 	oldBase, oldPanic := workBase, objectPanic
 	workBase = 64 << 20
 	f.Cleanup(func() { workBase, objectPanic = oldBase, oldPanic })

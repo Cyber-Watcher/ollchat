@@ -100,7 +100,7 @@ func aesSealed(key, data []byte) []byte {
 // encryptedDoc собирает книгу AES-256 (/V 5 /R 6) с пустым паролем
 // пользователя: зашифрованы содержимое, строки /Info, ActualText из раздела
 // Properties и картинка JPEG на всю страницу. Возвращает и сам JPEG.
-func encryptedDoc(t *testing.T) (doc, jpg []byte) {
+func encryptedDoc(t testing.TB) (doc, jpg []byte) {
 	t.Helper()
 	key := bytes.Repeat([]byte{0x42}, 32)
 	valSalt, keySalt := []byte("valsalt1"), []byte("keysalt2")
