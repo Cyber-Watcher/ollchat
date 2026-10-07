@@ -242,13 +242,81 @@ type cliFlags struct {
 	askPerBook            *int
 	askMinCos             *float64
 	askSemW               *float64
+
+	// args — значения командной строки, не относящиеся к ключам: пути книг
+	// у --kb-index и --kb-reindex, всё после «--» у подкоманд. Вместо
+	// flag.Args(): после разбора вперемешку (parseArgs) там лишь хвост.
+	args []string
 }
 
 // parseFlags объявляет и разбирает ключи.
 func parseFlags() *cliFlags {
 	f := parseFlagsNoParse()
-	flag.Parse()
+	// Ошибка разбора до нас не доходит: flag.CommandLine сам печатает её
+	// и завершает процесс с кодом 2, как и прежний flag.Parse.
+	f.args, _ = parseArgs(flag.CommandLine, os.Args[1:])
 	return f
+}
+
+// parseArgs разбирает ключи вперемешку со значениями и возвращает значения.
+//
+// Пакет flag останавливается на первом значении, и всё после него, включая
+// ключи, молча уходит в значения: `--ask q --tools on --json` давал
+// json=false — «on» переключателю не нужно, на нём разбор и встал.
+// Здесь разбор продолжается и за значением. Останавливает его только «--»:
+// за ним идут ключи подкоманды (`--graph-stats books -- -hubs`), и разбирать
+// их — её дело.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var values []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		left := fs.Args()
+		if stoppedAtDashes(fs, args[:len(args)-len(left)]) {
+			return append(values, left...), nil
+		}
+		if len(left) == 0 {
+			return values, nil
+		}
+		values = append(values, left[0])
+		args = left[1:]
+	}
+}
+
+// stoppedAtDashes — разобранная часть кончается разделителем «--», а не
+// значением ключа, которое случайно выглядит так же (`--ask --`).
+func stoppedAtDashes(fs *flag.FlagSet, used []string) bool {
+	for i := 0; i < len(used); i++ {
+		if used[i] == "--" {
+			return i == len(used)-1
+		}
+		if takesValue(fs, used[i]) {
+			i++ // следующее слово — значение этого ключа, каким бы оно ни было
+		}
+	}
+	return false
+}
+
+// takesValue — ключ ждёт значения следующим словом: он не переключатель
+// и записан без «=».
+func takesValue(fs *flag.FlagSet, arg string) bool {
+	name, ok := strings.CutPrefix(arg, "-")
+	if !ok {
+		return false
+	}
+	name = strings.TrimPrefix(name, "-")
+	if name == "" || strings.Contains(name, "=") {
+		return false
+	}
+	fl := fs.Lookup(name)
+	if fl == nil {
+		return false
+	}
+	if b, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+		return false
+	}
+	return true
 }
 
 // parseFlagsNoParse объявляет ключи, но не разбирает командную строку.
@@ -581,7 +649,7 @@ func parseFlagsNoParse() *cliFlags {
 // которые разбирают ключи, не трогая os.Args.
 func parseFlagsWith(args []string) *cliFlags {
 	f := parseFlagsNoParse()
-	_ = flag.CommandLine.Parse(args)
+	f.args, _ = parseArgs(flag.CommandLine, args)
 	return f
 }
 
@@ -651,6 +719,9 @@ const (
 	// cmdDry — понимает --kb-dry-run: показывает, что сделала бы, и ничего
 	// не меняет.
 	cmdDry = 1 << iota
+	// cmdArgs — берёт значения после ключей: пути книг или «-- ключи»
+	// подкоманды.
+	cmdArgs
 )
 
 // cliCommand — команда командной строки: ключ, который её вызывает, и что
@@ -658,7 +729,7 @@ const (
 type cliCommand struct {
 	name string      // ключ, как его пишут: "--kb-index"
 	on   func() bool // запрошена ли команда в этом запуске
-	can  int         // cmdDry
+	can  int         // cmdDry, cmdArgs
 	// ownDry — свой ключ сухого прогона у команды, которая --kb-dry-run
 	// не понимает: его называет отказ, чтобы человеку не искать.
 	ownDry string
@@ -683,9 +754,9 @@ func commands(f *cliFlags) []cliCommand {
 		{name: "--init-config", on: on(f.initConfig)},
 		{name: "--kb-list", on: on(f.kbList)},
 		{name: "--kb-doctor", on: str(f.kbDoctor)},
-		{name: "--kb-index", on: str(f.kbIndex), can: cmdDry},
+		{name: "--kb-index", on: str(f.kbIndex), can: cmdDry | cmdArgs},
 		{name: "--kb-sync", on: str(f.kbSync), can: cmdDry},
-		{name: "--kb-reindex", on: str(f.kbReindex)},
+		{name: "--kb-reindex", on: str(f.kbReindex), can: cmdArgs},
 		{name: "--kb-hash", on: str(f.kbHash)},
 		{name: "--kb-years", on: str(f.kbYears)},
 		{name: "--kb-reanalyze", on: str(f.kbReanalyze), can: cmdDry},
@@ -734,13 +805,13 @@ func commands(f *cliFlags) []cliCommand {
 		{name: "--graph-embed-follow", on: str(f.graphEmbedFollow)},
 		{name: "--graph-recheck", on: str(f.graphRecheck)},
 		{name: "--graph-communities", on: str(f.graphComm)},
-		{name: "--graph-stats", on: str(f.graphStats)},
-		{name: "--doc-probe", on: str(f.docProbe)},
-		{name: "--scan-redact", on: str(f.scanRedact)},
-		{name: "--census", on: str(f.census)},
-		{name: "--probes", on: str(f.probes)},
+		{name: "--graph-stats", on: str(f.graphStats), can: cmdArgs},
+		{name: "--doc-probe", on: str(f.docProbe), can: cmdArgs},
+		{name: "--scan-redact", on: str(f.scanRedact), can: cmdArgs},
+		{name: "--census", on: str(f.census), can: cmdArgs},
+		{name: "--probes", on: str(f.probes), can: cmdArgs},
 		{name: "--graph-status", on: str(f.graphStatus)},
-		{name: "--scan-redact-llm", on: str(f.scanRedactLLM)},
+		{name: "--scan-redact-llm", on: str(f.scanRedactLLM), can: cmdArgs},
 		{name: "--ask", on: str(f.askQ)},
 		{name: "--ask-stdin", on: on(f.askStdin)},
 		{name: "--questions", on: str(f.askFile)},
@@ -784,7 +855,35 @@ func checkCommandLine(f *cliFlags) error {
 	if err := checkOneCommand(f); err != nil {
 		return err
 	}
+	if err := checkArgs(f); err != nil {
+		return err
+	}
 	return checkDryRun(f)
+}
+
+// checkArgs — значения после ключей берут только команды, которым они нужны:
+// пути книг у --kb-index и --kb-reindex, «-- ключи» у подкоманд.
+//
+// Остальным лишнее значение — почти всегда ошибка в строке, и глотать его
+// молча нельзя: `--tools off` включал инструменты (переключатель значения
+// не берёт, «off» уходило в никуда), а `--ask как связаны X и Y` без кавычек
+// спрашивал одно слово «как».
+func checkArgs(f *cliFlags) error {
+	if len(f.args) == 0 {
+		return nil
+	}
+	cmds := requested(f)
+	if len(cmds) == 1 && cmds[0].can&cmdArgs != 0 {
+		return nil
+	}
+	who := "запуск без команды их не берёт"
+	if len(cmds) == 1 {
+		who = cmds[0].name + " их не берёт"
+	}
+	return fmt.Errorf("лишние значения в командной строке: %q — %s.\n"+
+		"  Значение ключа пишется сразу за ним, с пробелами — в кавычках: --ask \"как связаны X и Y\".\n"+
+		"  Ключ-переключатель значения не берёт: --tools включает, --tools=false выключает.",
+		f.args, who)
 }
 
 // checkOneCommand — за один запуск выполняется одна команда.
@@ -870,11 +969,11 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.kbDoctor != "":
 		return true, kmaint.Doctor(os.Stdout, cfg, *f.kbDoctor, *f.kbQuick)
 	case *f.kbIndex != "":
-		return true, kmaint.Index(os.Stdout, cfg, *f.kbIndex, flag.Args(), false, *f.kbDry, *f.kbKeepThin)
+		return true, kmaint.Index(os.Stdout, cfg, *f.kbIndex, f.args, false, *f.kbDry, *f.kbKeepThin)
 	case *f.kbSync != "":
 		return true, kmaint.Index(os.Stdout, cfg, *f.kbSync, nil, true, *f.kbDry, *f.kbKeepThin)
 	case *f.kbReindex != "":
-		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, flag.Args())
+		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, f.args)
 	case *f.kbHash != "":
 		return true, kmaint.Hashes(os.Stdout, cfg, *f.kbHash, *f.kbRecnt)
 	case *f.kbYears != "":
@@ -1034,17 +1133,17 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.graphComm != "":
 		return true, gmaint.Communities(os.Stdout, cfg, *f.graphComm, *f.graphFreshComm, *f.graphCarrySim)
 	case *f.graphStats != "":
-		return true, gstats.Run(os.Stdout, cfg, *f.graphStats, flag.Args())
+		return true, gstats.Run(os.Stdout, cfg, *f.graphStats, f.args)
 	case *f.docProbe != "":
 		// Ни графа, ни коллекции: проба читает один файл, потому cfg не нужен.
-		return true, docprobe.Run(os.Stdout, *f.docProbe, flag.Args())
+		return true, docprobe.Run(os.Stdout, *f.docProbe, f.args)
 	case *f.scanRedact != "":
 		// Как и проба разбора, читает один файл: cfg не нужен.
-		return true, redact.RunCLI(os.Stdout, os.Stderr, *f.scanRedact, flag.Args())
+		return true, redact.RunCLI(os.Stdout, os.Stderr, *f.scanRedact, f.args)
 	case *f.census != "":
-		return true, census.Run(os.Stdout, cfg, *f.census, flag.Args())
+		return true, census.Run(os.Stdout, cfg, *f.census, f.args)
 	case *f.probes != "":
-		return true, probes.Run(os.Stdout, cfg, *f.probes, flag.Args())
+		return true, probes.Run(os.Stdout, cfg, *f.probes, f.args)
 	case *f.graphStatus != "":
 		name := *f.graphStatus
 		if name == "all" || name == "все" {
@@ -1190,7 +1289,7 @@ func run() error {
 	// Обезличивание скана с моделью: нужны сервер, модель, песочница
 	// и правила — и больше ничего из того, что ниже.
 	if *f.scanRedactLLM != "" {
-		return runScanRedactLLM(cfg, srv, model, sandbox, guard, *f.scanRedactLLM, flag.Args())
+		return runScanRedactLLM(cfg, srv, model, sandbox, guard, *f.scanRedactLLM, f.args)
 	}
 
 	// Токен Confluence на сеанс: приходит командой /confluencetoken и главнее
