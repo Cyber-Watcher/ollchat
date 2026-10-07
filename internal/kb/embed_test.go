@@ -860,3 +860,89 @@ func TestCreateVecWriterShrinksMetaBeforeTruncate(t *testing.T) {
 		t.Fatalf("паспорт обещает %d векторов при пустом файле", v.Count())
 	}
 }
+
+// stampedEmbedder — эмбеддер, который знает отпечаток своих весов, как
+// kbembed.Embedder со Stamp.
+type stampedEmbedder struct {
+	*fakeEmbedder
+	digest string
+}
+
+func (s stampedEmbedder) Stamp(context.Context) (string, error) { return s.digest, nil }
+
+// Паспорт векторов хранит отпечаток весов модели, досчёт чужими весами того же
+// имени отклоняется, а паспорт без отпечатка остаётся годным.
+//
+// Граф хранил отпечаток давно, а векторы кусков — нет: после обновления
+// `bge-m3:latest` досчёт хвоста ложился в другое пространство молча.
+func TestEmbedKeepsModelDigest(t *testing.T) {
+	_, coll, books := embedFixture(t)
+	ctx := context.Background()
+	plain := newFakeEmbedder(64)
+
+	// Старый паспорт: эмбеддер отпечатка не знает.
+	if _, err := coll.Embed(ctx, plain, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := coll.VecMeta().Digest; d != "" {
+		t.Fatalf("отпечаток взялся ниоткуда: %q", d)
+	}
+
+	// Досчёт тем, кто отпечаток знает, к старому паспорту допускается
+	// и отпечаток записывает.
+	makeBook(t, books, "more.pdf", longPage("worker pools and pipelines"))
+	if _, err := coll.Sync(ctx, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	a := stampedEmbedder{plain, "sha256:aaaa1111aaaa1111"}
+	if _, err := coll.Embed(ctx, a, EmbedOpts{}, nil); err != nil {
+		t.Fatalf("паспорт без отпечатка отверг досчёт: %v", err)
+	}
+	if d := coll.VecMeta().Digest; d != a.digest {
+		t.Fatalf("в паспорте отпечаток %q, ожидался %q", d, a.digest)
+	}
+
+	// Досчёт другими весами того же имени — отказ, и векторы не тронуты.
+	makeBook(t, books, "tail.pdf", longPage("select statement and timeouts"))
+	if _, err := coll.Sync(ctx, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := coll.VecMeta()
+	b := stampedEmbedder{plain, "sha256:bbbb2222bbbb2222"}
+	if _, err := coll.Embed(ctx, b, EmbedOpts{}, nil); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("досчёт чужими весами не отклонён: %v", err)
+	}
+	if got := coll.VecMeta(); got != before {
+		t.Fatalf("после отказа паспорт изменился: %+v → %+v", before, got)
+	}
+	// Теми же весами — досчитывается.
+	if _, err := coll.Embed(ctx, a, EmbedOpts{}, nil); err != nil {
+		t.Fatalf("досчёт теми же весами: %v", err)
+	}
+	if got := coll.VecMeta(); got.Digest != a.digest || got.Count <= before.Count {
+		t.Fatalf("после досчёта паспорт %+v", got)
+	}
+}
+
+// Уплотнение переносит отпечаток весов вместе с векторами.
+func TestMergeKeepsModelDigest(t *testing.T) {
+	_, coll, books := embedFixture(t)
+	ctx := context.Background()
+	drop := makeBook(t, books, "drop.pdf", longPage("посторонняя тема про садоводство"))
+	if _, err := coll.Sync(ctx, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	emb := stampedEmbedder{newFakeEmbedder(64), "sha256:cccc3333cccc3333"}
+	if _, err := coll.Embed(ctx, emb, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.Forget(drop); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coll.Merge(ctx, MergeOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := coll.VecMeta().Digest; d != emb.digest {
+		t.Fatalf("после уплотнения отпечаток %q, ожидался %q", d, emb.digest)
+	}
+}

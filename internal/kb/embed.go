@@ -225,12 +225,33 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 	if c.vectors != nil && !c.vectors.Meta().Compatible(emb.Model(), dim) {
 		from = 0
 	}
+	// Отпечаток весов снимается до счёта: узнать о чужих весах после того,
+	// как хвост посчитан, значит выбросить его. Досчёт хвоста другими весами
+	// того же имени смешал бы пространства молча — поэтому отказ, как у графа.
+	digest := embedderDigest(ctx, emb)
+	if from > 0 && !c.vectors.Meta().SameWeights(digest) {
+		have := c.vectors.Meta().Digest
+		return res, fmt.Errorf("векторы(смыслы) коллекции %s посчитаны другим файлом модели %s: "+
+			"в паспорте digest %s, у сервера %s.\n"+
+			"Имя то же, веса разные: тег вроде :latest на двух машинах указывает на разные файлы, "+
+			"и векторы, досчитанные вперемешку, лягут в разные углы пространства.\n"+
+			"Взять на сервере те же веса (ollama pull %s@%s) или пересчитать всё: /kb embed %s --recount",
+			c.name, emb.Model(), shortDigest(have), shortDigest(digest), emb.Model(), have, c.name)
+	}
 
 	w, err := CreateVecWriter(c.dir, emb.Model(), dim, from, opt.Header)
 	if err != nil {
 		return res, err
 	}
 	defer w.Close()
+	// В паспорт — отпечаток весов. При досчёте прежний остаётся, если он был:
+	// он про голову файла, а сверка выше уже подтвердила, что веса те же.
+	w.meta.Digest = digest
+	if from > 0 && c.vectors != nil {
+		if have := c.vectors.Meta().Digest; have != "" {
+			w.meta.Digest = have
+		}
+	}
 	// Открытые векторы больше не соответствуют файлу, который мы правим.
 	c.vectors = nil
 
@@ -378,6 +399,37 @@ func (c *Collection) embedTexts(from, to int, header bool) ([]string, error) {
 		out = append(out, b.String())
 	}
 	return out, nil
+}
+
+// embedderDigest снимает отпечаток весов эмбеддера, если тот умеет его дать
+// (kbembed.Embedder.Stamp) и сервер его отдаёт.
+//
+// Ошибку глотаем намеренно: отпечаток — проверка, а не условие работы, и его
+// отсутствие не повод отказываться считать. Пустое значение выключает сверку —
+// так же, как у векторов графа (internal/graph/embed.go).
+func embedderDigest(ctx context.Context, emb Embedder) string {
+	st, ok := emb.(interface {
+		Stamp(context.Context) (string, error)
+	})
+	if !ok {
+		return ""
+	}
+	d, err := st.Stamp(ctx)
+	if err != nil {
+		return ""
+	}
+	return d
+}
+
+// shortDigest укорачивает отпечаток до читаемого вида.
+func shortDigest(d string) string {
+	if d == "" {
+		return "(нет)"
+	}
+	if len(d) > 12 {
+		return d[:12]
+	}
+	return d
 }
 
 // bookByID ищет книгу по её номеру, не беря замок: вызывается под ним.
