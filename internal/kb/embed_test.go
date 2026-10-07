@@ -5,8 +5,10 @@ import (
 	"errors"
 	"hash/fnv"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -645,6 +647,52 @@ func TestMergeMovesVectors(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("после уплотнения смысловой поиск перестал находить нужную книгу")
+	}
+}
+
+// Верхушка по смыслу, собранная кучей в каждом потоке, совпадает с полной
+// сортировкой всех кусков: та же выдача, только без сортировки десятков тысяч
+// кусков ради двухсот. Куски с равным косинусом есть нарочно — порядок
+// при равенстве (меньший номер выше) не должен зависеть от потоков.
+func TestSearchVectorsTopKMatchesFullSort(t *testing.T) {
+	const n, dim = 9000, 16 // больше 2048 — счёт идёт в несколько потоков
+	rng := rand.New(rand.NewSource(7))
+	c := &Collection{
+		store:   &Store{recs: make([]ChunkRec, n)},
+		vectors: &Vectors{meta: VecMeta{Magic: vecMagic, Dim: dim, Count: n}, data: make([]int8, n*dim)},
+	}
+	for i := 0; i < n; i++ {
+		c.store.recs[i].Doc = uint32(i%7 + 1)
+		for d := 0; d < dim; d++ {
+			c.vectors.data[i*dim+d] = int8(rng.Intn(9) - 4) // мало значений — много равенств
+		}
+	}
+	query := make([]int8, dim)
+	for d := range query {
+		query[d] = int8(rng.Intn(9) - 4)
+	}
+	allow := map[uint32]bool{1: true, 2: true, 3: true, 5: true}
+
+	var want []Hit
+	for i := 0; i < n; i++ {
+		if !allow[c.store.recs[i].Doc] {
+			continue
+		}
+		if cos := Cosine(c.vectors.At(i), query); cos >= -0.05 {
+			want = append(want, Hit{Chunk: i, Score: cos})
+		}
+	}
+	sort.Slice(want, func(a, b int) bool { return betterHit(want[a], want[b]) })
+	want = want[:200]
+
+	got := c.searchVectors(query, 200, allow, -0.05)
+	if len(got) != len(want) {
+		t.Fatalf("попаданий %d, ожидалось %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("место %d: %+v, при полной сортировке %+v", i, got[i], want[i])
+		}
 	}
 }
 
