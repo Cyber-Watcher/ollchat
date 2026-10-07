@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -96,13 +97,33 @@ type KnownBook struct {
 	Chunks int
 }
 
+// ErrBooksMoved — нумерация книг коллекции сменилась после того, как граф
+// записал свою карту книг: граф ещё ссылается на прежние номера, и сперва его
+// надо перенести (--graph-rebase-books).
+var ErrBooksMoved = errors.New("нумерация книг коллекции сменилась")
+
 // RecordBooks дописывает в карту нынешние книги коллекции. Прежние записи
 // о номерах, которых в списке нет (книга удалена из коллекции), остаются:
 // граф на них ещё ссылается.
+//
+// **Сменившуюся нумерацию карта не принимает.** Карту пишет конец каждого
+// захода сборки. Переиндексировали коллекцию, а сборку запустили раньше
+// --graph-rebase-books, — и до 07.10.2026 карта молча переписывалась новыми
+// номерами: прежний номер книги, на который ссылаются журналы графа,
+// забывался, и перенести граф становилось нечем (аудит, 4.5). Теперь
+// в таком случае карта не трогается вовсе, а ошибка говорит, что делать.
 func RecordBooks(dir string, books []KnownBook) (int, error) {
 	m, err := loadBookMap(dir)
 	if err != nil {
 		return 0, err
+	}
+	if len(m.Books) > 0 {
+		if st := planRebase(m, books); st.Moved > 0 {
+			mv := st.SortedMoves()[0]
+			return 0, fmt.Errorf("%w после прошлой записи карты (переехало книг: %d, например %d → %d): "+
+				"карта книг графа не перезаписана, иначе граф забыл бы прежние номера; "+
+				"перенесите граф: ollchat --graph-rebase-books <коллекция>", ErrBooksMoved, st.Moved, mv[0], mv[1])
+		}
 	}
 	n := 0
 	for _, b := range books {
@@ -135,25 +156,27 @@ type RebaseStats struct {
 	Collision string // почему переносить нельзя
 }
 
-// RebaseBooks переносит граф на нумерацию books.
-func RebaseBooks(dir string, books []KnownBook, dry bool) (RebaseStats, error) {
-	st := RebaseStats{Moves: map[uint32]uint32{}, Files: map[string]int{}}
-	m, err := loadBookMap(dir)
-	if err != nil {
-		return st, err
-	}
-	st.Mapped = len(m.Books)
-	if st.Mapped == 0 {
-		return st, fmt.Errorf("у графа нет карты книг (%s): она пишется в конце захода сборки — "+
-			"пока нумерация не менялась, снимите её командой --graph-record-books", booksFile)
-	}
+// planRebase сопоставляет карту книг графа с нынешними книгами коллекции:
+// какие номера на месте, какие переехали, каких книг больше нет. Ничего
+// не пишет.
+func planRebase(m BookMap, books []KnownBook) RebaseStats {
+	st := RebaseStats{Moves: map[uint32]uint32{}, Files: map[string]int{}, Mapped: len(m.Books)}
 	byHash := map[string]KnownBook{}
+	byID := map[uint32]KnownBook{}
 	for _, b := range books {
 		if b.Hash != "" {
 			byHash[b.Hash] = b
+			byID[b.ID] = b
 		}
 	}
 	for id, k := range m.Books {
+		// Книга на своём номере — на месте, даже если такой же файл лежит
+		// в коллекции ещё раз под другим номером: копия одного файла в двух
+		// каталогах иначе выглядела бы переездом.
+		if cur, ok := byID[id]; ok && cur.Hash == k.Hash {
+			st.Same++
+			continue
+		}
 		now, ok := byHash[k.Hash]
 		switch {
 		case !ok:
@@ -167,26 +190,39 @@ func RebaseBooks(dir string, books []KnownBook, dry bool) (RebaseStats, error) {
 			st.Moves[id] = now.ID
 		}
 	}
-	if st.Moved == 0 {
-		return st, nil
-	}
 	// Два прежних номера не могут вести в один новый; новый номер не может
 	// совпасть с прежним номером книги, которая никуда не переезжает.
 	target := map[uint32]uint32{}
-	for from, to := range st.Moves {
+	for _, mv := range st.SortedMoves() {
+		from, to := mv[0], mv[1]
 		if other, dup := target[to]; dup {
-			st.Collision = fmt.Sprintf("книги %d и %d обе ведут в номер %d", from, other, to)
-			return st, nil
+			st.Collision = fmt.Sprintf("книги %d и %d обе ведут в номер %d", other, from, to)
+			return st
 		}
 		target[to] = from
 		if _, stays := m.Books[to]; stays {
 			if _, moves := st.Moves[to]; !moves {
 				st.Collision = fmt.Sprintf("новый номер %d книги %d занят книгой, которая остаётся на месте", to, from)
-				return st, nil
+				return st
 			}
 		}
 	}
-	if dry {
+	return st
+}
+
+// RebaseBooks переносит граф на нумерацию books.
+func RebaseBooks(dir string, books []KnownBook, dry bool) (RebaseStats, error) {
+	m, err := loadBookMap(dir)
+	if err != nil {
+		return RebaseStats{Moves: map[uint32]uint32{}, Files: map[string]int{}}, err
+	}
+	if len(m.Books) == 0 {
+		return RebaseStats{Moves: map[uint32]uint32{}, Files: map[string]int{}},
+			fmt.Errorf("у графа нет карты книг (%s): она пишется в конце захода сборки — "+
+				"пока нумерация не менялась, снимите её командой --graph-record-books", booksFile)
+	}
+	st := planRebase(m, books)
+	if st.Moved == 0 || st.Collision != "" || dry {
 		return st, nil
 	}
 

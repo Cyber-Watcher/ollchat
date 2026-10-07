@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -127,5 +128,59 @@ func TestRebaseBooksRefusesCollisions(t *testing.T) {
 	st, err = RebaseBooks(dir, []KnownBook{{9, "h1", "", 12}, {2, "h2", "", 5}}, true)
 	if err != nil || st.Moved != 0 || st.Reread != 1 || st.Same != 1 {
 		t.Fatalf("перечитанная книга: %+v %v", st, err)
+	}
+}
+
+// Сменившуюся нумерацию книг карта графа не принимает: заход сборки,
+// запущенный раньше --graph-rebase-books, переписал бы её новыми номерами,
+// и прежние номера, на которые ссылаются журналы, были бы забыты
+// (аудит 07.10.2026, 4.5).
+func TestRecordBooksRefusesMovedNumbering(t *testing.T) {
+	g := newGraphWith(t, "a")
+	dir := g.dir
+	must(t, g.Close())
+	if _, err := RecordBooks(dir, []KnownBook{{1, "h1", "a.pdf", 5}, {2, "h2", "b.pdf", 5}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, booksFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	swapped := []KnownBook{{1, "h2", "b.pdf", 5}, {2, "h1", "a.pdf", 5}}
+	if _, err := RecordBooks(dir, swapped); !errors.Is(err, ErrBooksMoved) {
+		t.Fatalf("карта при сменившейся нумерации: %v, ожидался ErrBooksMoved", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, booksFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("карта книг перезаписана при сменившейся нумерации")
+	}
+	// Перенос по сохранённой карте возможен, и после него карта снова пишется.
+	if st, err := RebaseBooks(dir, swapped, false); err != nil || !st.Applied || st.Moved != 2 {
+		t.Fatalf("перенос: %+v %v", st, err)
+	}
+	if _, err := RecordBooks(dir, swapped); err != nil {
+		t.Fatalf("после переноса карта не пишется: %v", err)
+	}
+}
+
+// Копия одного файла под двумя номерами — не переезд: обе книги на своих
+// местах, и карта их записывает, а перенос ничего не трогает.
+func TestRecordBooksAcceptsDuplicateFiles(t *testing.T) {
+	g := newGraphWith(t, "a")
+	dir := g.dir
+	must(t, g.Close())
+	books := []KnownBook{{3, "h", "a.pdf", 5}, {7, "h", "copy/a.pdf", 5}}
+	if _, err := RecordBooks(dir, books); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordBooks(dir, books); err != nil {
+		t.Fatalf("повторная запись карты с копией файла: %v", err)
+	}
+	if st, err := RebaseBooks(dir, books, true); err != nil || st.Moved != 0 || st.Collision != "" {
+		t.Fatalf("копия файла принята за переезд: %+v %v", st, err)
 	}
 }
