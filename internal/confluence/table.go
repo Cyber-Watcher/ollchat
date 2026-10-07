@@ -109,16 +109,39 @@ func cellText(cell *node, c ctx) string {
 	return strings.TrimSpace(s)
 }
 
-// tidy убирает следы перевода: тройные пустые строки, пробелы в конце строк.
-// collapseSpaces схлопывает пробелы в строках и тройные пустые строки.
+// collapseSpaces убирает следы перевода — лишние пробелы в строках, пробелы
+// в конце строк, больше одной пустой строки подряд — везде, кроме блоков кода.
+//
+// Внутри ``` пробел — это смысл: отступ задаёт вложенность в Python
+// и структуру в YAML, пустые строки — часть примера. Раньше схлопывание шло
+// по всем строкам подряд, и код со страницы доезжал с отступом в один пробел,
+// то есть уже другой программой, — вопреки обещанию «побайтово» (markdown.go).
+// Ограждения блоков ставит сам перевод (render, renderMacro): открывающее
+// начинается с ```, закрывающее — ровно ```.
 func collapseSpaces(s string) string {
 	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimRight(reSpaces.ReplaceAllString(l, " "), " ")
+	out := make([]string, 0, len(lines))
+	inCode, blank := false, 0
+	for _, l := range lines {
+		if inCode {
+			out = append(out, l)
+			if strings.TrimRight(l, " \t") == "```" {
+				inCode = false
+			}
+			continue
+		}
+		l = strings.TrimRight(reSpaces.ReplaceAllString(l, " "), " ")
+		if l == "" {
+			if blank++; blank > 1 {
+				continue
+			}
+		} else {
+			blank = 0
+		}
+		out = append(out, l)
+		if strings.HasPrefix(l, "```") {
+			inCode = true
+		}
 	}
-	s = strings.Join(lines, "\n")
-	for strings.Contains(s, "\n\n\n") {
-		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
-	}
-	return strings.TrimSpace(s) + "\n"
+	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
 }
