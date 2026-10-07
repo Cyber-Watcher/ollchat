@@ -147,7 +147,24 @@ func padRunes(s string, w int) string {
 
 // ── Открытие списков ─────────────────────────────────────────────────────────
 
+// confirmPending не даёт открыть список поверх ждущего подтверждения.
+//
+// Клавиши в это время достаются окну подтверждения, а на экране был бы
+// список: Enter «выбрать» одобрял бы скрытую команду (аудит 07.10.2026,
+// находка 4). Проверка здесь, а не у клавиш: список моделей приходит
+// с сервера в фоне и открывался бы сам, посреди вопроса.
+func (m *Model) confirmPending() bool {
+	if m.confirm == nil {
+		return false
+	}
+	m.statusMsg = "сначала ответьте на запрос подтверждения"
+	return true
+}
+
 func (m *Model) openServerPicker() tea.Cmd {
+	if m.confirmPending() {
+		return nil
+	}
 	items := make([]pickerItem, 0, len(m.cfg.Servers))
 	for i := range m.cfg.Servers {
 		s := &m.cfg.Servers[i]
@@ -163,6 +180,9 @@ func (m *Model) openServerPicker() tea.Cmd {
 }
 
 func (m *Model) openModelPicker() tea.Cmd {
+	if m.confirmPending() {
+		return nil
+	}
 	// Список к этому моменту уже обновлён с сервера, поэтому пусто здесь
 	// означает именно отсутствие моделей, а не незавершённую загрузку.
 	if len(m.models) == 0 {
@@ -200,6 +220,9 @@ func (m *Model) openModelPicker() tea.Cmd {
 }
 
 func (m *Model) openSessionPicker() tea.Cmd {
+	if m.confirmPending() {
+		return nil
+	}
 	list, err := m.store.List()
 	if err != nil {
 		return func() tea.Msg { return errorMsg{err: err} }

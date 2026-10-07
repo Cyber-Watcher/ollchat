@@ -134,6 +134,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleImagePasted(msg)
 		return m, nil
 
+	case confirmQuietMsg:
+		return m, m.onConfirmQuiet(msg)
+
 	case answerCopiedMsg:
 		return m, m.handleAnswerCopied(msg)
 
@@ -194,7 +197,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Пока открыт список выбора или панель подтверждения, вводить некуда: там ждут
 // ответа одной клавишей, и вставка целого абзаца только запутала бы.
 func (m *Model) handlePaste(msg tea.PasteMsg) tea.Cmd {
-	if m.picker != nil || m.confirm != nil {
+	// Вставка при открытом окне подтверждения — верный признак, что окна
+	// не заметили и пишут вопрос: следующий Enter не должен стать «да».
+	if m.confirm != nil {
+		return m.armConfirm()
+	}
+	if m.picker != nil {
 		return nil
 	}
 	// Вставка в окно сохранения — это имя файла, а не текст вопроса: путь
@@ -686,6 +694,11 @@ func (m *Model) handleCmdMenuKey(key string) (tea.Cmd, bool) {
 
 // handleConfirmKey обрабатывает ответ на запрос подтверждения.
 func (m *Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
+	// Пока клавиатура не помолчала, нажатие — продолжение набора, а не ответ:
+	// отбрасываем его и начинаем отсчёт тишины заново (confirmguard.go).
+	if m.confirmTyping() {
+		return m, m.armConfirm()
+	}
 	// Русские буквы — те, что находятся на тех же клавишах: пользователь может
 	// не переключать раскладку. Плюс «д»/«н» как первые буквы да/нет.
 	answer := agent.AnswerNo
@@ -707,12 +720,15 @@ func (m *Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 		m.confirmScroll++
 		return m, nil
 	default:
-		return m, nil
+		// Клавиша окну ничего не говорит — человек печатает вопрос и окна
+		// не заметил. Следующая буква его слова не должна стать ответом.
+		return m, m.armConfirm()
 	}
 
 	req := m.confirm
 	m.confirm = nil
 	m.confirmScroll = 0
+	m.confirmArmed = false
 	if m.ready {
 		m.vp.SetHeight(m.viewportHeight())
 		m.refreshViewport(true)
@@ -776,13 +792,20 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 		return nil
 
 	case agent.EventToolConfirm:
+		// Клавиши достаются окну подтверждения раньше всех, значит, и на
+		// экране обязано быть оно. Список выбора и окно сохранения рисуются
+		// вместо него: человек открыл Ctrl+S посреди хода, видел список
+		// серверов, а его Enter одобрял скрытый bash(rm -rf build) (аудит
+		// 07.10.2026, находка 4). Всё, что заслоняет окно, закрывается;
+		// подсказки над строкой ввода тоже — они откроются снова с набором.
+		if m.picker != nil || m.savePDF != nil {
+			m.statusMsg = "модель ждёт подтверждения — открытое окно закрыто"
+		}
+		m.picker, m.savePDF, m.files, m.cmds = nil, nil, nil, nil
 		m.confirm = ev.Confirm
 		m.confirmScroll = 0
-		if m.ready {
-			m.vp.SetHeight(m.viewportHeight())
-			m.refreshViewport(true)
-		}
-		return nil
+		m.confirmArmed = false
+		return m.armConfirm()
 
 	case agent.EventToolResult:
 		status := "ok"

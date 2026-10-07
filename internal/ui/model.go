@@ -168,6 +168,15 @@ type Model struct {
 	// Подтверждение действия.
 	confirm       *agent.ConfirmRequest
 	confirmScroll int
+	// confirmArmed — окно ещё не слушает клавиши: клавиатура не помолчала
+	// confirmQuiet с confirmQuietAt. Защита от упреждающего набора,
+	// подробности — в confirmguard.go. confirmSeq отличает последний взвод.
+	confirmArmed   bool
+	confirmQuietAt time.Time
+	confirmSeq     int
+
+	// clock — часы интерфейса; nil — настоящие. Подменяются в тестах.
+	clock func() time.Time
 
 	// pending — картинки, вставленные в ещё не отправленный вопрос.
 	// Живут до отправки: в сообщение попадут только те, чьи метки остались
@@ -966,6 +975,7 @@ func (m *Model) stopStreaming() {
 	m.events = nil
 	m.confirm = nil
 	m.confirmScroll = 0
+	m.confirmArmed = false
 
 	// Обмен могли прервать, пока считалось подмешивание: ответ команды придёт,
 	// но относиться будет к брошенному вопросу. Отделяем его поколением, а
