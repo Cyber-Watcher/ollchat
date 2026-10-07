@@ -2125,7 +2125,7 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 	if minCosSame > 0 {
 		fmt.Fprintf(stdout, ", для пар внутри одного языка порог %.2f", minCosSame)
 	}
-	fmt.Fprintf(stdout, ": пар к склейке %d\n", len(pairs))
+	fmt.Fprintf(stdout, ": пар по уровню %d\n", len(pairs))
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -2140,9 +2140,17 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 			Alias: p.alias, Why: p.why, Level: level,
 		})
 	}
+	// Сколько журнал примет на деле: уже склеенное и встречное Add отбрасывает
+	// молча, и сухой прогон, называвший число пар разбора, обещал больше,
+	// чем делалось.
+	plan := planMerges(g.Merges().Records(), recs)
+	if plan.done+plan.opposite+plan.invalid > 0 {
+		fmt.Fprintf(stdout, "  из них уже склеено %d, встречных к прежним склейкам %d, без пары %d — их журнал не примет\n",
+			plan.done, plan.opposite, plan.invalid)
+	}
 	if dry {
-		fmt.Fprintln(stdout, "сухой прогон: ничего не записано. Примеры:")
-		for i, r := range recs {
+		fmt.Fprintf(stdout, "сухой прогон: ничего не записано; записалось бы решений %d. Примеры:\n", len(plan.fresh))
+		for i, r := range plan.fresh {
 			if i >= 15 {
 				break
 			}
@@ -2166,15 +2174,87 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 	}
 	defer g.Unlock()
 
-	before := g.Entities().Live()
+	before := len(g.Entities().Live())
 	n, err := g.Merges().Add(recs)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "записано решений: %d\n", n)
-	fmt.Fprintf(stdout, "понятий было %d, стало %d\n", len(before), len(before)-n)
+	fmt.Fprintf(stdout, "понятий было %d, стало %d\n", before, len(g.Entities().Live()))
 	fmt.Fprintln(stdout, "снять всё: ollchat --graph-merge "+name+" --graph-merge-drop")
 	return nil
+}
+
+// mergePlan — что из решений журнал склеек примет, а что отбросит.
+type mergePlan struct {
+	fresh    []graph.MergeRec // будет записано
+	done     int              // поглощённое уже склеено (в журнале или раньше в той же пачке)
+	opposite int              // встречная: выживший уже поглощён этим понятием
+	invalid  int              // нулевой номер или склейка понятия с самим собой
+}
+
+// planMerges повторяет отбор graph.Merges.Add по снимку журнала, ничего
+// не записывая: сухому прогону нужно настоящее число, а Add сухого режима
+// не имеет. Повтор сверяется с самим Add на случайных журналах
+// (TestPlanMergesAgreesWithAdd) — разойдутся, тест скажет.
+//
+// Разрешение номеров — как у Merges.rebuild: последняя запись о номере
+// побеждает, цепочки сжимаются обходом по возрастанию номера; встречная
+// склейка ищется по сжатым цепочкам — так же, как это делает Add.
+func planMerges(journal, recs []graph.MergeRec) mergePlan {
+	to := make(map[uint32]uint32, len(journal)+len(recs))
+	for _, r := range journal {
+		to[r.From] = r.To
+	}
+	ids := make([]uint32, 0, len(to))
+	for id := range to {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		seen := map[uint32]bool{id: true}
+		cur := to[id]
+		for {
+			next, ok := to[cur]
+			if !ok || seen[cur] {
+				break
+			}
+			seen[cur] = true
+			cur = next
+		}
+		to[id] = cur
+	}
+	leadsTo := func(id, target uint32) bool {
+		seen := map[uint32]bool{}
+		for !seen[id] {
+			if id == target {
+				return true
+			}
+			seen[id] = true
+			next, ok := to[id]
+			if !ok {
+				return false
+			}
+			id = next
+		}
+		return false
+	}
+
+	var p mergePlan
+	for _, r := range recs {
+		switch _, done := to[r.From]; {
+		case r.From == 0 || r.To == 0 || r.From == r.To:
+			p.invalid++
+		case done:
+			p.done++
+		case leadsTo(r.To, r.From):
+			p.opposite++
+		default:
+			p.fresh = append(p.fresh, r)
+			to[r.From] = r.To
+		}
+	}
+	return p
 }
 
 // mergesJournal — журнал склеек в каталоге графа (graph/merge.go).
