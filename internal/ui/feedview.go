@@ -121,7 +121,6 @@ func (v feedView) GetContent() string { return strings.Join(v.lines, "\n") }
 
 func (v feedView) Height() int      { return v.height }
 func (v *feedView) SetHeight(h int) { v.height = h }
-func (v feedView) Width() int       { return v.width }
 func (v *feedView) SetWidth(w int)  { v.width = w }
 
 func (v feedView) YOffset() int        { return v.yOffset }
