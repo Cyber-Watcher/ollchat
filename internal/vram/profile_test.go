@@ -1,6 +1,7 @@
 package vram
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,5 +102,31 @@ func TestProfileWithoutFormatIsOutdated(t *testing.T) {
 func TestLoadProfileReportsMissingFile(t *testing.T) {
 	if _, err := LoadProfile(filepath.Join(t.TempDir(), "нет.json")); err == nil {
 		t.Error("отсутствие файла должно быть ошибкой — вызывающий сам решит, страшно ли это")
+	}
+}
+
+// Профиль подменяется целиком, а не переписывается на месте: тот, кто открыл
+// прежний файл, дочитывает прежний. Запись на месте сначала обрезала файл,
+// и оборванная запись оставляла вместо замеров пустоту.
+func TestWriteProfileReplacesWhole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "olldiag-profile.json")
+	if err := WriteProfile(path, Profile{Format: ProfileFormat, Host: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := WriteProfile(path, Profile{Format: ProfileFormat, Host: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	var old Profile
+	if err := json.NewDecoder(f).Decode(&old); err != nil || old.Host != "old" {
+		t.Errorf("открытый прежде файл переписан на месте: host=%q, ошибка %v", old.Host, err)
+	}
+	cur, err := LoadProfile(path)
+	if err != nil || cur.Host != "new" {
+		t.Errorf("новый профиль не читается: %v", err)
 	}
 }
