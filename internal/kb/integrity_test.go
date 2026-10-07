@@ -2,6 +2,7 @@ package kb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,6 +239,66 @@ func TestTornTailAfterMergeRolledBack(t *testing.T) {
 	}
 	if got, want := coll.ChunkCount(), before+int(res.Chunks); got != want {
 		t.Fatalf("кусков %d, ожидалось %d", got, want)
+	}
+}
+
+// Прерванная переиндексация не теряет книгу.
+//
+// Reindex помечал книгу удалённой до доливки, и Esc, занятый замок или сбой
+// посреди неё оставляли книгу удалённой навсегда: запись реестра цела, файл
+// не менялся — и сверка её больше не трогала.
+func TestReindexInterruptedKeepsBook(t *testing.T) {
+	_, coll, books := syncFixture(t)
+	guide := filepath.Join(books, "guide.pdf")
+	oldID := bookID(t, coll, "guide.pdf")
+
+	// Esc до начала работы.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := coll.Reindex(ctx, []string{guide}, IndexOpts{}, nil); err != nil {
+		t.Fatalf("прерванная переиндексация вернула ошибку: %v", err)
+	}
+	if !found(t, coll, "alphaversion") || coll.isDeleted(oldID) {
+		t.Fatal("после Esc книга пропала из выдачи")
+	}
+
+	// Коллекцию держит другой живой процесс: доливка не начнётся вовсе.
+	lock := filepath.Join(coll.Dir(), lockMark)
+	foreign := []byte(fmt.Sprintf("%d %s\n", os.Getppid(), time.Now().Format(time.RFC3339)))
+	if err := os.WriteFile(lock, foreign, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coll.Reindex(context.Background(), []string{guide}, IndexOpts{}, nil); err == nil {
+		t.Fatal("переиндексация прошла под чужим замком")
+	}
+	if !found(t, coll, "alphaversion") || coll.isDeleted(oldID) {
+		t.Fatal("после отказа по замку книга пропала из выдачи")
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+
+	// Дошедшая до конца — заменяет: новый номер жив, прежний удалён.
+	res, err := coll.Reindex(context.Background(), []string{guide}, IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Added != 1 {
+		t.Fatalf("перечитано книг %d, ожидалась одна", res.Added)
+	}
+	newID := bookID(t, coll, "guide.pdf")
+	if newID == oldID || !coll.isDeleted(oldID) || coll.isDeleted(newID) {
+		t.Fatalf("после переиндексации номера: прежний %d (удалён %v), новый %d (удалён %v)",
+			oldID, coll.isDeleted(oldID), newID, coll.isDeleted(newID))
+	}
+	hits, err := coll.Search("alphaversion", DefaultSearchOpts())
+	if err != nil || len(hits) == 0 {
+		t.Fatalf("перечитанная книга не находится: %v", err)
+	}
+	for _, h := range hits {
+		if !strings.HasPrefix(h.ID, fmt.Sprintf("docs/%d#", newID)) {
+			t.Fatalf("в выдаче кусок прежней версии %s", h.ID)
+		}
 	}
 }
 

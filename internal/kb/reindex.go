@@ -23,8 +23,14 @@ import (
 
 // Reindex перечитывает названные книги заново.
 //
-// paths — файлы или каталоги внутри разрешённых корней. Прежние записи о них
-// помечаются удалёнными, затем книги индексируются как новые.
+// paths — файлы или каталоги внутри разрешённых корней. Книги индексируются
+// как новые, а прежний номер каждой помечается удалённым уже после того,
+// как её новая версия записана (extract, как и при сверке изменённого файла).
+//
+// **Не раньше.** До 07.10.2026 прежние записи помечались удалёнными до
+// доливки: Esc, занятый замок или сбой посреди неё оставляли книгу удалённой
+// навсегда — запись реестра цела, файл не менялся, и сверка её больше
+// не трогала.
 func (c *Collection) Reindex(ctx context.Context, paths []string, opt IndexOpts,
 	report func(Progress)) (IndexResult, error) {
 	defer c.restamp() // запись своей же коллекции не должна выглядеть чужой
@@ -35,11 +41,6 @@ func (c *Collection) Reindex(ctx context.Context, paths []string, opt IndexOpts,
 	}
 	if len(targets) == 0 {
 		return IndexResult{}, fmt.Errorf("в коллекции %s нет книг по этим путям", c.name)
-	}
-	for _, path := range targets {
-		if err := c.Forget(path); err != nil {
-			return IndexResult{}, err
-		}
 	}
 	opt.Force = true
 	return c.Add(ctx, targets, opt, report)

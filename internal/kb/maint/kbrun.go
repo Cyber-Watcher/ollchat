@@ -941,8 +941,15 @@ func Reindex(stdout io.Writer, cfg *config.Config, name string, paths []string) 
 	if res.Scans+res.Errors > 0 {
 		fmt.Fprintf(stdout, "  сканов %d, со сбоями %d\n", res.Scans, res.Errors)
 	}
-	fmt.Fprintln(stdout, "  прежние куски этих книг помечены удалёнными; место освободит /kb merge,")
-	fmt.Fprintln(stdout, "  но его нельзя запускать, пока по коллекции собран граф понятий")
+	// Прежняя версия помечается удалённой только у перечитанной книги:
+	// прерванная работа оставляет остальные как были (kb.Reindex).
+	if res.Canceled {
+		fmt.Fprintln(stdout, "  работа прервана: книги, до которых не дошло, остались в прежнем виде")
+	}
+	if res.Added > 0 {
+		fmt.Fprintln(stdout, "  прежние куски перечитанных книг помечены удалёнными; место освободит /kb merge,")
+		fmt.Fprintln(stdout, "  но его нельзя запускать, пока по коллекции собран граф понятий")
+	}
 	return nil
 }
 
