@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -434,6 +435,59 @@ func TestObjectRegionKeepsStreams(t *testing.T) {
 	if !ok || !bytes.Contains(s.Raw, []byte("ложный заголовок")) {
 		t.Fatalf("поток обрезан по чужому заголовку: %#v", d.object(4))
 	}
+}
+
+// /Length 2⁶³−1: сумма начала потока и длины переполнялась, срез ронял
+// разбор, и весь документ объявлялся повреждённым из-за одного потока.
+func TestHugeLengthNotFatal(t *testing.T) {
+	doc := build(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		"<< /Length 9223372036854775807 >>\nstream\nBT /F1 12 Tf 72 720 Td (survived) Tj ET\nendstream",
+		helvetica)
+	if got := extract(t, doc); got != "survived" {
+		t.Fatalf("получено %q", got)
+	}
+}
+
+// Сбой разбора одного объекта делает нечитаемым только его, а не документ.
+func TestObjectPanicStaysLocal(t *testing.T) {
+	data := []byte("%PDF-1.7\n2 0 obj\n(второй)\nendobj\n")
+	d := &Document{
+		data: data, offsets: map[int]int{1: -5, 2: 9}, heads: []int{9}, ends: []int{},
+		cache: map[int]Object{}, loading: map[int]bool{},
+	}
+	if obj := d.object(1); obj != nil {
+		t.Errorf("объект со сбоем разбора: %#v", obj)
+	}
+	if s, ok := d.object(2).(String); !ok || string(s) != "второй" {
+		t.Errorf("соседний объект: %#v", d.object(2))
+	}
+}
+
+// Цепочка потоков, где /Length каждого — ссылка на следующий: разбор
+// вкладывался на всю длину цепочки и исчерпывал стек — фатально, без recover.
+func TestLengthChainDoesNotExhaustStack(t *testing.T) {
+	old := debug.SetMaxStack(64 << 20)
+	t.Cleanup(func() { debug.SetMaxStack(old) })
+	const n = 100000
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "%d 0 obj\n<< /Length %d 0 R >>\nstream\nx\nendstream\nendobj\n", i, i+1)
+	}
+	fmt.Fprintf(&b, "%d 0 obj\n1\nendobj\ntrailer\n<< /Root 1 0 R >>\n", n+1)
+	bounded(t, 20*time.Second, func() {
+		d, err := Open(b.Bytes())
+		if err != nil {
+			t.Errorf("открытие: %v", err)
+			return
+		}
+		if s, ok := d.object(1).(*Stream); !ok || string(s.Raw) != "x" {
+			t.Errorf("первый поток: %#v", d.object(1))
+		}
+	})
 }
 
 // /N объектного потока берётся из файла: до правки под него заранее

@@ -570,7 +570,10 @@ func (p *parser) maybeStream(d Dict) (Object, string, bool, error) {
 	}
 
 	end := -1
-	if length >= 0 && start+length <= len(b) {
+	// Сравнение без сложения: при /Length 2⁶³−1 сумма start+length
+	// переполнялась в отрицательную, проходила проверку, и срез ниже
+	// ронял разбор.
+	if length >= 0 && length <= len(b)-start {
 		// Доверяем /Length, только если сразу за данными действительно endstream:
 		// он обязан начаться в первых четырёх байтах хвоста, дальше не смотрим.
 		tail := b[start+length:]

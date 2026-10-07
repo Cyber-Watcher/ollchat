@@ -332,17 +332,36 @@ func (d *Document) allObjectNumbers() []int {
 }
 
 // object читает объект по номеру, разбирая его при первом обращении.
-func (d *Document) object(num int) Object {
+func (d *Document) object(num int) (result Object) {
 	if obj, ok := d.cache[num]; ok {
 		return obj
 	}
 	if d.loading[num] {
 		return nil // ссылка на самого себя
 	}
+	// Разбор объекта вкладывается в разбор другого только через /Length
+	// потока, ссылающийся на третий объект. У настоящего файла это один
+	// уровень, а цепочка из сотен тысяч потоков, где длина каждого — ссылка
+	// на следующий, исчерпывала стек: такой сбой фатален, recover его
+	// не ловит. Глубже maxNesting объект считается нечитаемым, но в кэш
+	// не попадает — с меньшей глубины он разберётся.
+	if len(d.loading) >= maxNesting {
+		return nil
+	}
 	d.loading[num] = true
 	defer delete(d.loading, num)
 
-	var result Object
+	// Сбой разбора одного объекта — это нечитаемый объект, а не повреждённый
+	// документ: прежде паника из-за одного битого /Length роняла весь разбор,
+	// и книга терялась целиком из-за единственного испорченного потока.
+	defer func() {
+		if r := recover(); r != nil {
+			objectPanic(r)
+			result = nil
+			d.cache[num] = nil
+		}
+	}()
+
 	if off, ok := d.offsets[num]; ok {
 		result = d.parseAt(off)
 	} else if body, ok := d.inStm[num]; ok {
@@ -354,6 +373,14 @@ func (d *Document) object(num int) Object {
 	d.cache[num] = result
 	return result
 }
+
+// maxNesting — сколько объектов может разбираться вложенно (см. object).
+const maxNesting = 32
+
+// objectPanic — чем отметить панику, погашенную при разборе одного объекта.
+// В работе ничего не делает: объект просто считается нечитаемым. Обстрел
+// (fuzz-тесты) подменяет её, чтобы погашенный сбой не прошёл незамеченным.
+var objectPanic = func(any) {}
 
 // parseAt разбирает объект, заголовок которого начинается со смещения off.
 //
