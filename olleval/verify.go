@@ -4,15 +4,20 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // VerifyResult — что дала проверка одной попытки. Ложится в verify.json рядом
@@ -62,8 +67,43 @@ func NewVerifier(fixtures string, cfg VerifyCfg) *Verifier {
 	return &Verifier{
 		Fixtures: fixtures, Docker: docker,
 		Memory: cfg.Memory, CPUs: cfg.CPUs, Timeout: cfg.Timeout.Get(10 * time.Minute),
-		Runner: runCommand,
+		Runner: runStep,
 	}
+}
+
+// containerPidsLimit — сколько процессов и потоков разрешено контейнеру
+// проверки. Сборки dotnet и vitest держат сотни потоков, а вилочная бомба
+// в коде модели без предела съела бы таблицу процессов всего стенда.
+const containerPidsLimit = 1024
+
+// removeWait — сколько ждать docker rm -f после сорванного шага.
+const removeWait = 30 * time.Second
+
+// containerName — имя контейнера шага. Без имени контейнер нечем было
+// снять: по таймауту убивался только клиент docker, а сам контейнер жил
+// дальше, пока код модели не выйдет сам. Случайный хвост — потому что
+// контейнер, брошенный прошлым прогоном, не должен занимать имя нового.
+func containerName() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand не возвращает ошибок с Go 1.24
+	return "olleval-" + hex.EncodeToString(b[:])
+}
+
+// infraExitCode — код, которым docker сообщает о своей беде, а не о провале
+// кода модели: 125 — не запустился сам docker run (нет образа при
+// --pull=never, демон), 126 — команда в образе не запускается, 127 — её
+// в образе нет. Засчитывать такое модели значит выдавать сломанный образ
+// за неспособность модели.
+func infraExitCode(code int) (string, bool) {
+	switch code {
+	case 125:
+		return "docker run не запустился (нет образа? демон?)", true
+	case 126:
+		return "команда в образе не запускается", true
+	case 127:
+		return "команды нет в образе", true
+	}
+	return "", false
 }
 
 // Verify проверяет ответ задачи и возвращает балл. Ошибки самой проверки
@@ -327,8 +367,21 @@ func (v *Verifier) container(ctx context.Context, t *Task, dir, answer string) *
 	asUser := []string{"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "-e", "HOME=/tmp"}
 
 	for _, st := range t.Verify.Steps {
-		args := []string{"run", "--rm", "--network=none",
-			"--memory=" + v.Memory, "--cpus=" + v.CPUs}
+		name := containerName()
+		args := []string{"run", "--rm", "--name", name, "--network=none",
+			"--memory=" + v.Memory, "--cpus=" + v.CPUs,
+			// Образ — только свой, собранный на стенде (images/build.sh).
+			// Без --pull=never отсутствующий образ молча скачался бы
+			// из чужого пространства имён docker.io/olleval/*.
+			"--pull=never",
+			// Код модели не должен ни плодить процессы без счёта, ни
+			// подниматься в правах через setuid-программы образа.
+			"--pids-limit=" + strconv.Itoa(containerPidsLimit),
+			"--cap-drop=ALL", "--security-opt=no-new-privileges"}
+		// --read-only не ставится: прогретые кеши сборки лежат в образах
+		// внутри /tmp (GOCACHE, CARGO_HOME) и пишутся при сборке, а tmpfs
+		// поверх /tmp спрятал бы их и вернул холодную сборку на каждый шаг;
+		// nginx -t и vite к тому же пишут вне /w.
 		args = append(args, asUser...)
 		args = append(args,
 			"-v", work+":/w", "-w", "/w", t.Verify.Image,
@@ -340,6 +393,21 @@ func (v *Verifier) container(ctx context.Context, t *Task, dir, answer string) *
 		out, code, err := v.Runner(stepCtx, v.Docker, args...)
 		r := StepResult{Name: st.Name, Cmd: st.Cmd, ExitCode: code,
 			Seconds: time.Since(began).Seconds(), Output: tail(out, 4000)}
+		if stepErr := stepCtx.Err(); stepErr != nil {
+			// По пределу времени или остановке прогона убит только клиент
+			// docker, а контейнер с вечным циклом модели жил бы дальше:
+			// держал ядра и память стенда и портил замер следующим моделям.
+			v.removeContainer(name)
+			res.Steps = append(res.Steps, r)
+			dropBuildJunk(work)
+			if errors.Is(stepErr, context.DeadlineExceeded) {
+				res.Verdict = fmt.Sprintf("шаг %q не уложился в предел %s — контейнер снят", st.Name, limit)
+				return res
+			}
+			res.NeedsReview = true
+			res.Verdict = fmt.Sprintf("проверка прервана на шаге %q остановкой прогона", st.Name)
+			return res
+		}
 		if err != nil && code == 0 {
 			// Сам docker не запустился: это наша беда, не модели.
 			r.ExitCode = -1
@@ -347,6 +415,13 @@ func (v *Verifier) container(ctx context.Context, t *Task, dir, answer string) *
 			res.Steps = append(res.Steps, r)
 			res.NeedsReview = true
 			res.Verdict = "проверка сорвалась: " + err.Error()
+			return res
+		}
+		if why, infra := infraExitCode(code); infra {
+			res.Steps = append(res.Steps, r)
+			res.NeedsReview = true
+			res.Verdict = fmt.Sprintf("проверка сорвалась на шаге %q: код %d — %s", st.Name, code, why)
+			dropBuildJunk(work)
 			return res
 		}
 		if code == 0 {
@@ -402,6 +477,71 @@ func dropBuildJunk(work string) {
 			}
 		}
 	}
+}
+
+// removeContainer снимает контейнер сорванного шага: docker rm -f убивает
+// его и убирает. Контекст свой, а не шага: тот уже истёк. Повторять не нужно:
+// клиент docker к этому моменту мёртв и нового контейнера уже не создаст.
+func (v *Verifier) removeContainer(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), removeWait)
+	defer cancel()
+	_, _, _ = v.Runner(ctx, v.Docker, "rm", "-f", name)
+}
+
+// stepOutputLimit — сколько вывода шага держится в памяти. В verify.json
+// уходит хвост в 4000 знаков, а код модели, ушедший в вечный цикл с печатью,
+// иначе набивал бы память прогона гигабайтами до самого предела времени.
+const stepOutputLimit = 256 << 10
+
+// runStep выполняет шаг проверки. От runCommand отличается двумя вещами:
+// вывод держит только хвостом (stepOutputLimit) и не ждёт вечно после
+// отмены — WaitDelay закрывает трубы, даже если их унёс с собой потомок
+// убитого клиента.
+func runStep(ctx context.Context, name string, args ...string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	out := &tailBuffer{max: stepOutputLimit}
+	cmd.Stdout, cmd.Stderr = out, out
+	cmd.WaitDelay = 10 * time.Second
+	err := cmd.Run()
+	if err != nil {
+		var ee *exec.ExitError
+		if ok := asExitError(err, &ee); ok {
+			return out.String(), ee.ExitCode(), nil
+		}
+		return out.String(), 0, err
+	}
+	return out.String(), 0, nil
+}
+
+// tailBuffer хранит последние max байт записанного. Чистит себя пачками,
+// когда набирает вдвое больше, — иначе каждая запись сдвигала бы весь хвост.
+type tailBuffer struct {
+	max int
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) > t.max {
+		p = p[len(p)-t.max:]
+	}
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > 2*t.max {
+		t.buf = append(t.buf[:0], t.buf[len(t.buf)-t.max:]...)
+	}
+	return n, nil
+}
+
+// String отдаёт хвост, не начиная его с середины буквы.
+func (t *tailBuffer) String() string {
+	b := t.buf
+	if len(b) > t.max {
+		b = b[len(b)-t.max:]
+	}
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
+		b = b[1:]
+	}
+	return string(b)
 }
 
 // runCommand выполняет команду и возвращает вывод и код возврата.
