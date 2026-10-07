@@ -547,7 +547,7 @@ func parseFlagsNoParse() *cliFlags {
 	// Ради замеров: числа отбора подбираются только прогоном, а прогон
 	// должен идти без интерфейса и без временных скриптов вокруг него.
 	f.askQ = flag.String("ask", "", "спросить модель и напечатать ответ: --ask \"вопрос\"")
-	f.askStdin = flag.Bool("ask-stdin", false, "с --ask: вопрос читается со стандартного ввода")
+	f.askStdin = flag.Bool("ask-stdin", false, "то же, что --ask, но вопрос читается со стандартного ввода")
 	f.askFile = flag.String("questions", "", "файл с вопросами, по одному в строке — спросить каждый")
 	f.askJSON = flag.Bool("json", false, "с --ask: строка JSON на ответ (вопрос, ответ, счётчики, настройки)")
 	f.askRep = flag.Int("repeat", 0, "с --ask: повторить каждый вопрос N раз — видно разброс от сэмплирования")
@@ -776,6 +776,34 @@ func dryRunCommands() []string {
 func dryRunHelp() string {
 	return "только показать, что будет сделано, ничего не меняя; понимают: " +
 		strings.Join(dryRunCommands(), ", ")
+}
+
+// checkCommandLine проверяет командную строку целиком до запуска: всё, что
+// раньше молча пропускалось, теперь — отказ с объяснением.
+func checkCommandLine(f *cliFlags) error {
+	if err := checkOneCommand(f); err != nil {
+		return err
+	}
+	return checkDryRun(f)
+}
+
+// checkOneCommand — за один запуск выполняется одна команда.
+//
+// dispatchCLI выполняет первую совпавшую ветку, и вторая команда той же строки
+// пропускалась без единого слова: --kb-list --graph-build books печатал список,
+// а сборка не начиналась. То же внутри --ask: файл --questions молча побеждал
+// вопрос из --ask.
+func checkOneCommand(f *cliFlags) error {
+	cmds := requested(f)
+	if len(cmds) < 2 {
+		return nil
+	}
+	names := make([]string, len(cmds))
+	for i, c := range cmds {
+		names[i] = c.name
+	}
+	return fmt.Errorf("за один запуск выполняется одна команда, а запрошено несколько: %s",
+		strings.Join(names, ", "))
 }
 
 // checkDryRun отвергает --kb-dry-run у команды, которая его не понимает:
@@ -1049,7 +1077,7 @@ func parseEvery(s string) (time.Duration, error) {
 func run() error {
 	f := parseFlags()
 	// До всякой работы: отказ должен прийти раньше, чем команда что-то тронет.
-	if err := checkDryRun(f); err != nil {
+	if err := checkCommandLine(f); err != nil {
 		return err
 	}
 
