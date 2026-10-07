@@ -59,7 +59,12 @@ type FlagTOCResult struct {
 // maxBytes — предел размера файла (sandbox.max_pdf_mb); 0 — без предела.
 func (c *Collection) FlagTOC(ctx context.Context, maxBytes int64, dry bool, progress func(done, total int)) (FlagTOCResult, error) {
 	var res FlagTOCResult
-	if c.store == nil {
+	// Хранилище берётся один раз под замком чтения: поле коллекции подменяет
+	// переоткрытие индекса (reopenIndex), и читать его без замка — гонка.
+	c.mu.RLock()
+	store := c.store
+	c.mu.RUnlock()
+	if store == nil {
 		return res, fmt.Errorf("коллекция %q без хранилища кусков", c.name)
 	}
 	if !dry {
@@ -70,7 +75,7 @@ func (c *Collection) FlagTOC(ctx context.Context, maxBytes int64, dry bool, prog
 	}
 	units := c.serviceUnits(ctx, maxBytes, &res)
 
-	recs := c.store.Recs()
+	recs := store.Recs()
 	res.Total = len(recs)
 	flags := make([]uint16, len(recs))
 	perDoc := map[uint32][2]int{}
@@ -85,7 +90,7 @@ func (c *Collection) FlagTOC(ctx context.Context, maxBytes int64, dry bool, prog
 		for i := from; i < to; i++ {
 			ids = append(ids, i)
 		}
-		texts, err := c.store.Texts(ids)
+		texts, err := store.Texts(ids)
 		if err != nil {
 			return res, err
 		}
@@ -142,9 +147,14 @@ func (c *Collection) FlagTOC(ctx context.Context, maxBytes int64, dry bool, prog
 	if err := fsx.WriteFileAtomic(filepath.Join(c.dir, "chunks.idx"), raw, 0o644); err != nil {
 		return res, err
 	}
+	// Признаки в памяти правятся у того хранилища, что открыто сейчас: его
+	// могло подменить переоткрытие индекса. Куски при этом те же — дописывать
+	// их мешает замок коллекции, — поэтому сверяется только число.
 	c.mu.Lock()
-	for i := range c.store.recs {
-		c.store.recs[i].Flags = flags[i]
+	if cur := c.store; cur != nil && cur.Count() == len(flags) {
+		for i := range cur.recs {
+			cur.recs[i].Flags = flags[i]
+		}
 	}
 	c.mu.Unlock()
 	return res, nil

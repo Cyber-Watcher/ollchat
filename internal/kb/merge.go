@@ -212,7 +212,7 @@ func (c *Collection) Merge(ctx context.Context, opt MergeOpts, report func(Progr
 	if err := c.swapIn(tmp); err != nil {
 		// Подмена не состоялась, а файлы прежнего индекса уже закрыты:
 		// открываем их снова, иначе поиск в этом процессе молча опустеет.
-		c.reopenIndex()
+		c.reopenIndexLocked()
 		return res, err
 	}
 	if err := c.load(); err != nil {
@@ -363,7 +363,7 @@ func (c *Collection) swapIn(tmp string) error {
 	if err := carryOver(c.dir, tmp); err != nil {
 		return err
 	}
-	c.closeFiles()
+	c.closeFilesLocked() // Merge держит c.mu.Lock всё время подмены
 	if err := os.Rename(c.dir, old); err != nil {
 		return err
 	}

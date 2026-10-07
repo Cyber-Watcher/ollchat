@@ -527,6 +527,9 @@ type Collection struct {
 }
 
 // load читает реестр, помеченные удалёнными книги, хранилище и сегменты.
+//
+// Замка не берёт: зовётся либо до того, как коллекция стала видна другим
+// (Base.Open), либо под уже взятым c.mu.Lock (уплотнение).
 func (c *Collection) load() error {
 	if err := c.loadDocs(); err != nil {
 		return err
@@ -534,7 +537,7 @@ func (c *Collection) load() error {
 	if err := c.loadDeleted(); err != nil {
 		return err
 	}
-	return c.reopenIndex()
+	return c.reopenIndexLocked()
 }
 
 func (c *Collection) loadDocs() error {
@@ -585,20 +588,38 @@ func (c *Collection) loadDeleted() error {
 	return nil
 }
 
-// reopenIndex переоткрывает хранилище и сегменты: вызывается после индексации.
-func (c *Collection) reopenIndex() error {
-	c.closeFiles()
-	if _, err := os.Stat(filepath.Join(c.dir, "chunks.idx")); err != nil {
-		return nil // коллекция ещё пуста
+// indexFiles — индекс коллекции, открытый на чтение: хранилище кусков,
+// сегменты, поиск по ним и векторы.
+type indexFiles struct {
+	store   *Store
+	segs    []*Segment
+	index   *Index
+	vectors *Vectors
+}
+
+// close закрывает файлы. Векторы лежат в памяти, закрывать у них нечего.
+func (f indexFiles) close() {
+	for _, s := range f.segs {
+		s.Close()
 	}
-	store, err := OpenStore(c.dir)
+	if f.store != nil {
+		f.store.Close()
+	}
+}
+
+// openIndexFiles читает индекс коллекции с диска, не трогая самой коллекции.
+func openIndexFiles(dir string) (indexFiles, error) {
+	if _, err := os.Stat(filepath.Join(dir, "chunks.idx")); err != nil {
+		return indexFiles{}, nil // коллекция ещё пуста
+	}
+	store, err := OpenStore(dir)
 	if err != nil {
-		return err
+		return indexFiles{}, err
 	}
-	dirs, err := segmentDirs(c.dir)
+	dirs, err := segmentDirs(dir)
 	if err != nil {
 		store.Close()
-		return err
+		return indexFiles{}, err
 	}
 	var segs []*Segment
 	for _, d := range dirs {
@@ -610,34 +631,69 @@ func (c *Collection) reopenIndex() error {
 	}
 	// Векторы читаются вместе с индексом: их отсутствие — обычное дело,
 	// а испорченный файл лучше заметить при открытии, а не в первом поиске.
-	vecs, err := OpenVectors(c.dir)
+	vecs, err := OpenVectors(dir)
 	if err != nil {
 		store.Close()
 		for _, seg := range segs {
 			seg.Close()
 		}
+		return indexFiles{}, err
+	}
+	return indexFiles{store: store, segs: segs, index: NewIndex(store, segs), vectors: vecs}, nil
+}
+
+// setIndex ставит открытый индекс на место прежнего и отдаёт прежний —
+// закрыть его вызывающий обязан сам, уже отпустив замок. Только под c.mu.Lock.
+func (c *Collection) setIndex(f indexFiles) indexFiles {
+	old := indexFiles{store: c.store, segs: c.segs, index: c.index, vectors: c.vectors}
+	c.store, c.segs, c.index, c.vectors = f.store, f.segs, f.index, f.vectors
+	return old
+}
+
+// reopenIndex переоткрывает хранилище и сегменты: вызывается после индексации.
+//
+// **Под замком — только подмена.** До 07.10.2026 переоткрытие шло вовсе без
+// c.mu: доливка, сверка и удаление книги закрывали файлы и обнуляли хранилище,
+// пока поиск в соседнем потоке держал замок на чтение и шёл по ним. Тест
+// «четыре потока ищут, рядом доливка и удаление» дал сотни отчётов -race,
+// панику на nil и «file already closed»; общий объект коллекции ронял процесс.
+// Теперь новые файлы открываются вне замка (это чтение мегабайтов с диска),
+// подменяются под c.mu.Lock — идущий поиск дорабатывает на прежних, — а прежние
+// закрываются уже после подмены, когда их никто не держит.
+func (c *Collection) reopenIndex() error {
+	f, err := openIndexFiles(c.dir)
+	if err != nil {
 		return err
 	}
-	c.store = store
-	c.segs = segs
-	c.vectors = vecs
-	c.index = NewIndex(store, segs)
+	c.mu.Lock()
+	old := c.setIndex(f)
+	c.mu.Unlock()
+	old.close()
 	return nil
 }
 
-func (c *Collection) closeFiles() error {
-	for _, s := range c.segs {
-		s.Close()
+// reopenIndexLocked — то же для того, кто уже держит c.mu.Lock: уплотнение
+// и пересборка индекса подменяют файлы под своим замком.
+func (c *Collection) reopenIndexLocked() error {
+	f, err := openIndexFiles(c.dir)
+	if err != nil {
+		return err
 	}
-	c.segs = nil
-	c.vectors = nil
-	if c.store != nil {
-		c.store.Close()
-		c.store = nil
-	}
-	c.index = nil
+	c.setIndex(f).close()
 	return nil
 }
+
+// closeFiles закрывает индекс коллекции; поиск после этого ничего не находит.
+func (c *Collection) closeFiles() error {
+	c.mu.Lock()
+	old := c.setIndex(indexFiles{})
+	c.mu.Unlock()
+	old.close()
+	return nil
+}
+
+// closeFilesLocked — то же под уже взятым c.mu.Lock.
+func (c *Collection) closeFilesLocked() { c.setIndex(indexFiles{}).close() }
 
 // Name — имя коллекции.
 func (c *Collection) Name() string { return c.name }
