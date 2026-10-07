@@ -276,7 +276,12 @@ func (c *Collection) rewriteChunks(ctx context.Context, tmp string, report func(
 		for j < len(recs) && recs[j].Doc == doc {
 			j++
 		}
-		if c.deleted[doc] {
+		// Ничьи куски — книги, которой нет в реестре, — уходят вместе
+		// с удалёнными: это прежние версии перечитанных книг и обрывки
+		// прерванной записи, поиск их не выдаёт (SearchWith). Предпросмотр
+		// уплотнения обещал их стереть всегда («кусков книг, перечитанных
+		// заново»), а до 07.10.2026 они переезжали в новое хранилище и копились.
+		if _, registered := c.book(doc); c.deleted[doc] || !registered {
 			i = j
 			continue
 		}

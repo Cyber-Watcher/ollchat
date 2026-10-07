@@ -90,6 +90,58 @@ func TestMergeDropsDeleted(t *testing.T) {
 	}
 }
 
+// Ничьи куски — книги без записи в реестре — уплотнение стирает, как и обещает
+// его предпросмотр («кусков книг, перечитанных заново: записи о них уже нет»).
+//
+// До 07.10.2026 стирались только помеченные удалёнными: прежние версии книг,
+// перечитанных --kb-sync, переезжали в новое хранилище при каждом уплотнении,
+// и обещанное место не освобождалось.
+func TestMergeDropsChunksOutsideRegistry(t *testing.T) {
+	_, coll, _ := mergeFixture(t)
+	// Прежняя версия книги, какой её оставлял --kb-sync до 07.10.2026: куски
+	// записаны и закоммичены, а ни записи в реестре, ни пометки удаления нет.
+	w, err := CreateWriter(coll.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(77, chunksOf("orphanword прежняя версия книги")); err != nil {
+		t.Fatal(err)
+	}
+	st, err := w.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	if err := coll.journal(st, 77); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.reopenIndex(); err != nil {
+		t.Fatal(err)
+	}
+	live := 0
+	for _, b := range coll.LiveBooks() {
+		live += b.Chunks
+	}
+
+	res, err := coll.Merge(context.Background(), MergeOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ChunksAfter != live {
+		t.Fatalf("после уплотнения кусков %d, у живых книг реестра %d", res.ChunksAfter, live)
+	}
+	for _, text := range texts0(t, coll) {
+		if strings.Contains(text, "orphanword") {
+			t.Fatal("ничей кусок пережил уплотнение")
+		}
+	}
+	for _, q := range []string{"goroutines", "kubernetes"} {
+		if !found(t, coll, q) {
+			t.Fatalf("после уплотнения не находится живая книга по %q", q)
+		}
+	}
+}
+
 // TestMergeKeepsChunkIDs закрепляет обещание: ссылка вида «lib/3#7» переживает
 // уплотнение. Ссылки на страницы книг уже разошлись по ответам модели,
 // и ломать их нельзя.
