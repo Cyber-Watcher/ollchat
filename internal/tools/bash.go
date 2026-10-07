@@ -37,7 +37,7 @@ func (t *bashTool) Spec() ollama.Tool {
 }
 
 func (t *bashTool) Plan(args map[string]any) (*Plan, error) {
-	cmd, err := requireString(args, "command")
+	cmd, err := requireText(args, "command")
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,9 @@ const (
 //
 // Простая команда запускается напрямую, без оболочки: так подстановки и
 // перенаправления не могут появиться неожиданно. Составная команда требует
-// оболочки, но она в любом случае проходит через подтверждение пользователя.
+// оболочки; запреты проверены по каждой её части ещё до запуска.
+// С включённой изоляцией (Options.Isolation) та же строка запуска уходит
+// в bubblewrap, а не найти или не запустить его — отказ, а не запуск без неё.
 //
 // Функция обязана возвращать управление всегда: по завершении команды,
 // по таймауту или по отмене. Наивная реализация через exec.CommandContext
@@ -86,33 +88,51 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
+	isolated := opts.Isolation.Kind != ""
+	var argv []string
 	if permissions.IsCompound(command) {
-		cmd = exec.Command("sh", "-c", command)
+		sh := "sh"
+		if isolated {
+			sh = "/bin/sh"
+		}
+		argv = []string{sh, "-c", command}
 	} else {
-		argv, err := shellSplit(command)
+		// Разбивка та же, что у сверки с запретами: проверяется ровно то,
+		// что запустится.
+		words, err := permissions.SplitWords(command)
 		if err != nil {
 			return "", err
 		}
-		if len(argv) == 0 {
+		if len(words) == 0 {
 			return "", errors.New("пустая команда")
 		}
-		bin, err := exec.LookPath(argv[0])
+		bin, err := exec.LookPath(words[0])
 		if err != nil {
-			return "", fmt.Errorf("команда %q не найдена: %w", argv[0], err)
+			return "", fmt.Errorf("команда %q не найдена: %w", words[0], err)
 		}
-		cmd = exec.Command(bin, argv[1:]...)
+		argv = append([]string{bin}, words[1:]...)
 	}
-
-	cmd.Dir = opts.Sandbox.Root()
-	// Окружение наследуется: без PATH и HOME большинство инструментов разработки
-	// не работает. Отключаем только интерактивность.
-	cmd.Env = append(os.Environ(),
+	env := append(commandEnv(os.Environ()),
 		"TERM=dumb",
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 		"OLLCHAT=1",
 	)
+	if isolated {
+		var err error
+		if argv, err = isolate(opts.Isolation, opts.Sandbox.RealRoot(), argv); err != nil {
+			return "", err
+		}
+		// /tmp внутри изоляции свой и пустой: TMPDIR, указывающий на
+		// каталог снаружи, вёл бы в никуда.
+		env = append(env, "TMPDIR=/tmp")
+	}
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = opts.Sandbox.Root()
+	// Окружение наследуется: без PATH и HOME большинство инструментов разработки
+	// не работает. Отключаем интерактивность и снимаем секреты (commandEnv).
+	cmd.Env = env
 	cmd.Stdin = nil
 	setProcessGroup(cmd)
 
@@ -192,6 +212,11 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 	if runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
+			if isolated && bwrapFailed(ee.ExitCode(), text) {
+				return opts.truncate(text), fmt.Errorf("bwrap не смог запустить команду в изоляции, "+
+					"она не выполнялась (без изоляции команды не запускаются): %s",
+					strings.TrimSpace(strings.SplitN(text, "\n", 2)[0]))
+			}
 			header = fmt.Sprintf("Код возврата: %d (за %s)\n\n", ee.ExitCode(), elapsed.Round(time.Millisecond))
 		} else {
 			return opts.truncate(text), runErr
@@ -204,6 +229,46 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 		text = "(команда не вывела ничего)"
 	}
 	return opts.truncate(header + text), nil
+}
+
+// secretMarks — части имён переменных окружения, по которым видно секрет.
+var secretMarks = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE",
+	"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL"}
+
+// commandEnv — окружение для команд модели без секретов.
+//
+// **Почему.** Команду выбирает модель, а модель читает чужой текст: страницу
+// из сети, документ, выдачу поиска. Раньше команды наследовали всё окружение
+// ollchat — ключи API, токены (в том числе OLLMCP_TOKEN службы), учётные
+// данные облака, — и внедрённой инструкции хватало одного `env` или
+// `curl -d "$GITHUB_TOKEN" …`, чтобы унести их наружу.
+//
+// Белый список здесь не годится: инструментам разработки нужны десятки
+// переменных (PATH, HOME, LANG, GOPATH, прокси, настройки сборки), и он
+// ломал бы их молча. Снимаются переменные, имя которых выдаёт секрет,
+// без учёта регистра, и всё облачное AWS_*; остальное проходит как было.
+func commandEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if !secretName(name) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func secretName(name string) bool {
+	up := strings.ToUpper(name)
+	if up == "OLLMCP_TOKEN" || strings.HasPrefix(up, "AWS_") {
+		return true
+	}
+	for _, m := range secretMarks {
+		if strings.Contains(up, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // waitOrKill ждёт завершения команды, а по отмене или таймауту снимает всё
@@ -240,51 +305,6 @@ func waitOrKill(ctx context.Context, cmd *exec.Cmd) (err error, killed bool) {
 		// Дальше ждать нельзя: интерфейс не должен оставаться заблокированным.
 	}
 	return nil, true
-}
-
-// shellSplit разбирает командную строку на аргументы, учитывая кавычки.
-// Подстановки и операторы здесь не поддерживаются намеренно: такие команды
-// определяются как составные и идут через оболочку после подтверждения.
-func shellSplit(s string) ([]string, error) {
-	var (
-		args     []string
-		cur      strings.Builder
-		hasToken bool
-		inSingle bool
-		inDouble bool
-	)
-	runes := []rune(s)
-	for i := 0; i < len(runes); i++ {
-		c := runes[i]
-		switch {
-		case c == '\\' && !inSingle && i+1 < len(runes):
-			i++
-			cur.WriteRune(runes[i])
-			hasToken = true
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-			hasToken = true
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-			hasToken = true
-		case (c == ' ' || c == '\t') && !inSingle && !inDouble:
-			if hasToken {
-				args = append(args, cur.String())
-				cur.Reset()
-				hasToken = false
-			}
-		default:
-			cur.WriteRune(c)
-			hasToken = true
-		}
-	}
-	if inSingle || inDouble {
-		return nil, errors.New("незакрытая кавычка в команде")
-	}
-	if hasToken {
-		args = append(args, cur.String())
-	}
-	return args, nil
 }
 
 // refuseToolAsCommand отклоняет попытку запустить инструмент приложения через

@@ -142,7 +142,11 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// Назначение и пометка проставляются только при создании: у графа, который
 	// уже собран, паспорт менять нельзя — иначе рабочий однажды станет опытным
 	// по опечатке в ключе, и доктор о нём замолчит.
-	g, err := graph.OpenOrCreateKind(coll.Dir(), name, chunks, cfg.Graph.Rules(), graph.CreateOpts{Kind: graph.Kind(kind), Note: note})
+	//
+	// Признак сборки берётся ДО чтения журналов (graph.OpenForBuild): пока граф
+	// открывается, чистка успевала подменить журналы, и заход часами писал
+	// в переименованные копии (аудит 07.10.2026, №9).
+	g, err := graph.OpenForBuild(coll.Dir(), name, chunks, cfg.Graph.Rules(), graph.CreateOpts{Kind: graph.Kind(kind), Note: note})
 	if err != nil {
 		return err
 	}
@@ -173,6 +177,10 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	// подобрана за кем-то, а не начата с чистого листа.
 	if s := g.StaleLock(); s != "" {
 		fmt.Fprintf(stdout, "снят признак идущей сборки: %s\n", s)
+	}
+	// Срезанный обрывок записи — тоже след упавшего прогона, и тоже не молча.
+	for _, s := range g.TornTails() {
+		fmt.Fprintf(stdout, "журнал после обрыва — %s\n", s)
 	}
 	fmt.Fprintf(stdout, "коллекция %s, модель извлечения %s\n", name, ex.Model())
 	if named && pool != nil {
@@ -365,12 +373,6 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	return nil
 }
 
-// Find ищет по графу из командной строки.
-//
-// Тот же поиск, что получит модель инструментом graph_search, только вход
-// человеческий. Нужен не для красоты: графом должен уметь пользоваться и тот,
-// кто его собрал, и сторонняя программа, и другой ассистент — а не только
-// модель внутри ollchat.
 // printOpen печатает, во что обошлось открытие графа.
 //
 // Обе величины растут вместе с библиотекой и однажды упрутся (порог назван
@@ -388,7 +390,12 @@ func printOpen(stdout io.Writer, g *graph.Graph, cfg *config.Config) {
 	fmt.Fprintln(os.Stderr, OpenNote(st, &cfg.Graph))
 }
 
-// Find — поиск без модели из командной строки.
+// Find ищет по графу из командной строки, без модели.
+//
+// Тот же поиск, что получит модель инструментом graph_search, только вход
+// человеческий. Нужен не для красоты: графом должен уметь пользоваться и тот,
+// кто его собрал, и сторонняя программа, и другой ассистент — а не только
+// модель внутри ollchat.
 //
 // **Это тот же поиск, что `/search` в интерфейсе, и намеренно тот же код.**
 // До 02.09.2026 команда звала `graph.Search` напрямую и печатала только
@@ -490,11 +497,6 @@ func graphNeedsLocalFiles(cfg *config.Config, name string, err error) error {
 		cfg.KB.ServerURL, name, cfg.KB.Dir)
 }
 
-// NeighborRank собирает настройки ранжирования связей из конфига.
-//
-// Одно место на всю программу: и поиск из командной строки, и инструменты
-// модели обязаны вести себя одинаково, иначе замер на одном не относится
-// к другому.
 // CacheFor заводит кэш открытых графов, если он не выключен настройкой.
 //
 // nil означает «открывать на каждый вызов» — инструменты это понимают.
@@ -507,6 +509,11 @@ func CacheFor(cfg *config.Config, ttl time.Duration) *graph.Cache {
 	return graph.NewCache(ttl, cfg.Graph.Rules())
 }
 
+// NeighborRank собирает настройки ранжирования связей из конфига.
+//
+// Одно место на всю программу: и поиск из командной строки, и инструменты
+// модели обязаны вести себя одинаково, иначе замер на одном не относится
+// к другому.
 func NeighborRank(cfg *config.Config) graph.NeighborRank {
 	return graph.NeighborRank{
 		SenseWeight: cfg.Graph.NeighborSenseWeight,
@@ -526,18 +533,6 @@ func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
 	return qv
 }
 
-// graphProgress печатает ход работы одной перезаписываемой строкой.
-// graphProgress печатает ход сборки в терминал, а при заданном пути — ещё
-// и в файл.
-//
-// Зачем файл, если есть перенаправление вывода. Затем, что перенаправлением
-// распоряжается не программа. Замер этих суток: `sed`, `awk` и `tail` копят
-// вывод блоками, когда пишут не в терминал, и ход сборки, пропущенный через
-// `tail -3`, не появлялся в журнале до конца каталога — то есть часами.
-// Ключ убирает целый класс таких потерь: программа пишет туда, куда велено.
-//
-// В файл идут полные строки с отметкой времени, а не возврат каретки: `\r`
-// хорош для живого терминала и бесполезен в журнале, где нужна история.
 // poolLine — как показать вклад узлов в строке хода. nil-пул даёт nil:
 // на одном сервере разбивке неоткуда взяться и печатать её незачем.
 func poolLine(p *graphex.Pool, named bool) func() string {
@@ -547,6 +542,17 @@ func poolLine(p *graphex.Pool, named bool) func() string {
 	return p.Line
 }
 
+// graphProgress печатает ход сборки одной перезаписываемой строкой
+// в терминал, а при заданном пути — ещё и в файл.
+//
+// Зачем файл, если есть перенаправление вывода. Затем, что перенаправлением
+// распоряжается не программа. Замер этих суток: `sed`, `awk` и `tail` копят
+// вывод блоками, когда пишут не в терминал, и ход сборки, пропущенный через
+// `tail -3`, не появлялся в журнале до конца каталога — то есть часами.
+// Ключ убирает целый класс таких потерь: программа пишет туда, куда велено.
+//
+// В файл идут полные строки с отметкой времени, а не возврат каретки: `\r`
+// хорош для живого терминала и бесполезен в журнале, где нужна история.
 func graphProgress(logPath string, nodes func() string) func(graph.BuildProgress) {
 	var last time.Time
 	var logFile *os.File
@@ -590,8 +596,7 @@ func graphProgress(logPath string, nodes func() string) func(graph.BuildProgress
 	}
 }
 
-// Status печатает состояние графа коллекции.
-// Status печатает состояние графа, а при заданном каталоге — ещё
+// Status печатает состояние графа коллекции, а при заданном каталоге — ещё
 // и по одному каталогу отдельно.
 //
 // Разбивка по каталогу нужна, чтобы отвечать на «сколько осталось» числом,
@@ -628,9 +633,23 @@ func Status(stdout io.Writer, cfg *config.Config, name, folder string, books boo
 		st := g.Stats(chunks)
 		fmt.Fprintf(stdout, "%s: понятий %d, связей %d, упоминаний %d\n",
 			n, st.Entities, st.Edges, st.Mentions)
-		done, empty, skipped := g.Progress().Counts()
-		fmt.Fprintf(stdout, "  разобрано кусков %d из %d (осталось %d)\n", st.Covered, chunks, st.Pending)
-		fmt.Fprintf(stdout, "  из них с понятиями %d, пустых %d, пропущено %d\n", done, empty, skipped)
+		// Тем же счётом, что доктор: по кускам живых книг, виды отметок
+		// порознь. До 07.10.2026 здесь стояли все отметки журнала вместе
+		// с удалёнными книгами, а «пропущено» складывало потерю (модель
+		// не ответила) с нормой (служебный кусок) — ошибка, которую доктор
+		// изжил ещё 27.09.
+		cov, err := liveCoverage(coll, g, nil, nil)
+		if err != nil {
+			g.Close()
+			return err
+		}
+		fmt.Fprintf(stdout, "  разобрано кусков %d из %d (осталось %d)\n", cov.marked(), cov.total, cov.pending)
+		fmt.Fprintf(stdout, "  из них с понятиями %d, пустых %d, не разобрала модель %d, служебных %d\n",
+			cov.done, cov.empty, cov.skipped, cov.service)
+		if ms := deadMarkStats(coll, g); ms.Gone > 0 {
+			fmt.Fprintf(stdout, "  отметок книг, которых в коллекции НЕТ: %d (в %d книгах) — в счёт выше не входят\n",
+				ms.Gone, ms.GoneBooks)
+		}
 		if st.Model != "" {
 			fmt.Fprintf(stdout, "  модель извлечения: %s\n", st.Model)
 		}
@@ -2075,8 +2094,12 @@ func writeResolveTSV(g *graph.Graph, pairs []graph.ResolvePair, path string) err
 // **Склейка снимается целиком** ключом `--graph-merge-drop`: решения лежат
 // отдельным журналом и надеваются на граф при чтении. Это единственная защита
 // от неверного решения, потому что по смыслу склейка необратима.
+//
+// dry — только показать (`--graph-merge-dry` или `--kb-dry-run`): ни журнал,
+// ни признак работы не пишутся. yes — не спрашивать подтверждения снятия
+// (`--kb-yes`, для скриптов).
 func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCosSame float64,
-	drop, dry bool) error {
+	drop, dry, yes bool) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -2092,19 +2115,9 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 		return err
 	}
 	defer g.Close()
-	unmark, err := markWork(g, "склейка двойников")
-	if err != nil {
-		return err
-	}
-	defer unmark()
 
 	if drop {
-		had := g.Merges().Count()
-		if err := g.DropMerges(); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "склейки сняты: было поглощено %d понятий, граф вернулся в прежний вид\n", had)
-		return nil
+		return dropMerges(stdout, g, name, dry, yes)
 	}
 
 	if file == "" {
@@ -2131,7 +2144,7 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 	if minCosSame > 0 {
 		fmt.Fprintf(stdout, ", для пар внутри одного языка порог %.2f", minCosSame)
 	}
-	fmt.Fprintf(stdout, ": пар к склейке %d\n", len(pairs))
+	fmt.Fprintf(stdout, ": пар по уровню %d\n", len(pairs))
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -2146,9 +2159,17 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 			Alias: p.alias, Why: p.why, Level: level,
 		})
 	}
+	// Сколько журнал примет на деле: уже склеенное и встречное Add отбрасывает
+	// молча, и сухой прогон, называвший число пар разбора, обещал больше,
+	// чем делалось.
+	plan := planMerges(g.Merges().Records(), recs)
+	if plan.done+plan.opposite+plan.invalid > 0 {
+		fmt.Fprintf(stdout, "  из них уже склеено %d, встречных к прежним склейкам %d, без пары %d — их журнал не примет\n",
+			plan.done, plan.opposite, plan.invalid)
+	}
 	if dry {
-		fmt.Fprintln(stdout, "сухой прогон: ничего не записано. Примеры:")
-		for i, r := range recs {
+		fmt.Fprintf(stdout, "сухой прогон: ничего не записано; записалось бы решений %d. Примеры:\n", len(plan.fresh))
+		for i, r := range plan.fresh {
 			if i >= 15 {
 				break
 			}
@@ -2159,15 +2180,217 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 		return nil
 	}
 
-	before := g.Entities().Live()
+	// Признак работы и замок сборки — только у настоящей записи. Сборка
+	// со связыванием (--graph-link-new) сама дописывает склейки в этот журнал,
+	// и две записи разом перемешали бы его; отказ под сборкой дешевле.
+	unmark, err := markWork(g, "склейка двойников")
+	if err != nil {
+		return err
+	}
+	defer unmark()
+	if err := g.Lock(); err != nil {
+		return err
+	}
+	defer g.Unlock()
+
+	before := len(g.Entities().Live())
 	n, err := g.Merges().Add(recs)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "записано решений: %d\n", n)
-	fmt.Fprintf(stdout, "понятий было %d, стало %d\n", len(before), len(before)-n)
+	fmt.Fprintf(stdout, "понятий было %d, стало %d\n", before, len(g.Entities().Live()))
 	fmt.Fprintln(stdout, "снять всё: ollchat --graph-merge "+name+" --graph-merge-drop")
 	return nil
+}
+
+// mergePlan — что из решений журнал склеек примет, а что отбросит.
+type mergePlan struct {
+	fresh    []graph.MergeRec // будет записано
+	done     int              // поглощённое уже склеено (в журнале или раньше в той же пачке)
+	opposite int              // встречная: выживший уже поглощён этим понятием
+	invalid  int              // нулевой номер или склейка понятия с самим собой
+}
+
+// planMerges повторяет отбор graph.Merges.Add по снимку журнала, ничего
+// не записывая: сухому прогону нужно настоящее число, а Add сухого режима
+// не имеет. Повтор сверяется с самим Add на случайных журналах
+// (TestPlanMergesAgreesWithAdd) — разойдутся, тест скажет.
+//
+// Разрешение номеров — как у Merges.rebuild: последняя запись о номере
+// побеждает, цепочки сжимаются обходом по возрастанию номера; встречная
+// склейка ищется по сжатым цепочкам — так же, как это делает Add.
+func planMerges(journal, recs []graph.MergeRec) mergePlan {
+	to := make(map[uint32]uint32, len(journal)+len(recs))
+	for _, r := range journal {
+		to[r.From] = r.To
+	}
+	ids := make([]uint32, 0, len(to))
+	for id := range to {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		seen := map[uint32]bool{id: true}
+		cur := to[id]
+		for {
+			next, ok := to[cur]
+			if !ok || seen[cur] {
+				break
+			}
+			seen[cur] = true
+			cur = next
+		}
+		to[id] = cur
+	}
+	leadsTo := func(id, target uint32) bool {
+		seen := map[uint32]bool{}
+		for !seen[id] {
+			if id == target {
+				return true
+			}
+			seen[id] = true
+			next, ok := to[id]
+			if !ok {
+				return false
+			}
+			id = next
+		}
+		return false
+	}
+
+	var p mergePlan
+	for _, r := range recs {
+		// Правило то же, что у Merges.Add: «уже поглощено» — только когда
+		// понятие ведёт не в себя. Выживший круга (A→B и B→A сжимается
+		// в to[A] == A) поглощённым не считается, и его склейку с третьим
+		// понятием Add запишет — сухой прогон обязан обещать то же.
+		switch dst, done := to[r.From]; {
+		case r.From == 0 || r.To == 0 || r.From == r.To:
+			p.invalid++
+		case done && dst != r.From:
+			p.done++
+		case leadsTo(r.To, r.From):
+			p.opposite++
+		default:
+			p.fresh = append(p.fresh, r)
+			to[r.From] = r.To
+		}
+	}
+	return p
+}
+
+// mergesJournal — журнал склеек в каталоге графа (graph/merge.go).
+const mergesJournal = "merges.jsonl"
+
+// dropMerges снимает все склейки разом — ветка `--graph-merge-drop`.
+//
+// **Журнал не удаляется, а уходит в копию** `merges.jsonl.bak-<время>`,
+// как у `--graph-unmerge`. До 07.10.2026 здесь стоял os.Remove, и стоял
+// раньше проверки сухого прогона: кто хотел только посмотреть, что снимет
+// drop, терял журнал вердиктов арбитра — около 22 тысяч склеек — без копии,
+// без вопроса и не глядя на идущую сборку. Теперь сухой прогон только
+// показывает; снятие идёт под замком сборки, спрашивает набранное ДА
+// (в скрипте — --kb-yes) и оставляет копию, из которой журнал возвращается
+// переименованием.
+func dropMerges(stdout io.Writer, g *graph.Graph, name string, dry, yes bool) error {
+	path := filepath.Join(g.Dir(), mergesJournal)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(stdout, "коллекция %s: журнала склеек нет — снимать нечего\n", name)
+			return nil
+		}
+		return err
+	}
+	recs := g.Merges().Records()
+	gone := g.Merges().Count()
+	fmt.Fprintf(stdout, "коллекция %s: снять ВСЕ склейки — поглощено понятий %d, решений в журнале %d\n",
+		name, gone, len(recs))
+	for i, r := range recs {
+		if i >= 10 {
+			fmt.Fprintf(stdout, "  …и ещё %d\n", len(recs)-10)
+			break
+		}
+		from, _ := g.Entities().RawEntity(r.From)
+		to, _ := g.Entities().RawEntity(r.To)
+		fmt.Fprintf(stdout, "  %s ⇠ отделится от ⇢ %s  (cos %.3f)\n", cutName(from.Name, 34), cutName(to.Name, 34), r.Cos)
+	}
+	if dry {
+		fmt.Fprintf(stdout, "сухой прогон: ничего не тронуто; без него журнал ушёл бы в копию %s.bak-<время>\n", mergesJournal)
+		return nil
+	}
+
+	unmark, err := markWork(g, "снятие всех склеек")
+	if err != nil {
+		return err
+	}
+	defer unmark()
+	// Замок — до вопроса: незачем спрашивать человека, если под идущей сборкой
+	// снятие всё равно не пойдёт, и между ответом и переименованием сборка
+	// не должна успеть начаться.
+	if err := g.Lock(); err != nil {
+		return err
+	}
+	defer g.Unlock()
+	if err := confirmDropMerges(stdout, name, gone, yes); err != nil {
+		return err
+	}
+	backup, err := asideName(path, time.Now())
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(path, backup); err != nil {
+		return fmt.Errorf("журнал склеек не отложен в копию: %w", err)
+	}
+	fmt.Fprintf(stdout, "склейки сняты: было поглощено %d понятий, граф вернулся в прежний вид\n", gone)
+	fmt.Fprintf(stdout, "прежний журнал: %s\n", backup)
+	fmt.Fprintf(stdout, "вернуть, пока не склеено заново: mv %s %s\n", shellQuote(backup), shellQuote(path))
+	fmt.Fprintf(stdout, "дальше: ollchat --graph-embed-stale %s (векторы выживших), "+
+		"ollchat --graph-communities %s (темы вернувшихся понятий), ollchat --graph-doctor %s\n", name, name, name)
+	return nil
+}
+
+// confirmDropMerges — подтверждение словом, как у восстановления из архива
+// (confirmRestore): снятие всех склеек — действие намеренное, и согласия
+// одним нажатием для него мало.
+func confirmDropMerges(w io.Writer, name string, gone int, yes bool) error {
+	if yes {
+		fmt.Fprintln(w, "--kb-yes: подтверждение пропущено.")
+		return nil
+	}
+	if !isTTY(os.Stdin) {
+		return fmt.Errorf("снятие всех склеек требует подтверждения, а ввод не с терминала;\n" +
+			"посмотреть, что снимется, — --graph-merge-dry; в скрипте добавьте --kb-yes, если действительно этого хотите")
+	}
+	fmt.Fprintf(w, "\nСнять все склейки коллекции %s (поглощено понятий: %d)? Журнал уйдёт в копию рядом.\n"+
+		"Напишите ДА (заглавными) и нажмите Enter: ", name, gone)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("подтверждение не получено: %w", err)
+	}
+	if strings.TrimSpace(line) != "ДА" {
+		return fmt.Errorf("снятие склеек отменено: журнал остался на месте")
+	}
+	return nil
+}
+
+// asideName — свободное имя копии `<файл>.bak-<время>` рядом с файлом, тем же
+// образцом, что у --graph-unmerge и чисток графа. Занятое имя не затирается:
+// две правки в одну секунду иначе оставили бы одну копию из двух, и
+// os.Rename молча заменил бы прежнюю.
+func asideName(path string, now time.Time) (string, error) {
+	base := path + ".bak-" + now.Format("20060102-150405")
+	name := base
+	for i := 1; ; i++ {
+		_, err := os.Lstat(name)
+		if os.IsNotExist(err) {
+			return name, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		name = fmt.Sprintf("%s-%d", base, i)
+	}
 }
 
 // verdictPair — пара из файла разбора, уже с выбранным главным.
@@ -2219,10 +2442,12 @@ type verdictFacts struct {
 	mutual bool
 }
 
-// MergeLevelNames — уровни строгости для справки.
+// mergeLevelNames — уровни строгости для справки. Пороги здесь обязаны
+// совпадать с mergeLevels: у mutual справка до 07.10.2026 обещала 0.80, хотя
+// порог опущен до 0.70 ещё 02.09, — сверяет TestMergeLevelHelpMatchesCode.
 func mergeLevelNames() string {
 	return "strict (ДА+синоним+cos≥0.95), alias (ДА+синоним), vector (ДА+cos≥0.95), " +
-		"mixed (ДА+любой из двух), mutual (ДА+взаимный синоним+cos≥0.80), " +
+		"mixed (ДА+любой из двух), mutual (ДА+взаимный синоним+cos≥0.70), " +
 		"soft (ДА+cos≥0.92), all-yes (любое ДА)"
 }
 
@@ -2460,18 +2685,18 @@ func Book(stdout io.Writer, cfg *config.Config, name, bookQuery string) error {
 	return nil
 }
 
-// DropBook скрывает вклад книги из графа (или возвращает его).
-//
-// Это представление, а не удаление: вклад книги перестаёт показываться в выдаче,
-// но реестр понятий и журналы целы, а решение лежит отдельной строкой в
-// dropped-books.jsonl и снимается обратно. Задумано под чистку испорченной
-// книги без пересборки всего графа — см. GraphSchemaV2.md.
 // DropRun — ключи команды --graph-drop-book.
 type DropRun struct {
 	Restore bool // вернуть вклад книги, снятый прежде
 	Apply   bool // сделать, а не только показать
 }
 
+// DropBook скрывает вклад книги из графа (или возвращает его).
+//
+// Это представление, а не удаление: вклад книги перестаёт показываться в выдаче,
+// но реестр понятий и журналы целы, а решение лежит отдельной строкой в
+// dropped-books.jsonl и снимается обратно. Задумано под чистку испорченной
+// книги без пересборки всего графа — см. GraphSchemaV2.md.
 func DropBook(stdout io.Writer, cfg *config.Config, name, bookQuery string, run DropRun) error {
 	restore, apply := run.Restore, run.Apply
 	if bookQuery == "" {

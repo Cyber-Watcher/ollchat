@@ -493,6 +493,7 @@ type Collection struct {
 	meta    Meta
 	docs    []BookRec
 	byPath  map[string]int // путь → место в docs
+	byID    map[uint32]int // номер книги → место в docs; см. indexIDs
 	deleted map[uint32]bool
 	store   *Store
 	segs    []*Segment
@@ -516,7 +517,8 @@ type Collection struct {
 
 	// Отображение «книга и номер куска → сквозной номер». Строится лениво,
 	// при первом обращении из ChunkByRef: нужно только графу понятий, и платить
-	// за него при каждом открытии коллекции незачем.
+	// за него при каждом открытии коллекции незачем. Подмена индекса (setIndex)
+	// его сбрасывает: оно годится только для того хранилища, по которому собрано.
 	refOnce sync.Once
 	byRef   map[uint64]int
 
@@ -527,6 +529,9 @@ type Collection struct {
 }
 
 // load читает реестр, помеченные удалёнными книги, хранилище и сегменты.
+//
+// Замка не берёт: зовётся либо до того, как коллекция стала видна другим
+// (Base.Open), либо под уже взятым c.mu.Lock (уплотнение).
 func (c *Collection) load() error {
 	if err := c.loadDocs(); err != nil {
 		return err
@@ -534,12 +539,51 @@ func (c *Collection) load() error {
 	if err := c.loadDeleted(); err != nil {
 		return err
 	}
-	return c.reopenIndex()
+	if err := c.reopenIndexLocked(); err != nil {
+		return err
+	}
+	c.reconcileNextDoc()
+	return nil
+}
+
+// reconcileNextDoc сверяет следующий номер книги с тем, что уже лежит
+// на диске: номер не может быть меньше любого выданного.
+//
+// NextDoc живёт только в meta.json и пишется после кусков книги. Обрыв между
+// ними оставлял счётчик позади: следующая книга получала номер уже выданный,
+// и выдача одной книги приписывалась другой — Result берёт название и путь
+// у первой записи реестра с этим номером. Поэтому при открытии счётчик
+// поднимается выше всех номеров реестра, пометок удалённых и кусков
+// хранилища. Записывается он при следующем коммите — открытие на чтение
+// ничего не пишет.
+func (c *Collection) reconcileNextDoc() {
+	next := c.meta.NextDoc
+	bump := func(id uint32) {
+		if id >= next && id+1 != 0 {
+			next = id + 1
+		}
+	}
+	for _, d := range c.docs {
+		bump(d.ID)
+	}
+	for id := range c.deleted {
+		bump(id)
+	}
+	if c.store != nil {
+		for _, r := range c.store.recs {
+			bump(r.Doc)
+		}
+	}
+	if next == 0 {
+		next = 1
+	}
+	c.meta.NextDoc = next
 }
 
 func (c *Collection) loadDocs() error {
 	c.docs = nil
 	c.byPath = map[string]int{}
+	c.byID = map[uint32]int{}
 	data, err := os.ReadFile(filepath.Join(c.dir, "docs.jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -565,7 +609,34 @@ func (c *Collection) loadDocs() error {
 		c.byPath[rec.Path] = len(c.docs)
 		c.docs = append(c.docs, rec)
 	}
+	c.indexIDs()
 	return nil
+}
+
+// indexDocs перестраивает оба указателя реестра — по пути и по номеру —
+// после того, как c.docs заменили целиком. Под c.mu.Lock или до публикации.
+func (c *Collection) indexDocs() {
+	c.byPath = make(map[string]int, len(c.docs))
+	for i, d := range c.docs {
+		c.byPath[d.Path] = i
+	}
+	c.indexIDs()
+}
+
+// indexIDs перестраивает указатель по номеру. Первая запись с номером
+// выигрывает — так же, как выигрывала при переборе; нулевой номер у книг,
+// которые не прочитались, и по нему не ищут.
+//
+// **Зачем указатель.** Книгу кусок ищет по номеру на каждом шаге обхода,
+// и перебор реестра на 550 тысяч кусков стоил около 13 с (аудит 07.10.2026).
+// Ведётся там же, где byPath: здесь, в indexDocs и в appendDoc.
+func (c *Collection) indexIDs() {
+	c.byID = make(map[uint32]int, len(c.docs))
+	for i, d := range c.docs {
+		if _, seen := c.byID[d.ID]; d.ID != 0 && !seen {
+			c.byID[d.ID] = i
+		}
+	}
 }
 
 func (c *Collection) loadDeleted() error {
@@ -585,20 +656,38 @@ func (c *Collection) loadDeleted() error {
 	return nil
 }
 
-// reopenIndex переоткрывает хранилище и сегменты: вызывается после индексации.
-func (c *Collection) reopenIndex() error {
-	c.closeFiles()
-	if _, err := os.Stat(filepath.Join(c.dir, "chunks.idx")); err != nil {
-		return nil // коллекция ещё пуста
+// indexFiles — индекс коллекции, открытый на чтение: хранилище кусков,
+// сегменты, поиск по ним и векторы.
+type indexFiles struct {
+	store   *Store
+	segs    []*Segment
+	index   *Index
+	vectors *Vectors
+}
+
+// close закрывает файлы. Векторы лежат в памяти, закрывать у них нечего.
+func (f indexFiles) close() {
+	for _, s := range f.segs {
+		s.Close()
 	}
-	store, err := OpenStore(c.dir)
+	if f.store != nil {
+		f.store.Close()
+	}
+}
+
+// openIndexFiles читает индекс коллекции с диска, не трогая самой коллекции.
+func openIndexFiles(dir string) (indexFiles, error) {
+	if _, err := os.Stat(filepath.Join(dir, "chunks.idx")); err != nil {
+		return indexFiles{}, nil // коллекция ещё пуста
+	}
+	store, err := OpenStore(dir)
 	if err != nil {
-		return err
+		return indexFiles{}, err
 	}
-	dirs, err := segmentDirs(c.dir)
+	dirs, err := segmentDirs(dir)
 	if err != nil {
 		store.Close()
-		return err
+		return indexFiles{}, err
 	}
 	var segs []*Segment
 	for _, d := range dirs {
@@ -610,34 +699,76 @@ func (c *Collection) reopenIndex() error {
 	}
 	// Векторы читаются вместе с индексом: их отсутствие — обычное дело,
 	// а испорченный файл лучше заметить при открытии, а не в первом поиске.
-	vecs, err := OpenVectors(c.dir)
+	vecs, err := OpenVectors(dir)
 	if err != nil {
 		store.Close()
 		for _, seg := range segs {
 			seg.Close()
 		}
+		return indexFiles{}, err
+	}
+	return indexFiles{store: store, segs: segs, index: NewIndex(store, segs), vectors: vecs}, nil
+}
+
+// setIndex ставит открытый индекс на место прежнего и отдаёт прежний —
+// закрыть его вызывающий обязан сам, уже отпустив замок. Только под c.mu.Lock.
+func (c *Collection) setIndex(f indexFiles) indexFiles {
+	old := indexFiles{store: c.store, segs: c.segs, index: c.index, vectors: c.vectors}
+	c.store, c.segs, c.index, c.vectors = f.store, f.segs, f.index, f.vectors
+	// Отображение ссылок «книга, номер → сквозной номер» построено по прежнему
+	// хранилищу и с новым не сходится: после доливки в нём нет новых книг,
+	// после уплотнения сквозные номера сдвинуты, и ChunkByRef отдавал бы
+	// кусок чужой книги. До 07.10.2026 оно строилось один раз на всю жизнь
+	// объекта; теперь — заново при первом обращении после подмены.
+	c.refOnce = sync.Once{}
+	c.byRef = nil
+	return old
+}
+
+// reopenIndex переоткрывает хранилище и сегменты: вызывается после индексации.
+//
+// **Под замком — только подмена.** До 07.10.2026 переоткрытие шло вовсе без
+// c.mu: доливка, сверка и удаление книги закрывали файлы и обнуляли хранилище,
+// пока поиск в соседнем потоке держал замок на чтение и шёл по ним. Тест
+// «четыре потока ищут, рядом доливка и удаление» дал сотни отчётов -race,
+// панику на nil и «file already closed»; общий объект коллекции ронял процесс.
+// Теперь новые файлы открываются вне замка (это чтение мегабайтов с диска),
+// подменяются под c.mu.Lock — идущий поиск дорабатывает на прежних, — а прежние
+// закрываются уже после подмены, когда их никто не держит.
+func (c *Collection) reopenIndex() error {
+	f, err := openIndexFiles(c.dir)
+	if err != nil {
 		return err
 	}
-	c.store = store
-	c.segs = segs
-	c.vectors = vecs
-	c.index = NewIndex(store, segs)
+	c.mu.Lock()
+	old := c.setIndex(f)
+	c.mu.Unlock()
+	old.close()
 	return nil
 }
 
-func (c *Collection) closeFiles() error {
-	for _, s := range c.segs {
-		s.Close()
+// reopenIndexLocked — то же для того, кто уже держит c.mu.Lock: уплотнение
+// и пересборка индекса подменяют файлы под своим замком.
+func (c *Collection) reopenIndexLocked() error {
+	f, err := openIndexFiles(c.dir)
+	if err != nil {
+		return err
 	}
-	c.segs = nil
-	c.vectors = nil
-	if c.store != nil {
-		c.store.Close()
-		c.store = nil
-	}
-	c.index = nil
+	c.setIndex(f).close()
 	return nil
 }
+
+// closeFiles закрывает индекс коллекции; поиск после этого ничего не находит.
+func (c *Collection) closeFiles() error {
+	c.mu.Lock()
+	old := c.setIndex(indexFiles{})
+	c.mu.Unlock()
+	old.close()
+	return nil
+}
+
+// closeFilesLocked — то же под уже взятым c.mu.Lock.
+func (c *Collection) closeFilesLocked() { c.setIndex(indexFiles{}).close() }
 
 // Name — имя коллекции.
 func (c *Collection) Name() string { return c.name }
@@ -760,10 +891,15 @@ func (c *Collection) Breakdown() []FolderStat {
 //
 // Книга может лежать и вне записанных корней — например, если корень потом
 // убрали. Тогда честнее показать имя её каталога, чем прятать её в «прочее».
+//
+// «Вне корня» — это «..» целым элементом пути, как в relToRoots, а не любое
+// начало на две точки: каталог «..заметки» под корнем лежит внутри него,
+// и до 07.10.2026 книги из него приписывались своему подкаталогу, а при
+// нескольких корнях — и чужому корню.
 func topFolder(path string, roots []string) string {
 	for _, root := range roots {
 		rel, err := filepath.Rel(root, path)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
 		if i := strings.IndexByte(rel, filepath.Separator); i > 0 {
@@ -772,6 +908,26 @@ func topFolder(path string, roots []string) string {
 		return "." // книга лежит прямо в корне
 	}
 	return filepath.Base(filepath.Dir(path))
+}
+
+// liveDocs — номера книг, которые может выдавать поиск: прочитанные, стоящие
+// в реестре и не помеченные удалёнными; only — ещё и только из этого списка
+// (пусто — любые). Под замком чтения.
+func (c *Collection) liveDocs(only ...uint32) map[uint32]bool {
+	var want map[uint32]bool
+	if len(only) > 0 {
+		want = make(map[uint32]bool, len(only))
+		for _, id := range only {
+			want[id] = true
+		}
+	}
+	out := make(map[uint32]bool, len(c.docs))
+	for _, d := range c.docs {
+		if d.ID != 0 && d.Kind == BookOK && !c.deleted[d.ID] && (want == nil || want[d.ID]) {
+			out[d.ID] = true
+		}
+	}
+	return out
 }
 
 // Book находит ЖИВУЮ книгу по её номеру: удалённую не возвращает.
@@ -801,13 +957,12 @@ func (c *Collection) Book(id uint32) (BookRec, bool) {
 func (c *Collection) BookAny(id uint32) (BookRec, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	for _, d := range c.docs {
-		if d.ID == id {
-			d.Deleted = c.deleted[id]
-			return d, true
-		}
+	d, ok := c.book(id)
+	if !ok {
+		return BookRec{}, false
 	}
-	return BookRec{}, false
+	d.Deleted = c.deleted[id]
+	return d, true
 }
 
 // Stats — сводка по коллекции.
@@ -823,6 +978,16 @@ type Stats struct {
 	Bytes    int64
 	Analyzer string
 	Stale    bool // версия разбора разошлась с нынешней
+
+	// NoSegment — куски живых книг, не покрытые ни одним сегментом: поиск
+	// по словам их не видит. Остаются, когда построение индекса прервали
+	// (Ctrl+C в фазе «индекс»); достраивает их любая доливка.
+	NoSegment int
+
+	// BadSegments — готовые сегменты (с seg.meta), которые не открылись:
+	// испорчен словарь или файлы. Открытие их пропускает, и поиск по словам
+	// молча не видит их куски; лечится пересборкой индекса (--kb-reanalyze).
+	BadSegments int
 
 	Vectors  int    // сколько кусков обеспечено смыслами
 	VecModel string // какой моделью посчитаны
@@ -855,8 +1020,23 @@ func (c *Collection) Stats() Stats {
 		st.Chunks = c.store.Count()
 	}
 	st.Segments = len(c.segs)
+	covered := 0
 	for _, s := range c.segs {
 		st.Terms += s.Terms()
+		if end := s.meta.FirstID + s.meta.Chunks; end > covered {
+			covered = end
+		}
+	}
+	if dirs, err := segmentDirs(c.dir); err == nil && len(dirs) > len(c.segs) {
+		st.BadSegments = len(dirs) - len(c.segs)
+	}
+	if c.store != nil && c.store.Count() > covered {
+		live := c.liveDocs()
+		for i := covered; i < c.store.Count(); i++ {
+			if live[c.store.recs[i].Doc] {
+				st.NoSegment++
+			}
+		}
 	}
 	st.Bytes = dirSize(c.dir)
 	if c.vectors != nil {
@@ -903,15 +1083,21 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 	if c.index == nil {
 		return nil, nil
 	}
-	// Удалённые книги из выдачи исключаем: помеченные удалёнными куски
+	// Выдаются только живые книги реестра: помеченные удалёнными куски
 	// физически остаются до уплотнения.
-	if len(c.deleted) > 0 && len(opt.Docs) == 0 {
-		for _, d := range c.docs {
-			if !c.deleted[d.ID] && d.Kind == BookOK {
-				opt.Docs = append(opt.Docs, d.ID)
-			}
-		}
-	}
+	//
+	// **Отбор ставится всегда**, а не только при непустом deleted.ids, как
+	// было до 07.10.2026. Кроме удалённых, в хранилище бывают и ничьи куски —
+	// прежние версии книг, чью запись реестра заменила перечитанная (так делал
+	// --kb-sync до той же даты), и обрывки прерванной записи. Пометки у них
+	// нет, и в коллекции без единого удаления они находились поиском с пустыми
+	// названием и путём.
+	//
+	// **И при явном списке книг тоже.** Список приходит снаружи — kb_search
+	// с отбором по названию, служба по запросу клиента, — и до 07.10.2026 при
+	// непустом Docs отбор живых не ставился вовсе: удалённая книга, попавшая
+	// в список, находилась.
+	opt.docFilter = c.liveDocs(opt.Docs...)
 	hits, note, err := c.hybrid(ctx, query, opt, emb)
 	if err != nil {
 		return nil, err
@@ -934,18 +1120,15 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 			Snippet: Snippet(text, query, snippetRunes),
 			Code:    ChunkFlags(rec.Flags)&FlagCode != 0,
 		}
-		for _, d := range c.docs {
-			if d.ID == rec.Doc {
-				res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
-				res.Year, res.YearSrc = d.Year, d.YearSrc
-				res.Unit = shortUnit(d.UnitWord)
-				if res.Unit == unitLines {
-					res.Rel = relToRoots(d.Path, c.meta.Roots)
-				}
-				if res.Book == "" {
-					res.Book = filepath.Base(d.Path)
-				}
-				break
+		if d, ok := c.book(rec.Doc); ok {
+			res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
+			res.Year, res.YearSrc = d.Year, d.YearSrc
+			res.Unit = shortUnit(d.UnitWord)
+			if res.Unit == unitLines {
+				res.Rel = relToRoots(d.Path, c.meta.Roots)
+			}
+			if res.Book == "" {
+				res.Book = filepath.Base(d.Path)
 			}
 		}
 		out = append(out, res)
@@ -956,7 +1139,7 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 // hybrid собирает выдачу из двух поисков: по словам и по смыслу.
 func (c *Collection) hybrid(ctx context.Context, query string, opt SearchOpts, emb Embedder) ([]Hit, string, error) {
 	if opt.TopK <= 0 {
-		opt = DefaultSearchOpts()
+		opt = opt.withDefaults()
 	}
 	words, err := c.index.Candidates(query, opt)
 	if err != nil {
@@ -990,7 +1173,7 @@ func (c *Collection) hybrid(ctx context.Context, query string, opt SearchOpts, e
 // semanticHits возвращает ближайшие по смыслу куски или ничего, если смысл
 // сейчас недоступен. Причина недоступности записывается в note.
 func (c *Collection) semanticHits(ctx context.Context, query string, opt SearchOpts, emb Embedder) ([]Hit, string) {
-	if emb == nil || !opt.Semantic || c.vectors == nil {
+	if emb = EmbedderOrNil(emb); emb == nil || !opt.Semantic || c.vectors == nil {
 		return nil, ""
 	}
 	m := c.vectors.Meta()
@@ -1021,8 +1204,8 @@ func (c *Collection) semanticHits(ctx context.Context, query string, opt SearchO
 	if len(q) == 0 {
 		return nil, ""
 	}
-	var allow map[uint32]bool
-	if len(opt.Docs) > 0 {
+	allow := opt.docFilter
+	if allow == nil && len(opt.Docs) > 0 {
 		allow = make(map[uint32]bool, len(opt.Docs))
 		for _, d := range opt.Docs {
 			allow[d] = true
@@ -1050,7 +1233,7 @@ func (c *Collection) setNote(note string) {
 func (c *Collection) DebugVectorHits(ctx context.Context, emb Embedder, query string, n int) ([]Result, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.vectors == nil || emb == nil {
+	if emb = EmbedderOrNil(emb); c.vectors == nil || emb == nil {
 		return nil, nil
 	}
 	q, err := embedQuery(ctx, emb, query, c.vectors.Dim())
@@ -1117,18 +1300,15 @@ func (c *Collection) Around(id string, around int) ([]Result, error) {
 			Unit: "стр.", Text: text, Snippet: text,
 			Code: ChunkFlags(rec.Flags)&FlagCode != 0,
 		}
-		for _, d := range c.docs {
-			if d.ID == rec.Doc {
-				res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
-				res.Year, res.YearSrc = d.Year, d.YearSrc
-				res.Unit = shortUnit(d.UnitWord)
-				if res.Unit == unitLines {
-					res.Rel = relToRoots(d.Path, c.meta.Roots)
-				}
-				if res.Book == "" {
-					res.Book = filepath.Base(d.Path)
-				}
-				break
+		if d, ok := c.book(rec.Doc); ok {
+			res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
+			res.Year, res.YearSrc = d.Year, d.YearSrc
+			res.Unit = shortUnit(d.UnitWord)
+			if res.Unit == unitLines {
+				res.Rel = relToRoots(d.Path, c.meta.Roots)
+			}
+			if res.Book == "" {
+				res.Book = filepath.Base(d.Path)
 			}
 		}
 		out = append(out, res)
@@ -1169,18 +1349,36 @@ func (c *Collection) lock() error {
 		return err
 	}
 	path := filepath.Join(c.dir, lockMark)
-	if data, err := os.ReadFile(path); err == nil {
-		pid, _ := strconv.Atoi(strings.Fields(string(data))[0])
-		if pid > 0 && processAlive(pid) {
-			return fmt.Errorf("коллекция %q уже индексируется (процесс %d)", c.name, pid)
+	for attempt := 0; ; attempt++ {
+		err := placeMarker(path)
+		if err == nil || !os.IsExist(err) {
+			return err
 		}
-		// Замок от умершего процесса снимаем сами.
+		// Замок уже стоит. Живой хозяин — отказ; от умершего процесса (или
+		// давний испорченный) снимаем сами, но один раз: если и после этого
+		// не взять, его только что взял кто-то другой.
+		held, desc := markerState(path)
+		if held || attempt > 0 {
+			if desc == "" {
+				desc = "замок занят"
+			}
+			return fmt.Errorf("коллекция %q уже индексируется (%s)", c.name, desc)
+		}
 		os.Remove(path)
 	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d %s\n", os.Getpid(), time.Now().Format(time.RFC3339))), 0o644)
 }
 
-func (c *Collection) unlock() { os.Remove(filepath.Join(c.dir, lockMark)) }
+// unlock снимает замок, но только свой.
+//
+// Чужой замок не трогается: уплотнение подменяет каталог коллекции, и замок
+// в новом каталоге мог успеть поставить другой процесс — прежнее безусловное
+// удаление сняло бы его замок посреди работы.
+func (c *Collection) unlock() {
+	path := filepath.Join(c.dir, lockMark)
+	if markerPID(path) == os.Getpid() {
+		os.Remove(path)
+	}
+}
 
 func processAlive(pid int) bool {
 	p, err := os.FindProcess(pid)

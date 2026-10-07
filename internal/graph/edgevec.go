@@ -122,6 +122,38 @@ func openEdgeVectors(dir string) *EdgeVectors {
 	return v
 }
 
+// refresh перечитывает индекс троек с диска, если паспорт там не тот, что
+// в памяти (см. lockVectorsFresh).
+func (v *EdgeVectors) refresh() {
+	if v == nil {
+		return
+	}
+	var disk edgeVecMeta
+	if raw, err := os.ReadFile(filepath.Join(v.dir, edgeVecMetaFile)); err == nil {
+		if json.Unmarshal(raw, &disk) != nil || disk.Magic != edgeVecMagic || disk.Dim <= 0 {
+			disk = edgeVecMeta{}
+		}
+		v.mu.RLock()
+		same := disk == v.meta && v.problem == ""
+		v.mu.RUnlock()
+		if same {
+			return
+		}
+	} else if os.IsNotExist(err) {
+		v.mu.RLock()
+		same := v.meta == (edgeVecMeta{}) && v.problem == ""
+		v.mu.RUnlock()
+		if same {
+			return
+		}
+	}
+	fresh := openEdgeVectors(v.dir)
+	v.mu.Lock()
+	v.meta, v.keys, v.stamp, v.data = fresh.meta, fresh.keys, fresh.stamp, fresh.data
+	v.index, v.problem = fresh.index, fresh.problem
+	v.mu.Unlock()
+}
+
 // load раскладывает файл данных по записям.
 func (v *EdgeVectors) load(buf []byte) {
 	n := len(buf) / v.rowSize()
@@ -401,7 +433,7 @@ func (g *Graph) EmbedTriples(ctx context.Context, emb kb.Embedder, minOrigins in
 		minOrigins = DefaultTripleMinOrigins
 	}
 	o = o.norm()
-	release, err := lockVectors(g.dir)
+	release, err := g.lockVectorsFresh()
 	if err != nil {
 		return err
 	}

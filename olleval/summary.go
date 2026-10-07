@@ -9,9 +9,13 @@ import (
 
 // Summary — сводка по одной паре «модель × набор».
 type Summary struct {
-	Model           string
-	Suite           string
-	Attempts        int
+	Model    string
+	Suite    string
+	Attempts int
+	// MeanScore — балл области: средний по попыткам с весом уровня задачи
+	// (levelWeight), как обещает README. До 07.10.2026 считалось простое
+	// среднее, и десяток мелочей У1 весил столько же, сколько десяток задач
+	// «с нуля» У3.
 	MeanScore       float64
 	MedianSeconds   float64
 	MedianTokPerSec float64
@@ -47,15 +51,16 @@ func ReadIndex(path string) ([]Metrics, error) {
 
 // Summarize складывает попытки в сводку по паре «модель × набор».
 //
-// Балл — средний по попыткам, а время и скорость — медианные: одна задача,
-// упёршаяся в таймаут, сдвинула бы среднее так, что цифра перестала бы
-// описывать обычный ответ.
+// Балл — средний по попыткам с весом уровня задачи, а время и скорость —
+// медианные: одна задача, упёршаяся в таймаут, сдвинула бы среднее так,
+// что цифра перестала бы описывать обычный ответ.
 func Summarize(recs []Metrics) map[string]*Summary {
 	type bucket struct {
-		s     *Summary
-		score []float64
-		secs  []float64
-		tps   []float64
+		s      *Summary
+		score  []float64
+		weight []float64
+		secs   []float64
+		tps    []float64
 	}
 	buckets := make(map[string]*bucket)
 	for _, r := range recs {
@@ -76,6 +81,7 @@ func Summarize(recs []Metrics) map[string]*Summary {
 			b.s.Review++
 		}
 		b.score = append(b.score, r.Score)
+		b.weight = append(b.weight, weightOf(r.Level))
 		b.secs = append(b.secs, r.WallSeconds)
 		if r.TokensPerSecond > 0 {
 			b.tps = append(b.tps, r.TokensPerSecond)
@@ -84,7 +90,7 @@ func Summarize(recs []Metrics) map[string]*Summary {
 
 	out := make(map[string]*Summary, len(buckets))
 	for k, b := range buckets {
-		b.s.MeanScore = mean(b.score)
+		b.s.MeanScore = weightedMean(b.score, b.weight)
 		b.s.MedianSeconds = median(b.secs)
 		b.s.MedianTokPerSec = median(b.tps)
 		out[k] = b.s
@@ -92,15 +98,17 @@ func Summarize(recs []Metrics) map[string]*Summary {
 	return out
 }
 
-func mean(v []float64) float64 {
-	if len(v) == 0 {
+// weightedMean — среднее значений v с весами w (той же длины).
+func weightedMean(v, w []float64) float64 {
+	var sum, total float64
+	for i, x := range v {
+		sum += x * w[i]
+		total += w[i]
+	}
+	if total == 0 {
 		return 0
 	}
-	var s float64
-	for _, x := range v {
-		s += x
-	}
-	return s / float64(len(v))
+	return sum / total
 }
 
 func median(v []float64) float64 {

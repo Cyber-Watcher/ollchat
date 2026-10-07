@@ -47,7 +47,7 @@ func TestIdentifiersStayWhole(t *testing.T) {
 }
 
 // TestIdentifierPartsIndexed — имя кладётся и по частям, на той же позиции:
-// иначе «http клиент» не найдёт HTTPClient, а «go mod» — go.mod.
+// иначе «waitgroup» не найдёт sync.WaitGroup, а «go mod» — go.mod.
 func TestIdentifierPartsIndexed(t *testing.T) {
 	toks := Tokens("вызов sync.WaitGroup здесь", nil)
 	var whole, part uint32
@@ -65,6 +65,48 @@ func TestIdentifierPartsIndexed(t *testing.T) {
 	}
 	if whole != part {
 		t.Fatalf("часть имени стоит на другой позиции: %d против %d", part, whole)
+	}
+}
+
+// StemWord приводит слово к той же основе, что и индекс, — в том числе
+// с буквой «ё»: индекс сводит её к «е», а StemWord до 07.10.2026 нет,
+// и «ёмкость» из вопроса не совпадала с понятием «емкость».
+func TestStemWordFoldsYo(t *testing.T) {
+	for _, w := range []string{"ёмкостями", "Ёлками", "чёрный"} {
+		toks := Tokens(w, nil)
+		if len(toks) == 0 {
+			t.Fatalf("%q: индекс не дал терма", w)
+		}
+		if got := StemWord(w); got != toks[0].Term {
+			t.Errorf("%q: StemWord %q, а в индексе %q", w, got, toks[0].Term)
+		}
+	}
+	if StemWord("ёмкость") != StemWord("емкость") {
+		t.Error("«ё» и «е» дали разные основы")
+	}
+}
+
+// TestCamelCaseNotSplit — тест-факт: имя в camelCase не режется по границам
+// регистра, `HTTPClient` лежит в индексе одним термом.
+//
+// Комментарии и имя теста выше до 07.10.2026 обещали обратное («http клиент»
+// найдёт HTTPClient), а код этого не делал. Обещание убрано: разбор общий
+// с графом понятий (graph.groundNames сверяет им имена с текстом куска),
+// и новые части у имён изменили бы, что принимает сборка графа. Если тест
+// упал — разбор научился резать camelCase: это новая AnalyzerVersion,
+// --kb-reanalyze по коллекциям и проверка сборки графа, а комментарии
+// в analyze.go надо вернуть к обещанию.
+func TestCamelCaseNotSplit(t *testing.T) {
+	got := terms("клиент HTTPClient и httpClient.Do")
+	for _, want := range []string{"httpclient", "httpclient.do"} {
+		if !has(got, want) {
+			t.Errorf("нет терма %q: %v", want, got)
+		}
+	}
+	for _, part := range []string{"http", "client"} {
+		if has(got, part) {
+			t.Errorf("camelCase разрезан: есть терм %q (%v)", part, got)
+		}
 	}
 }
 

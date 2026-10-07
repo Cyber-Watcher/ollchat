@@ -21,7 +21,7 @@ func newTestModel(t *testing.T) *Model {
 }
 
 // newTestModelWith собирает модель, дав тесту поправить конфиг перед сборкой.
-func newTestModelWith(t *testing.T, tune func(*config.Config)) *Model {
+func newTestModelWith(t testing.TB, tune func(*config.Config)) *Model {
 	t.Helper()
 	cfg := config.Default()
 	cfg.General.RenderMarkdown = false // markdown не нужен, важна геометрия

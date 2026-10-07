@@ -66,7 +66,7 @@ func kbHelpBlock(has sectionCheck) string {
   библиотеке разом: /kb add go /путь/к/книгам — и модель сможет искать в этих
   книгах инструментом kb_search, отвечая со ссылками на книгу и страницу.
   Индексация идёт в фоне: чат при этом работает, ход виден в строке состояния,
-  Esc или /kb stop останавливает. Доливка книг стоит ровно столько, сколько
+  Esc дважды или /kb stop останавливает. Доливка книг стоит ровно столько, сколько
   новых книг: /kb sync go перечитает только то, что появилось, а пропавшее
   уберёт из выдачи. Каталоги, откуда можно брать книги, перечисляются
   в настройке kb.roots — ни модель, ни команда этот список не расширяют.
@@ -192,6 +192,8 @@ Ctrl+G возвращает в конец и снова включает сле�
   n  отклонить
   a  разрешить это действие до конца сеанса
   t  разрешить весь инструмент до конца сеанса — больше не спрашивать про него
+Ответ принимается после полсекунды без нажатий: буквы, набранные в момент
+появления окна, ответом не становятся.
 Запреты из permissions.deny действуют всегда и ответами y/a/t не снимаются.`
 }
 
@@ -213,7 +215,7 @@ func commandHandlers() []cmdHandler {
 			return nil
 		}},
 		{names: []string{"confluencetoken", "token"}, run: (*Model).confluenceTokenCmd},
-		{names: []string{"quit", "exit", "q"}, run: func(*Model, string) tea.Cmd { return tea.Quit }},
+		{names: []string{"quit", "exit", "q"}, run: (*Model).quitCmd},
 		{names: []string{"servers"}, run: func(m *Model, _ string) tea.Cmd { return m.openServerPicker() }},
 		{names: []string{"server"}, run: func(m *Model, arg string) tea.Cmd {
 			if arg == "" {
@@ -302,6 +304,21 @@ func (m *Model) runCommand(input string) tea.Cmd {
 	return nil
 }
 
+// quitCmd — /quit: выход.
+//
+// Идущая фоновая работа при выходе обрывается, а это бывают часы индексации
+// или уплотнения. Поэтому о ней предупреждаем — один раз на задачу: второй
+// /quit выходит.
+func (m *Model) quitCmd(_ string) tea.Cmd {
+	if m.job != nil && m.quitWarnedJob != m.job.gen {
+		m.quitWarnedJob = m.job.gen
+		m.addBlock(block{kind: blockHint, text: "идёт " + m.job.title +
+			" — выход оборвёт её. Выйти всё равно: /quit ещё раз; остановить работу: /kb stop"})
+		return nil
+	}
+	return tea.Quit
+}
+
 // modeCmd — /mode: показать или сменить режим подтверждений.
 func (m *Model) modeCmd(arg string) tea.Cmd {
 	if arg == "" {
@@ -352,6 +369,8 @@ func (m *Model) clearCmd(_ string) tea.Cmd {
 	m.dropPendingImages()
 	m.pastes = nil
 	m.addBlock(block{kind: blockNotice, text: "история диалога очищена"})
+	// Сводка, посчитанная по прежней истории, в очищенную лечь не должна.
+	m.abortCompaction("/clear")
 	return nil
 }
 
@@ -533,7 +552,12 @@ func (m *Model) permissionsReport() string {
 			fmt.Fprintf(&b, "  %s\n", s)
 		}
 	}
-	writeRules("Запрещено (deny — не обходится ничем)", deny)
+	// Обещание — ровно то, что держит проверка. Прежнее «не обходится ничем»
+	// было неправдой (аудит 07.10.2026, находка 5): deny сильнее режима
+	// и сеансовых разрешений и сверяется с каждой командой строки, но это
+	// ограждение, а не изоляция — интерпретатор вроде python -c делает что
+	// угодно, и по строке команды этого не видно.
+	writeRules("Запрещено (deny — сильнее режима и сеансовых разрешений; проверяется для каждой команды строки)", deny)
 	writeRules("Разрешено (allow)", allow)
 	writeRules("Спрашивать (ask)", ask)
 
@@ -931,6 +955,16 @@ func (m *Model) attach(rel, body, notice string) tea.Cmd {
 		notice, len(body), ctxmeter.FormatTokens(ctxmeter.Estimate(content)))})
 	_ = m.logger.Write(chatlog.KindSystem, "К контексту приложен файл "+rel)
 	return nil
+}
+
+// flushHeldAttach кладёт в историю файлы, дочитанные посреди хода.
+// Зовётся, когда ход кончился: агент историю больше не дописывает.
+func (m *Model) flushHeldAttach() {
+	held := m.heldAttach
+	m.heldAttach = nil
+	for _, a := range held {
+		m.attach(a.rel, a.body, a.notice)
+	}
 }
 
 func (m *Model) logCmd(arg string) tea.Cmd {

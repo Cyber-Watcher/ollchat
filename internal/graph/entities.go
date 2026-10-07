@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
@@ -96,6 +98,7 @@ type Entities struct {
 	path string
 	f    *os.File
 	w    *bufio.Writer
+	tail journalTail // хвост файла при чтении; правится перед дозаписью (journal.go)
 
 	// merges — склейки, надеваемые при чтении. Поиск обязан вести к выжившему.
 	merges *Merges
@@ -140,6 +143,14 @@ type Entities struct {
 	list  []Entity          // по номеру: list[id-1]
 	byKey map[string]uint32 // нормализованное имя или синоним → номер
 
+	// floor — наибольший номер понятия, о котором известно, что он занят, хотя
+	// записи в реестре может и не быть; новые номера выдаются выше (reserve).
+	floor uint32
+
+	// dirty — понятия, чьи счётчики изменились после их последней записи
+	// в файл (Touch); их и только их дописывает SaveCounters.
+	dirty map[uint32]bool
+
 	// byStem — то же, но по основам слов: «переранжирование» и
 	// «переранжировать» дают один ключ. Нужен входу в граф: вопрос задают
 	// живой речью, а понятия записаны словарной формой. Замер 26.08.2026:
@@ -154,16 +165,9 @@ type Entities struct {
 
 const entitiesFile = "entities.jsonl"
 
-func openEntities(dir string, stemMinLen int) (*Entities, error) {
-	return openEntitiesWith(dir, stemMinLen, nil, false)
-}
-
-// strictKeys — правило формата 2: аббревиатура ключом не служит (см. put).
-func openEntitiesWith(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool) (*Entities, error) {
-	return openEntitiesShared(dir, stemMinLen, cb, strictKeys, 0)
-}
-
-// openEntitiesShared — то же с правилом общего синонима (sharedLimit).
+// openEntitiesShared открывает реестр понятий на дозапись. strictKeys —
+// правило формата 2: аббревиатура ключом не служит (см. put); sharedLimit —
+// правило общего синонима.
 func openEntitiesShared(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool, sharedLimit int) (*Entities, error) {
 	e := &Entities{path: filepath.Join(dir, entitiesFile), stemMinLen: stemMinLen, strictKeys: strictKeys,
 		sharedLimit: sharedLimit, aliasOwners: map[string]int{},
@@ -184,7 +188,11 @@ func openEntitiesShared(dir string, stemMinLen int, cb func(OpenProgress), stric
 // внезапного выключения, а не повод потерять сорок тысяч сущностей.
 func (e *Entities) load(cb func(OpenProgress)) error {
 	// Запреты читаются до реестра: put применяет их к каждой записи.
-	e.deny = loadAliasDeny(filepath.Dir(e.path))
+	deny, err := loadAliasDeny(filepath.Dir(e.path))
+	if err != nil {
+		return err
+	}
+	e.deny = deny
 	for _, r := range e.extraDeny {
 		if k := Normalize(r.Alias); k != "" && r.ID != 0 {
 			if e.deny == nil {
@@ -219,6 +227,23 @@ func (e *Entities) load(cb func(OpenProgress)) error {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	// Точный учёт байт ради хвоста (journal.go): сколько прочитано всего
+	// и сколько из этого — строки, закончившиеся переводом строки. Последняя
+	// строка без перевода — оборванная запись либо целая, которой недостало
+	// одного перевода строки; что из двух, решает её разбор.
+	unterminated, tailOK := false, false
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		adv, tok, err := bufio.ScanLines(data, atEOF)
+		if adv > 0 {
+			if data[adv-1] == '\n' {
+				e.tail.record(adv)
+			} else {
+				e.tail.torn(adv)
+				unterminated = true
+			}
+		}
+		return adv, tok, err
+	})
 	for sc.Scan() {
 		line := sc.Bytes()
 		if cb != nil {
@@ -237,8 +262,10 @@ func (e *Entities) load(cb func(OpenProgress)) error {
 		if err := json.Unmarshal(line, &ent); err != nil || ent.ID == 0 {
 			continue
 		}
+		tailOK = unterminated
 		e.put(ent)
 	}
+	e.tail.newline = unterminated && tailOK
 	return sc.Err()
 }
 
@@ -788,7 +815,7 @@ func (e *Entities) Add(name, typ string, aliases ...string) (uint32, bool, error
 	// человек при разборе, а не сборка вслепую.
 
 	ent := Entity{
-		ID:      uint32(len(e.list) + 1),
+		ID:      e.nextID(),
 		Name:    strings.TrimSpace(name),
 		Norm:    norm,
 		Type:    NormalizeType(typ),
@@ -799,7 +826,111 @@ func (e *Entities) Add(name, typ string, aliases ...string) (uint32, bool, error
 		return 0, false, err
 	}
 	e.put(ent)
+	delete(e.dirty, ent.ID) // номер мог быть занят без записи (reserve)
 	return ent.ID, true, nil
+}
+
+// Номера понятий не выдаются повторно.
+//
+// **Беда.** Номер нового понятия был `len(list)+1`, то есть «следующий после
+// последней записи реестра». Уплотнение с выбрасыванием мёртвых понятий
+// (--graph-compact-drop-dead) убирает и записи с хвоста — и их номера
+// выдавались снова: новое понятие наследовало упоминания, вектор, синонимы
+// формата 2, описание и запреты синонимов прежнего, на которые всё это
+// записано по номеру (аудит 07.10.2026, №12). Так же вёл бы себя номер
+// записи, оборванной вместе с хвостом реестра, когда её упоминания успели
+// лечь на диск.
+//
+// **Решение.** Номер берётся выше наибольшего занятого. Занятым считается
+// всё, на что ссылается граф: реестр, упоминания, связи, синонимы формата 2,
+// склейки, запреты, описания, векторы — и отметка уплотнения (entMaxIDFile),
+// которое записывает наибольший номер перед тем, как выбросить понятия.
+// Отметки может не быть (граф уплотняли прежней сборкой программы) — тогда
+// граница выводится из данных; формат файлов при этом не меняется.
+
+// entMaxIDFile — наибольший номер понятия, когда-либо выданный реестром.
+// Пишется уплотнением перед выбрасыванием понятий (compact.go).
+const entMaxIDFile = "entities.maxid"
+
+type maxIDRec struct {
+	MaxID uint32 `json:"max_id"`
+	At    int64  `json:"at"`
+}
+
+// loadMaxID читает отметку наибольшего номера; нет файла или он не читается —
+// ноль, то есть граница выводится из данных.
+func loadMaxID(dir string) uint32 {
+	raw, err := os.ReadFile(filepath.Join(dir, entMaxIDFile))
+	if err != nil {
+		return 0
+	}
+	var r maxIDRec
+	if json.Unmarshal(raw, &r) != nil {
+		return 0
+	}
+	return r.MaxID
+}
+
+// saveMaxID записывает отметку наибольшего номера; меньшая прежней не пишется.
+func saveMaxID(dir string, id uint32) error {
+	if have := loadMaxID(dir); have >= id {
+		return nil
+	}
+	raw, err := json.Marshal(maxIDRec{MaxID: id, At: time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	return fsx.WriteFileAtomic(filepath.Join(dir, entMaxIDFile), append(raw, '\n'), 0o644)
+}
+
+// maxIDSlack — насколько далеко за последней записью реестра ссылка на номер
+// понятия ещё считается настоящей.
+//
+// Журнал, дописанный после обрывка до 07.10.2026 (journal.go), читается
+// со сдвигом, и в номерах понятий у него мусор вроде 117 млн: поверить ему —
+// значит раздуть реестр под такой номер до гигабайтов. Настоящий разрыв мал:
+// это записи реестра, не дошедшие до диска при обрыве (буфер — единицы
+// килобайт), и понятия, выброшенные уплотнением с хвоста, — тысячи.
+const maxIDSlack = 1 << 16
+
+// reserve отмечает номер занятым: новые понятия получат номера выше.
+func (e *Entities) reserve(id uint32) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.floor = max(e.floor, id)
+}
+
+// nextID — номер для нового понятия: следующий после последней записи
+// реестра и после всего занятого. Под замком реестра.
+func (e *Entities) nextID() uint32 {
+	id := uint32(len(e.list)) + 1
+	if id <= e.floor {
+		id = e.floor + 1
+	}
+	return id
+}
+
+// idSpace — сколько номеров занято: записи реестра и всё, что выше них
+// отмечено занятым (reserve). Векторы лежат по номерам, и пространство номеров
+// для них — именно это число, а не номер последней живой записи.
+func (e *Entities) idSpace() uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return max(uint32(len(e.list)), e.floor)
+}
+
+// maxDenied — наибольший номер понятия в журнале запретов, не больше limit
+// (см. Mentions.maxEntity).
+func (e *Entities) maxDenied(limit uint32) uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var out uint32
+	for id := range e.deny {
+		if id > out && id <= limit {
+			out = id
+		}
+	}
+	return out
 }
 
 // mergeAliases дописывает синонимы к уже известной сущности.
@@ -843,6 +974,7 @@ func (e *Entities) mergeAliases(id uint32, aliases []string) error {
 		return err
 	}
 	e.put(ent)
+	delete(e.dirty, id) // записан целиком, со счётчиками
 	return nil
 }
 
@@ -859,27 +991,48 @@ func (e *Entities) Touch(id uint32, newDoc bool) {
 	if newDoc {
 		e.list[id-1].Docs++
 	}
+	if e.dirty == nil {
+		e.dirty = map[uint32]bool{}
+	}
+	e.dirty[id] = true
 }
 
-// SaveCounters переписывает счётчики всех сущностей одной пачкой дозаписи.
-// Зовётся в конце волны сборки, а не после каждого куска.
+// SaveCounters дописывает счётчики понятий, изменившихся с их последней
+// записи, одной пачкой. Зовётся в конце волны сборки, а не после каждого куска.
+//
+// До 07.10.2026 дописывались ВСЕ понятия реестра после каждого захода —
+// и реестр распух вдвадцатеро: 523 МБ и 41 с на открытие при 161 тысяче
+// понятий (замер 02.09.2026, compact.go; аудит, 4.5). Нетронутому понятию
+// новая строка не нужна: побеждает последняя запись, а она и так верна.
 func (e *Entities) SaveCounters() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	ids := make([]uint32, 0, len(e.dirty))
+	for id := range e.dirty {
+		ids = append(ids, id)
+	}
+	// По возрастанию номера, как и прежде: порядок записей в файле
+	// не зависит от обхода карты и повторяется от захода к заходу.
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	now := time.Now().Unix()
-	for i := range e.list {
-		if e.list[i].ID == 0 {
+	for _, id := range ids {
+		if id == 0 || uint32(len(e.list)) < id || e.list[id-1].ID == 0 {
+			delete(e.dirty, id)
 			continue
 		}
-		e.list[i].At = now
-		if err := e.append(e.list[i]); err != nil {
+		e.list[id-1].At = now
+		if err := e.append(e.list[id-1]); err != nil {
 			return err
 		}
+		delete(e.dirty, id)
 	}
 	return e.w.Flush()
 }
 
 func (e *Entities) append(ent Entity) error {
+	if err := e.tail.prepare(e.f, e.path); err != nil {
+		return err
+	}
 	b, err := json.Marshal(ent)
 	if err != nil {
 		return err
@@ -888,6 +1041,13 @@ func (e *Entities) append(ent Entity) error {
 		return err
 	}
 	return nil
+}
+
+// prepare приводит хвост реестра в порядок перед дозаписью (journal.go).
+func (e *Entities) prepare() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tail.prepare(e.f, e.path)
 }
 
 // Sync сбрасывает буфер и просит диск записать его: Flush отдаёт данные

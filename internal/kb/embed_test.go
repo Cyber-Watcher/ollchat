@@ -5,11 +5,14 @@ import (
 	"errors"
 	"hash/fnv"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeEmbedder — эмбеддер без сети: вектор собирается из слов текста.
@@ -648,6 +651,52 @@ func TestMergeMovesVectors(t *testing.T) {
 	}
 }
 
+// Верхушка по смыслу, собранная кучей в каждом потоке, совпадает с полной
+// сортировкой всех кусков: та же выдача, только без сортировки десятков тысяч
+// кусков ради двухсот. Куски с равным косинусом есть нарочно — порядок
+// при равенстве (меньший номер выше) не должен зависеть от потоков.
+func TestSearchVectorsTopKMatchesFullSort(t *testing.T) {
+	const n, dim = 9000, 16 // больше 2048 — счёт идёт в несколько потоков
+	rng := rand.New(rand.NewSource(7))
+	c := &Collection{
+		store:   &Store{recs: make([]ChunkRec, n)},
+		vectors: &Vectors{meta: VecMeta{Magic: vecMagic, Dim: dim, Count: n}, data: make([]int8, n*dim)},
+	}
+	for i := 0; i < n; i++ {
+		c.store.recs[i].Doc = uint32(i%7 + 1)
+		for d := 0; d < dim; d++ {
+			c.vectors.data[i*dim+d] = int8(rng.Intn(9) - 4) // мало значений — много равенств
+		}
+	}
+	query := make([]int8, dim)
+	for d := range query {
+		query[d] = int8(rng.Intn(9) - 4)
+	}
+	allow := map[uint32]bool{1: true, 2: true, 3: true, 5: true}
+
+	var want []Hit
+	for i := 0; i < n; i++ {
+		if !allow[c.store.recs[i].Doc] {
+			continue
+		}
+		if cos := Cosine(c.vectors.At(i), query); cos >= -0.05 {
+			want = append(want, Hit{Chunk: i, Score: cos})
+		}
+	}
+	sort.Slice(want, func(a, b int) bool { return betterHit(want[a], want[b]) })
+	want = want[:200]
+
+	got := c.searchVectors(query, 200, allow, -0.05)
+	if len(got) != len(want) {
+		t.Fatalf("попаданий %d, ожидалось %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("место %d: %+v, при полной сортировке %+v", i, got[i], want[i])
+		}
+	}
+}
+
 // TestFuseByRanks — слияние обязано складывать места, а не веса: устойчиво
 // хороший кусок должен обходить того, кто первый у одного и далёкий у другого.
 func TestFuseByRanks(t *testing.T) {
@@ -858,5 +907,195 @@ func TestCreateVecWriterShrinksMetaBeforeTruncate(t *testing.T) {
 	}
 	if v != nil && v.Count() != 0 {
 		t.Fatalf("паспорт обещает %d векторов при пустом файле", v.Count())
+	}
+}
+
+// gatedEmbedder — эмбеддер, который на пачке текстов ждёт, пока его отпустят:
+// так выглядит многочасовой счёт смыслов, застигнутый посреди волны.
+type gatedEmbedder struct {
+	*fakeEmbedder
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) > 0 && texts[0] != "размерность" {
+		g.once.Do(func() { close(g.entered) })
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return g.fakeEmbedder.Embed(ctx, texts)
+}
+
+// Поиск в том же процессе не ждёт конца счёта смыслов.
+//
+// Embed держал замок коллекции на запись весь счёт — часами, — и в интерфейсе
+// с идущим /kb embed стояли и /search, и kb_search модели, и подмешивание.
+func TestSearchNotBlockedByEmbed(t *testing.T) {
+	_, coll, _ := embedFixture(t)
+	gate := &gatedEmbedder{fakeEmbedder: newFakeEmbedder(32),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		_, err := coll.Embed(context.Background(), gate, EmbedOpts{Batch: 2, Workers: 1}, nil)
+		done <- err
+	}()
+	<-gate.entered
+
+	searched := make(chan error, 1)
+	go func() {
+		_, err := coll.Search("channel", DefaultSearchOpts())
+		searched <- err
+	}()
+	waited := false
+	select {
+	case err := <-searched:
+		if err != nil {
+			t.Errorf("поиск во время счёта смыслов: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("поиск ждёт конца счёта смыслов")
+		waited = true
+	}
+	close(gate.release)
+	if err := <-done; err != nil {
+		t.Fatalf("счёт смыслов: %v", err)
+	}
+	if waited {
+		<-searched
+	}
+	if got := coll.VecMeta().Count; got != coll.ChunkCount() {
+		t.Fatalf("после счёта в памяти %d векторов при %d кусках", got, coll.ChunkCount())
+	}
+}
+
+// Сбой пачки посреди счёта не оставляет коллекцию без векторов в памяти:
+// прежде они обнулялись на старте и так и оставались пустыми до переоткрытия.
+func TestEmbedFailureKeepsVectorsInMemory(t *testing.T) {
+	_, coll, books := embedFixture(t)
+	emb := newFakeEmbedder(32)
+	if _, err := coll.Embed(context.Background(), emb, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := coll.VecMeta().Count
+	makeBook(t, books, "tail.pdf", longPage("select statement and timeouts"))
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Проба размерности проходит, пачки — нет: сервер упал посреди счёта.
+	failing := &batchFailer{emb}
+	if _, err := coll.Embed(context.Background(), failing, EmbedOpts{Batch: 1, Workers: 1}, nil); err == nil {
+		t.Fatal("сбой эмбеддера не дошёл до вызывающего")
+	}
+	if got := coll.VecMeta().Count; got != before {
+		t.Fatalf("после сбоя в памяти %d векторов, а посчитано было %d", got, before)
+	}
+}
+
+// batchFailer отвечает на пробу размерности и падает на пачках.
+type batchFailer struct{ *fakeEmbedder }
+
+func (b *batchFailer) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) > 0 && texts[0] == "размерность" {
+		return b.fakeEmbedder.Embed(ctx, texts)
+	}
+	return nil, errors.New("сервер недоступен")
+}
+
+// stampedEmbedder — эмбеддер, который знает отпечаток своих весов, как
+// kbembed.Embedder со Stamp.
+type stampedEmbedder struct {
+	*fakeEmbedder
+	digest string
+}
+
+func (s stampedEmbedder) Stamp(context.Context) (string, error) { return s.digest, nil }
+
+// Паспорт векторов хранит отпечаток весов модели, досчёт чужими весами того же
+// имени отклоняется, а паспорт без отпечатка остаётся годным.
+//
+// Граф хранил отпечаток давно, а векторы кусков — нет: после обновления
+// `bge-m3:latest` досчёт хвоста ложился в другое пространство молча.
+func TestEmbedKeepsModelDigest(t *testing.T) {
+	_, coll, books := embedFixture(t)
+	ctx := context.Background()
+	plain := newFakeEmbedder(64)
+
+	// Старый паспорт: эмбеддер отпечатка не знает.
+	if _, err := coll.Embed(ctx, plain, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := coll.VecMeta().Digest; d != "" {
+		t.Fatalf("отпечаток взялся ниоткуда: %q", d)
+	}
+
+	// Досчёт тем, кто отпечаток знает, к старому паспорту допускается
+	// и отпечаток записывает.
+	makeBook(t, books, "more.pdf", longPage("worker pools and pipelines"))
+	if _, err := coll.Sync(ctx, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	a := stampedEmbedder{plain, "sha256:aaaa1111aaaa1111"}
+	if _, err := coll.Embed(ctx, a, EmbedOpts{}, nil); err != nil {
+		t.Fatalf("паспорт без отпечатка отверг досчёт: %v", err)
+	}
+	if d := coll.VecMeta().Digest; d != a.digest {
+		t.Fatalf("в паспорте отпечаток %q, ожидался %q", d, a.digest)
+	}
+
+	// Досчёт другими весами того же имени — отказ, и векторы не тронуты.
+	makeBook(t, books, "tail.pdf", longPage("select statement and timeouts"))
+	if _, err := coll.Sync(ctx, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := coll.VecMeta()
+	b := stampedEmbedder{plain, "sha256:bbbb2222bbbb2222"}
+	_, err := coll.Embed(ctx, b, EmbedOpts{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("досчёт чужими весами не отклонён: %v", err)
+	}
+	// Отказ называет обе починки готовыми командами: и для командной строки,
+	// где --kb-embed запускают чаще всего, и для приложения.
+	for _, cmd := range []string{"ollama pull " + plain.Model() + "@sha256:aaaa", "--kb-embed", "--kb-recount", "/kb embed"} {
+		if !strings.Contains(err.Error(), cmd) {
+			t.Errorf("в отказе нет %q:\n%v", cmd, err)
+		}
+	}
+	if got := coll.VecMeta(); got != before {
+		t.Fatalf("после отказа паспорт изменился: %+v → %+v", before, got)
+	}
+	// Теми же весами — досчитывается.
+	if _, err := coll.Embed(ctx, a, EmbedOpts{}, nil); err != nil {
+		t.Fatalf("досчёт теми же весами: %v", err)
+	}
+	if got := coll.VecMeta(); got.Digest != a.digest || got.Count <= before.Count {
+		t.Fatalf("после досчёта паспорт %+v", got)
+	}
+}
+
+// Уплотнение переносит отпечаток весов вместе с векторами.
+func TestMergeKeepsModelDigest(t *testing.T) {
+	_, coll, books := embedFixture(t)
+	ctx := context.Background()
+	drop := makeBook(t, books, "drop.pdf", longPage("посторонняя тема про садоводство"))
+	if _, err := coll.Sync(ctx, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	emb := stampedEmbedder{newFakeEmbedder(64), "sha256:cccc3333cccc3333"}
+	if _, err := coll.Embed(ctx, emb, EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.Forget(drop); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coll.Merge(ctx, MergeOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := coll.VecMeta().Digest; d != emb.digest {
+		t.Fatalf("после уплотнения отпечаток %q, ожидался %q", d, emb.digest)
 	}
 }

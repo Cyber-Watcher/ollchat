@@ -81,6 +81,11 @@ type Progress struct {
 	Done     bool
 	Canceled bool
 	Err      error
+
+	// LostRoots — каталоги коллекции, из которых при сверке пропали все
+	// книги разом (см. Collection.lostRoots). Приходит в последнем событии
+	// хода, чтобы итог в интерфейсе мог о них сказать.
+	LostRoots []string
 }
 
 // IndexResult — итог индексации.
@@ -110,6 +115,10 @@ type IndexResult struct {
 	// глазами, а для этого человеку нужны имя файла и причина с числами.
 	Thin      int
 	ThinBooks []ThinBook
+
+	// LostRoots — каталоги, книги которых сверка не тронула, потому что
+	// пропали все разом: так выглядит не смонтированный том (Sync).
+	LostRoots []string
 }
 
 // ThinBook — книга, отвергнутая как тощая: путь и причина с числами.
@@ -134,10 +143,7 @@ func (c *Collection) forgetRecord(abs string) error {
 		}
 	}
 	c.docs = kept
-	c.byPath = make(map[string]int, len(kept))
-	for i, d := range kept {
-		c.byPath[d.Path] = i
-	}
+	c.indexDocs()
 	c.mu.Unlock()
 	return writeDocs(c.dir, kept)
 }
@@ -184,6 +190,11 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 	// как мельтешение и сбой, хотя обе работы шли правильно.
 	if len(files) == 0 {
 		res := IndexResult{Elapsed: time.Since(start)}
+		// Куски без сегмента достраиваются и тогда, когда новых книг нет:
+		// см. buildSegment.
+		if err := c.buildSegment(ctx, send); err != nil {
+			return res, err
+		}
 		send(Progress{Phase: "индекс", Collection: c.name, Done: true, Elapsed: res.Elapsed})
 		return res, nil
 	}
@@ -196,6 +207,9 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 	files, dupes := dedupe(files, c.Books(), nil)
 	if len(files) == 0 {
 		res := IndexResult{Duplicates: dupes, Elapsed: time.Since(start)}
+		if err := c.buildSegment(ctx, send); err != nil {
+			return res, err
+		}
 		send(Progress{
 			Phase: "индекс", Collection: c.name, Done: true,
 			Duplicates: res.Duplicates, Elapsed: res.Elapsed,
@@ -217,7 +231,13 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 	if res.Added == 0 || ctx.Err() != nil {
 		// После отмены сегмент не строим: это ещё минуты работы, а Esc должен
 		// останавливать по-настоящему. Извлечённые куски никуда не денутся —
-		// следующий запуск построит сегмент по ним заодно с новыми книгами.
+		// следующий запуск построит сегмент по ним, даже если новых книг
+		// у него не будет.
+		if ctx.Err() == nil {
+			if err := c.buildSegment(ctx, send); err != nil {
+				return res, err
+			}
+		}
 		res.Elapsed = time.Since(start)
 		res.Canceled = ctx.Err() != nil
 		send(Progress{
@@ -404,6 +424,9 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			ModTime: p.cand.info.ModTime().UnixNano(), At: time.Now().Unix(),
 			Hash: p.cand.hash,
 		}
+		// Номер прежней версии той же книги: запись реестра по этому пути
+		// новая заменит, и прежние куски надо пометить удалёнными (ниже).
+		prev := c.docIDAt(p.cand.path)
 		// Тощая ли книга, решается до switch: причину надо и записать в реестр,
 		// и показать человеку, а считать вердикт дважды — значит однажды
 		// разойтись. Проверка идёт здесь, а не в пробе на скан: пока книга
@@ -478,10 +501,17 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			if err != nil {
 				return res, err
 			}
-			if err := c.appendDoc(rec); err != nil {
+			// Журнал раньше реестра. Обратный порядок оставлял окно: запись
+			// реестра есть, отметки в журнале нет — и следующая доливка
+			// откатывала куски книги к прошлой отметке, а запись оставалась.
+			// Книга числилась прочитанной без единого куска, и сверка её больше
+			// не трогала: файл-то не менялся. Теперь обрыв в этом месте
+			// оставляет куски без записи — ничьи, невидимые поиску, — и книга
+			// просто прочитается заново.
+			if err := c.journal(state, rec.ID); err != nil {
 				return res, err
 			}
-			if err := c.journal(state, rec.ID); err != nil {
+			if err := c.appendDoc(rec); err != nil {
 				return res, err
 			}
 			res.Added++
@@ -490,6 +520,19 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 				Title: rec.Title, Year: rec.Year,
 				Chunks: rec.Chunks, Path: p.cand.path,
 			})
+		}
+		// Прежняя версия книги — в удалённые, и только теперь, когда новая
+		// запись уже в реестре (а у прочитанной — и куски на диске).
+		//
+		// До 07.10.2026 этого шага не было: --kb-sync перечитывал изменённый
+		// файл под новым номером, а прежний номер удалённым не помечал. Запись
+		// реестра заменялась по пути, прежние куски оставались ничьими —
+		// и находились поиском, с пустыми названием и путём, ровно там, где
+		// документацию доливают после каждой правки.
+		if prev != 0 && prev != rec.ID {
+			if err := c.markDeleted(prev); err != nil {
+				return res, err
+			}
 		}
 
 		send(Progress{
@@ -557,28 +600,35 @@ func shortErr(err error) string {
 }
 
 // buildSegment строит сегмент по кускам, ещё не попавшим ни в один сегмент.
+//
+// **Зовётся при каждой доливке, а не только когда добавились книги.** Ctrl+C
+// в фазе «индекс» оставляет куски без сегмента, и до 07.10.2026 их достраивал
+// лишь следующий заход с новыми книгами: сверка без новых файлов выходила
+// раньше, и такие книги оставались невидимыми поиску по словам навсегда,
+// а доктор о них молчал.
+//
+// Покрываются только закоммиченные куски — до последней отметки журнала.
+// Обрывок прерванной книги откатит следующая доливка, и сегмент, построенный
+// по нему, указывал бы потом на чужие куски, легшие на те же номера.
 func (c *Collection) buildSegment(ctx context.Context, send func(Progress)) error {
+	if _, err := os.Stat(filepath.Join(c.dir, "chunks.idx")); err != nil {
+		return nil // коллекция ещё пуста
+	}
 	store, err := OpenStore(c.dir)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	covered := 0
-	dirs, err := segmentDirs(c.dir)
+	covered, err := segmentsCover(c.dir)
 	if err != nil {
 		return err
 	}
-	for _, d := range dirs {
-		var meta SegMeta
-		if err := readJSON(filepath.Join(d, "seg.meta"), &meta); err != nil {
-			continue
-		}
-		if end := meta.FirstID + meta.Chunks; end > covered {
-			covered = end
-		}
+	end := store.Count()
+	if st, ok := c.lastCommit(); ok && st.Count < end {
+		end = st.Count
 	}
-	n := store.Count() - covered
+	n := end - covered
 	if n <= 0 {
 		return nil
 	}
@@ -609,6 +659,68 @@ func (c *Collection) buildSegment(ctx context.Context, send func(Progress)) erro
 	return c.reopenIndex()
 }
 
+// segmentsCover — до какого сквозного номера куски покрыты готовыми сегментами.
+func segmentsCover(dir string) (int, error) {
+	dirs, err := segmentDirs(dir)
+	if err != nil {
+		return 0, err
+	}
+	covered := 0
+	for _, d := range dirs {
+		var meta SegMeta
+		if err := readJSON(filepath.Join(d, "seg.meta"), &meta); err != nil {
+			continue
+		}
+		if end := meta.FirstID + meta.Chunks; end > covered {
+			covered = end
+		}
+	}
+	return covered, nil
+}
+
+// lostRoots — каталоги коллекции, из которых пропали ВСЕ живые книги.
+//
+// Пропажа одной-двух книг — обычное удаление, его сверка и должна заметить.
+// Пропажа всех книг каталога разом почти всегда значит другое: том не
+// смонтирован, сетевая папка отвалилась, переименовали родителя. Удалять
+// в этом случае нельзя ничего: вернуть книги назад сверка не умеет.
+// Если книги удалены намеренно, их убирают командой удаления книги.
+func lostRoots(roots []string, docs []BookRec, deleted func(uint32) bool) []string {
+	var lost []string
+	for _, root := range roots {
+		live, missing := 0, 0
+		for _, d := range docs {
+			if (d.ID != 0 && deleted(d.ID)) || !underRoot(d.Path, root) {
+				continue
+			}
+			live++
+			if _, err := os.Stat(d.Path); os.IsNotExist(err) {
+				missing++
+			}
+		}
+		if live > 0 && missing == live {
+			lost = append(lost, root)
+		}
+	}
+	return lost
+}
+
+// underRoot — лежит ли путь внутри каталога, по границе каталога:
+// /data/lib не содержит /data/library.
+func underRoot(path, root string) bool {
+	return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
+}
+
+// underAny — лежит ли путь внутри одного из каталогов.
+func underAny(path string, roots []string) bool {
+	for _, r := range roots {
+		if underRoot(path, r) {
+			return true
+		}
+	}
+	return false
+}
+
 // Sync сверяет коллекцию с диском: доиндексирует новые книги, помечает
 // пропавшие и переиндексирует изменившиеся.
 func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progress)) (IndexResult, error) {
@@ -635,9 +747,36 @@ func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progre
 	// **Нулевой номер — не «книги нет», а «книга не прочиталась».** Номер
 	// выдаётся при успешном разборе, и помечать удалённым тут нечего: кусков
 	// у такой книги нет. Снимается сама запись — тем же способом, что в Forget.
+	// **Каталог, из которого пропало всё, — не удаление, а отсутствие тома.**
+	// Библиотека на внешнем диске или в сетевой папке: том не смонтирован,
+	// точка монтирования пуста, и каждая книга «не найдена». Раньше сверка
+	// помечала удалёнными их все, а когда том возвращался, считала книги уже
+	// известными и не возвращала — до --kb-reindex. Теперь книги такого
+	// каталога не трогаются, а итог называет каталог.
+	lost := lostRoots(roots, docs, c.isDeleted)
+	if len(lost) > 0 && report != nil {
+		inner := report
+		report = func(p Progress) {
+			if p.Done {
+				p.LostRoots = lost
+			}
+			inner(p)
+		}
+	}
+
+	// Пометки и снятие записей — под замком коллекции, как и сама доливка:
+	// снятие записи переписывает реестр целиком, и параллельная индексация
+	// в другом процессе потеряла бы дописанную в эту минуту книгу. Замок
+	// отпускается перед Add — та берёт его сама.
+	if err := c.lock(); err != nil {
+		return IndexResult{}, err
+	}
 	var removed int
 	for _, d := range docs {
 		if d.ID != 0 && c.isDeleted(d.ID) {
+			continue
+		}
+		if underAny(d.Path, lost) {
 			continue
 		}
 		if _, err := os.Stat(d.Path); err == nil || !os.IsNotExist(err) {
@@ -645,16 +784,20 @@ func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progre
 		}
 		if d.ID == 0 {
 			if err := c.forgetRecord(d.Path); err != nil {
+				c.unlock()
 				return IndexResult{}, err
 			}
 		} else if err := c.markDeleted(d.ID); err != nil {
+			c.unlock()
 			return IndexResult{}, err
 		}
 		removed++
 	}
+	c.unlock()
 
 	res, err := c.Add(ctx, roots, opt, report)
 	res.Removed = removed
+	res.LostRoots = lost
 	if removed > 0 {
 		if rerr := c.reopenIndex(); err == nil {
 			err = rerr
@@ -778,6 +921,12 @@ func (c *Collection) Forget(path string) error {
 	if !found {
 		return fmt.Errorf("книги %q в коллекции нет", path)
 	}
+	// Под замком коллекции: снятие записи переписывает реестр целиком, и
+	// параллельная индексация потеряла бы дописанную в эту минуту книгу.
+	if err := c.lock(); err != nil {
+		return err
+	}
+	defer c.unlock()
 	// **Нулевой номер — не «книги нет», а «книга не прочиталась».**
 	//
 	// Номер выдаётся при успешном разборе; у книги, отвергнутой как скан,
@@ -798,6 +947,17 @@ func (c *Collection) Forget(path string) error {
 	return c.reopenIndex()
 }
 
+// docIDAt — номер книги, записанной в реестре по этому пути; 0 — такой нет
+// или она не прочиталась.
+func (c *Collection) docIDAt(path string) uint32 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if i, ok := c.byPath[path]; ok {
+		return c.docs[i].ID
+	}
+	return 0
+}
+
 func (c *Collection) isDeleted(id uint32) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -810,16 +970,34 @@ func (c *Collection) markDeleted(id uint32) error {
 	if c.deleted[id] {
 		return nil
 	}
-	f, err := os.OpenFile(filepath.Join(c.dir, "deleted.ids"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := fmt.Fprintf(f, "%d\n", id); err != nil {
+	if err := appendLine(filepath.Join(c.dir, "deleted.ids"), []byte(fmt.Sprintf("%d\n", id))); err != nil {
 		return err
 	}
 	c.deleted[id] = true
 	return nil
+}
+
+// appendLine дописывает строку в файл коллекции и доводит её до диска.
+//
+// fsync на каждую строку, и это не расточительство: реестр, пометки удалённых
+// и журнал коммитов дописываются по строке на книгу, а книга разбирается
+// секундами. До 07.10.2026 дозапись шла без fsync, хотя куски той же книги
+// Commit доводил до диска: после отказа питания журнал мог помнить книгу,
+// которой нет в реестре, а пометка удаления — пропасть, вернув книгу в выдачу.
+func appendLine(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // appendDoc дописывает запись о книге в реестр.
@@ -830,19 +1008,23 @@ func (c *Collection) appendDoc(rec BookRec) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	f, err := os.OpenFile(filepath.Join(c.dir, "docs.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	if err := appendLine(filepath.Join(c.dir, "docs.jsonl"), append(data, '\n')); err != nil {
 		return err
 	}
 	if i, ok := c.byPath[rec.Path]; ok {
+		// Замена по пути меняет номер на этом месте: указатель по номеру
+		// перестраивается целиком — записей сотни, а первая с номером
+		// обязана выигрывать, как при переборе.
 		c.docs[i] = rec
+		c.indexIDs()
 	} else {
 		c.byPath[rec.Path] = len(c.docs)
 		c.docs = append(c.docs, rec)
+		if _, seen := c.byID[rec.ID]; c.byID == nil {
+			c.indexIDs()
+		} else if rec.ID != 0 && !seen {
+			c.byID[rec.ID] = len(c.docs) - 1
+		}
 	}
 	return nil
 }
@@ -861,12 +1043,7 @@ func (c *Collection) journal(state StoreState, doc uint32) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(c.dir, "journal.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	if err := appendLine(filepath.Join(c.dir, "journal.log"), append(data, '\n')); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -877,19 +1054,72 @@ func (c *Collection) journal(state StoreState, doc uint32) error {
 }
 
 // lastCommit возвращает состояние последнего успешного коммита.
+//
+// Журнал бывает пуст и у живого хранилища: уплотнение начинает его заново,
+// а состояние переписанного хранилища кладёт в meta.json (Meta.State). До
+// 07.10.2026 пустой журнал значил «откатывать не к чему», и обрывок книги,
+// прерванной первой после уплотнения, оставался в хранилище навсегда. Нулевое
+// состояние откатом не считается: у коллекции, которой коммитить ещё не
+// доводилось, оно отрезало бы и заголовок chunks.dat.
 func (c *Collection) lastCommit() (StoreState, bool) {
-	data, err := os.ReadFile(filepath.Join(c.dir, "journal.log"))
-	if err != nil {
-		return StoreState{}, false
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		var e journalEntry
-		if err := json.Unmarshal([]byte(lines[i]), &e); err == nil {
-			return e.State, true
+	if data, err := os.ReadFile(filepath.Join(c.dir, "journal.log")); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			var e journalEntry
+			if err := json.Unmarshal([]byte(lines[i]), &e); err == nil {
+				return e.State, true
+			}
 		}
 	}
+	// С диска, а не из памяти: в памяти паспорт мог отстать от каталога,
+	// который подменило уплотнение.
+	var meta Meta
+	if err := readJSON(filepath.Join(c.dir, "meta.json"), &meta); err == nil &&
+		(meta.State.Dat > 0 || meta.State.Idx > 0) && c.onlyTornTailAfter(meta.State) {
+		return meta.State, true
+	}
 	return StoreState{}, false
+}
+
+// onlyTornTailAfter сообщает, что состояние st из паспорта годится в отметку
+// отката: файлы хранилища не короче его, а за ним лежат только куски книг,
+// которых нет в реестре, — обрывок прерванной книги.
+//
+// **Зачем сверка.** Состояние в meta.json при пустом журнале — отметка
+// уплотнения, но не всегда. Сборки до 07.10.2026 после уплотнения держали
+// в памяти прежний паспорт, и первая же его запись (AddRoots, новый сегмент)
+// возвращала на диск состояние хранилища до уплотнения. Откат к такому
+// состоянию упёрся бы в отказ Rollback и остановил бы всякую доливку, а будь
+// оно короче — отрезал бы куски книг, которые в реестре есть. Для такой
+// коллекции отката нет вовсе, как и было до 07.10.2026.
+func (c *Collection) onlyTornTailAfter(st StoreState) bool {
+	if st.Dat <= 0 || st.Idx < 0 || st.Idx%chunkRecSize != 0 || int64(st.Count)*chunkRecSize != st.Idx {
+		return false
+	}
+	if info, err := os.Stat(filepath.Join(c.dir, "chunks.dat")); err != nil || info.Size() < st.Dat {
+		return false
+	}
+	f, err := os.Open(filepath.Join(c.dir, "chunks.idx"))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() < st.Idx {
+		return false
+	}
+	tail := make([]byte, info.Size()-st.Idx)
+	if n, _ := f.ReadAt(tail, st.Idx); n < len(tail) {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for off := 0; off+chunkRecSize <= len(tail); off += chunkRecSize {
+		if _, known := c.book(decodeRec(tail[off:]).Doc); known {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Collection) saveMeta() error {

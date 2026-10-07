@@ -3,6 +3,8 @@ package maint
 import (
 	"strings"
 	"testing"
+
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 )
 
 // Числа в объяснении должны сходиться между собой.
@@ -28,6 +30,33 @@ func TestMergeExplainCountsAgree(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("в объяснении нет %q:\n%s", want, out)
 		}
+	}
+}
+
+// Именованный граф называется в объяснении наравне с рабочим, и сказано
+// честно: каталоги остаются, недоступными становятся понятия и связи.
+// До 07.10.2026 объяснение читало паспорт одного `graph` и про `graph-lab`
+// молчало, а обещало «потеряется», хотя граф просто перестаёт открываться.
+func TestMergeExplainNamesEveryGraph(t *testing.T) {
+	mi := mergeInfo{
+		liveBooks: 3, physical: 10, segments: 1, hasGraph: true,
+		graphs: []namedGraph{
+			{dir: "graph"},
+			{dir: "graph-lab", meta: graph.Meta{Entities: 5, Edges: 7, Mentions: 9, Covered: 4, Model: "qwen"}},
+		},
+	}
+	out := mi.explain("books")
+	for _, want := range []string{
+		"ГРАФ ПОНЯТИЙ ПЕРЕСТАНЕТ ОТКРЫВАТЬСЯ",
+		"Каталоги графов (graph, graph-lab) останутся на месте",
+		"graph-lab: недоступными станут 5 понятий, 7 связей, 9 упоминаний",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("в объяснении нет %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Потеряется") {
+		t.Errorf("объяснение обещает потерю графа, а он остаётся на диске:\n%s", out)
 	}
 }
 

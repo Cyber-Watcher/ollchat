@@ -92,6 +92,28 @@ func DefaultSearchOpts() SearchOpts {
 	return SearchOpts{TopK: 8, MaxPerDoc: 3, Semantic: true, TableBoost: DefaultTableBoost}
 }
 
+// withDefaults — настройки без TopK: умолчания вместо незаданного, но всё
+// заданное остаётся, и прежде всего отбор книг.
+//
+// До 07.10.2026 нулевой TopK заменял настройки умолчаниями целиком, и вместе
+// с ними пропадал отбор: поиск «только в этой книге» без TopK искал по всей
+// коллекции, а отбор живых книг, который ставит SearchWith, выпадал — и в выдачу
+// возвращались удалённые книги.
+func (o SearchOpts) withDefaults() SearchOpts {
+	d := DefaultSearchOpts()
+	if o.MaxPerDoc > 0 {
+		d.MaxPerDoc = o.MaxPerDoc
+	}
+	if o.TableBoost > 0 {
+		d.TableBoost = o.TableBoost
+	}
+	d.KeepAdjacent, d.Exact, d.SemanticOnly = o.KeepAdjacent, o.Exact, o.SemanticOnly
+	d.MinCosine, d.SemanticWeight = o.MinCosine, o.SemanticWeight
+	d.QueryTimeout, d.RRFK = o.QueryTimeout, o.RRFK
+	d.Docs, d.docFilter = o.Docs, o.docFilter
+	return d
+}
+
 // DefaultTableBoost — надбавка кускам-таблицам при словесном поиске.
 //
 // **Зачем.** Таблица в книге — самый плотный вид ответа на вопрос «какое
@@ -168,13 +190,13 @@ func (s *searcher) Search(query string, opt SearchOpts) ([]Hit, error) {
 // которые второй поиск ставит первыми.
 func (s *searcher) Candidates(query string, opt SearchOpts) ([]Hit, error) {
 	if opt.TopK <= 0 {
-		opt = DefaultSearchOpts()
+		opt = opt.withDefaults()
 	}
 	terms := queryTerms(query, s)
 	if len(terms) == 0 {
 		return nil, nil
 	}
-	if len(opt.Docs) > 0 {
+	if opt.docFilter == nil && len(opt.Docs) > 0 {
 		opt.docFilter = make(map[uint32]bool, len(opt.Docs))
 		for _, d := range opt.Docs {
 			opt.docFilter[d] = true

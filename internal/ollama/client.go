@@ -61,19 +61,29 @@ func NewWithStall(baseURL string, timeout, chatTimeout, stall time.Duration,
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		headers:      headers,
 		stallTimeout: stall,
-		http: &http.Client{
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: timeout,
-				IdleConnTimeout:       90 * time.Second,
-			},
-		},
-		chatHTTP: &http.Client{
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: chatTimeout,
-				IdleConnTimeout:       90 * time.Second,
-			},
-		},
+		http:         &http.Client{Transport: newTransport(timeout)},
+		chatHTTP:     &http.Client{Transport: newTransport(chatTimeout)},
 	}
+}
+
+// newTransport — транспорт с пределом ожидания заголовков header.
+//
+// Собирается из http.DefaultTransport, а не из пустого http.Transport{}, как
+// прежде: у пустого нет ни срока соединения и рукопожатия TLS (недоступный
+// сервер держал запрос до таймаута ядра), ни HTTPS_PROXY и NO_PROXY из
+// окружения, ни HTTP/2. Своё здесь только ожидание заголовков: у быстрых
+// вызовов оно короткое, у чата — щедрое (см. New), и разделять их по-прежнему
+// надо двумя транспортами.
+func newTransport(header time.Duration) *http.Transport {
+	var t *http.Transport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		t = dt.Clone()
+	} else {
+		t = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 10 * time.Second}
+	}
+	t.ResponseHeaderTimeout = header
+	t.IdleConnTimeout = 90 * time.Second
+	return t
 }
 
 // BaseURL возвращает адрес сервера.

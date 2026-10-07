@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLayoutTableRows закрепляет главное, ради чего появилась сборка по
@@ -149,6 +150,24 @@ func TestLayoutSurvivesBrokenCoordinates(t *testing.T) {
 				t.Fatalf("строка неразумной длины: %d символов", len(got))
 			}
 		})
+	}
+}
+
+// Строка из двухсот тысяч кусков собирается за линейное время: прежде длина
+// собранного пересчитывалась заново на каждом куске, и такая строка (форма,
+// нарисованная на одном месте тысячи раз) собиралась минутами.
+func TestJoinLineLinear(t *testing.T) {
+	line := make([]frag, 200000)
+	for i := range line {
+		line[i] = frag{x: float64(i) * 10, y: 700, w: 9, size: 10, text: "аб"}
+	}
+	start := time.Now()
+	got := joinLine(line, 0, 5, wordGapMax)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("строка собиралась %v", d)
+	}
+	if n := strings.Count(got, "аб"); n != len(line) {
+		t.Fatalf("кусков в строке %d, а было %d", n, len(line))
 	}
 }
 

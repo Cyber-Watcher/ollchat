@@ -93,7 +93,8 @@ type Check struct {
 func (c Check) OK() bool { return len(c.LeaksPDF) == 0 && len(c.LeaksMD) == 0 }
 
 // Process распознаёт страницы, находит персональные данные, замазывает их
-// и собирает .md. title — заголовок .md (имя документа без расширения).
+// и собирает .md. title — заголовок распознанной копии (имя документа без
+// расширения); у обезличенного .md заголовок нейтральный (buildMD).
 func Process(ctx context.Context, title string, pages []Page, opt Options) (*Result, error) {
 	if len(pages) == 0 {
 		return nil, fmt.Errorf("в документе нет страниц")
@@ -150,6 +151,7 @@ func Process(ctx context.Context, title string, pages []Page, opt Options) (*Res
 	lines := buildLines(words)
 	byLabels(words, lines)
 	byCells(words, lines)
+	byBelow(words, lines)
 	byPatterns(words, lines)
 	byNameDate(words, lines, time.Now().Year())
 	seeds := byHints(words, lines, opt)
@@ -195,7 +197,8 @@ func (c Check) Line() string {
 		return strings.Join(s, ", ")
 	}
 	return fmt.Sprintf(LeakMark+": в PDF — %s; в .md — %s. "+
-		"Файлы записаны, но показывать их наружу нельзя, пока это не исправлено.\n",
+		"Обезличенные файлы записаны с пометкой UNVERIFIED в имени: показывать их наружу нельзя, "+
+		"пока это не исправлено.\n",
 		none(c.LeaksPDF), none(c.LeaksMD))
 }
 

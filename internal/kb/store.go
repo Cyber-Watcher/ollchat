@@ -248,6 +248,22 @@ func (w *Writer) Rollback(st StoreState) error {
 	w.pend = w.pend[:0]
 	w.pendDocs = w.pendDocs[:0]
 	w.pendOrds = w.pendOrds[:0]
+	// Откат только укорачивает. Truncate за конец файла дописал бы нули,
+	// и хранилище получило бы указатели на пустоту, а блоки — сдвиг; файл
+	// короче отметки журнала — это повреждение, о котором надо сказать.
+	for _, f := range []struct {
+		file *os.File
+		want int64
+	}{{w.dat, st.Dat}, {w.idx, st.Idx}} {
+		info, err := f.file.Stat()
+		if err != nil {
+			return err
+		}
+		if info.Size() < f.want {
+			return fmt.Errorf("%s короче последней отметки журнала: %d байт вместо %d — хранилище повреждено",
+				filepath.Base(f.file.Name()), info.Size(), f.want)
+		}
+	}
 	if err := w.dat.Truncate(st.Dat); err != nil {
 		return err
 	}
@@ -304,6 +320,24 @@ func OpenStore(dir string) (*Store, error) {
 	dat, err := os.Open(filepath.Join(dir, "chunks.dat"))
 	if err != nil {
 		return nil, err
+	}
+	// Заголовок сверяется, когда кусков есть хоть один: пустое хранилище
+	// могло оборваться между созданием файлов и записью заголовка, и читать
+	// в нём нечего. До 07.10.2026 заголовок писался, но не проверялся
+	// никогда: чужой или испорченный chunks.dat открывался, и выдача
+	// показывала мусор вместо цитат.
+	//
+	// И только когда указатели сами его ждут — первый блок лежит за ним.
+	// История репозитория начинается с переноса уже работавшего кода, и что
+	// хранилище без заголовка не писалось никогда, доказать по ней нельзя;
+	// такое (первый блок с нуля) открывается, как открывалось: отказ на нём
+	// значил бы потерю коллекции, а не защиту от порчи.
+	if len(recs) > 0 && recs[0].BlockOff >= uint64(len(storeMagic)+1) {
+		head := make([]byte, len(storeMagic)+1)
+		if _, err := dat.ReadAt(head, 0); err != nil || string(head) != storeMagic+"\n" {
+			dat.Close()
+			return nil, fmt.Errorf("chunks.dat в %s — не хранилище кусков: нет заголовка %s", dir, storeMagic)
+		}
 	}
 	return &Store{dir: dir, recs: recs, dat: dat}, nil
 }

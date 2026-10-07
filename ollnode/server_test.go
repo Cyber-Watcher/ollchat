@@ -126,6 +126,90 @@ func TestNodeLightSnapshot(t *testing.T) {
 	}
 }
 
+// Токен сверяется целиком: префикс, хвост и голый токен без «Bearer » —
+// отказ, свой — пропуск.
+func TestNodeTokenCompare(t *testing.T) {
+	s := testServer(t, time.Second, nil)
+	for _, h := range []string{"Bearer секре", "Bearer секретт", "секрет", "Bearer", "bearer секрет"} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/node", nil)
+		r.Header.Set("Authorization", h)
+		if s.authorized(r) {
+			t.Errorf("заголовок %q принят", h)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/node", nil)
+	r.Header.Set("Authorization", "Bearer секрет")
+	if !s.authorized(r) {
+		t.Error("свой токен не принят")
+	}
+}
+
+// Клиент, ушедший посреди сбора, не портит снимок остальным: снимок
+// снимается на своём контексте. Раньше выборки обрывались вместе с запросом,
+// и снимок «карта не видна» уходил из кэша всем следующим клиентам.
+func TestNodeSnapshotSurvivesClientLeaving(t *testing.T) {
+	s := testServer(t, time.Minute, nil)
+	inner := s.opts.Run
+	s.opts.Run = func(ctx context.Context, name string, args ...string) (string, int, error) {
+		if name == "nvidia-smi" {
+			select {
+			case <-ctx.Done():
+				return "", -1, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		return inner(ctx, name, args...)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/node", nil).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer секрет")
+	s.node(httptest.NewRecorder(), r)
+
+	var rep nodeprobe.Report
+	if err := json.Unmarshal(request(t, s, "/api/v1/node", "секрет").Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.GPUs) != 1 {
+		t.Errorf("следующий клиент получил оборванный снимок: карты %+v, нет разделов %+v", rep.GPUs, rep.Missing)
+	}
+}
+
+// Снимок, не уложившийся в свой срок, отдаётся ждавшему, но в кэш не идёт:
+// следующий клиент получает свежий сбор, а не пустые разделы.
+func TestNodeInterruptedSnapshotNotCached(t *testing.T) {
+	var calls int32
+	s := testServer(t, time.Minute, &calls)
+	s.timeout = 30 * time.Millisecond
+	inner := s.opts.Run
+	var hung int32
+	s.opts.Run = func(ctx context.Context, name string, args ...string) (string, int, error) {
+		if name == "nvidia-smi" && atomic.AddInt32(&hung, 1) == 1 {
+			// Первый вызов зависает, пока его не снимут.
+			select {
+			case <-ctx.Done():
+				return "", -1, ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+		}
+		return inner(ctx, name, args...)
+	}
+
+	request(t, s, "/api/v1/node", "секрет")
+	first := atomic.LoadInt32(&calls)
+	var rep nodeprobe.Report
+	if err := json.Unmarshal(request(t, s, "/api/v1/node", "секрет").Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&calls) == first {
+		t.Fatal("прерванный снимок отдан из кэша")
+	}
+	if len(rep.GPUs) != 1 {
+		t.Errorf("повторный сбор неполон: %+v", rep.Missing)
+	}
+}
+
 // Кэш стареет.
 func TestNodeCacheExpires(t *testing.T) {
 	var calls int32

@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -139,6 +140,10 @@ type server struct {
 	ttl   time.Duration
 	token string
 
+	// timeout — срок сбора одного снимка; 0 — snapshotTimeout. Поле ради
+	// тестов: иначе проверка прерванного снимка ждала бы полминуты.
+	timeout time.Duration
+
 	mu    sync.Mutex
 	at    time.Time
 	last  *nodeprobe.Report
@@ -151,21 +156,29 @@ func (s *server) node(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	light := r.URL.Query().Get("light") == "1"
-	rep := s.snapshot(r.Context(), light)
+	rep := s.snapshot(light)
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(rep)
 }
 
-// authorized — сравнение токена. Постоянного времени сравнение здесь не нужно:
-// токен длинный и случайный, а служба стоит во внутренней сети за туннелем.
+// authorized — сравнение токена постоянного времени.
+//
+// Прежде здесь стояло обычное ==: «токен длинный, служба за туннелем». Но
+// README допускает и --listen 0.0.0.0, а сравнение строк выходит на первом
+// несовпавшем байте — по времени ответа токен подбирается байт за байтом.
 func (s *server) authorized(r *http.Request) bool {
-	h := r.Header.Get("Authorization")
-	return h == "Bearer "+s.token
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
 }
 
-func (s *server) snapshot(ctx context.Context, light bool) *nodeprobe.Report {
+// snapshotTimeout — срок сбора снимка сверх серии выборок загрузки: systemctl,
+// journalctl и вопросы к самой Ollama укладываются в секунды, а зависшая
+// команда не должна держать службу и очередь клиентов дольше этого.
+const snapshotTimeout = 30 * time.Second
+
+func (s *server) snapshot(light bool) *nodeprobe.Report {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Дешёвый снимок отдаётся из полного кэша, а полный из дешёвого — нет:
@@ -179,7 +192,22 @@ func (s *server) snapshot(ctx context.Context, light bool) *nodeprobe.Report {
 	} else {
 		o.Want = nodeprobe.All()
 	}
+	// Снимок общий для всех клиентов, поэтому снимается на своём контексте
+	// со своим сроком, а не на контексте запроса. Раньше клиент, ушедший
+	// по своему таймауту посреди сбора, обрывал выборки, и неполный снимок
+	// («карта не видна») уходил из кэша всем остальным.
+	timeout := s.timeout
+	if timeout <= 0 {
+		timeout = snapshotTimeout + time.Duration(max(o.UtilSamples, 1))*o.UtilSampleGap
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	rep := nodeprobe.Snapshot(ctx, o)
+	if ctx.Err() != nil {
+		// Не уложились в срок: разделы, оборванные на полпути, пришли пустыми.
+		// Такой снимок отдаётся тому, кто его ждал, но в кэш не идёт.
+		return &rep
+	}
 	s.at, s.last, s.light = time.Now(), &rep, light
 	return &rep
 }

@@ -1,8 +1,8 @@
 package graph
 
 import (
-	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,6 +61,10 @@ type Merges struct {
 	from map[uint32][]uint32 // выживший → все поглощённые им
 	recs []MergeRec
 	gone int // сколько понятий поглощено: записи to, ведущие не в себя
+
+	// size — сколько байт журнала прочитано: по нему снятие склеек узнаёт,
+	// что журнал дописали, пока оно готовило подмену (см. undo).
+	size int64
 }
 
 // openMerges читает журнал склеек. Отсутствие файла — обычное состояние.
@@ -70,30 +74,58 @@ func openMerges(dir string) (*Merges, error) {
 		to:   map[uint32]uint32{},
 		from: map[uint32][]uint32{},
 	}
-	f, err := os.Open(m.path)
+	recs, size, err := readMergeRecs(m.path)
+	if err != nil {
+		return nil, err
+	}
+	m.recs, m.size = recs, size
+	m.rebuild()
+	return m, nil
+}
+
+// readMergeRecs читает записи журнала склеек и число прочитанных байт.
+// Нет файла — пусто, и это не ошибка.
+func readMergeRecs(path string) ([]MergeRec, int64, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return m, nil
+			return nil, 0, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
+	var recs []MergeRec
+	// Битая и слишком длинная строки пропускаются, а ошибка чтения — ошибка:
+	// журнал, молча усечённый сбоем диска, снятие склеек переписало бы
+	// по усечённому навсегда (eachLine).
+	size, err := eachLine(f, 1024*1024, func(line []byte) {
 		if len(line) == 0 {
-			continue
+			return
 		}
 		var r MergeRec
 		if json.Unmarshal(line, &r) != nil || r.From == 0 || r.To == 0 || r.From == r.To {
-			continue // оборванная последняя строка — не беда, дозапись
+			return // оборванная последняя строка — не беда, дозапись
 		}
-		m.recs = append(m.recs, r)
+		recs = append(recs, r)
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", mergesFile, err)
 	}
+	return recs, size, nil
+}
+
+// reload перечитывает журнал склеек с диска.
+func (m *Merges) reload() error {
+	recs, size, err := readMergeRecs(m.path)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recs, m.size = recs, size
 	m.rebuild()
-	return m, nil
+	return nil
 }
 
 // rebuild собирает разрешение номеров по журналу.
@@ -161,9 +193,17 @@ func (m *Merges) Resolve(id uint32) uint32 {
 	return id
 }
 
+// Выключенные склейки (Rules.MergesOff) выключены целиком: Resolve, Absorbed,
+// Gone и Count отвечают так, будто журнала нет. До 07.10.2026 выключался
+// только Resolve, и граф выходил гибридным: поглощённое понятие находилось
+// само по себе, но его связи и упоминания доставались ещё и выжившему, а из
+// Live оно пропадало — связь считалась дважды (аудит, 4.5). Записи журнала
+// (Records, Add, снятие склеек) от выключателя не зависят: это работа
+// с журналом, а не его действие на граф.
+
 // Absorbed возвращает номера, поглощённые этим понятием.
 func (m *Merges) Absorbed(id uint32) []uint32 {
-	if m == nil {
+	if m == nil || m.off {
 		return nil
 	}
 	m.mu.RLock()
@@ -176,7 +216,7 @@ func (m *Merges) Absorbed(id uint32) []uint32 {
 
 // Gone сообщает, что понятие поглощено и само по себе больше не существует.
 func (m *Merges) Gone(id uint32) bool {
-	if m == nil {
+	if m == nil || m.off {
 		return false
 	}
 	m.mu.RLock()
@@ -199,12 +239,26 @@ func (m *Merges) Gone(id uint32) bool {
 // понятие как быструю проверку «склеек нет» (Edges.outgoing, Entities.Live),
 // и проход по таблице на каждый вызов делал доктора квадратичным.
 func (m *Merges) Count() int {
-	if m == nil {
+	if m == nil || m.off {
 		return 0
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.gone
+}
+
+// inJournal — участвует ли понятие в журнале склеек поглощённым или
+// выжившим, включены склейки или нет. Нужен уплотнению: понятие из журнала
+// выбрасывать нельзя, даже пока склейки выключены, — включат их снова,
+// и склейка повиснет на пустом номере.
+func (m *Merges) inJournal(id uint32) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	dst, ok := m.to[id]
+	return (ok && dst != id) || len(m.from[id]) > 0
 }
 
 // leadsTo — приводит ли цепочка склеек от понятия id к понятию target.
@@ -224,6 +278,25 @@ func (m *Merges) leadsTo(id, target uint32) bool {
 		id = next
 	}
 	return false
+}
+
+// maxEntity — наибольший номер понятия в журнале склеек, не больше limit
+// (см. Mentions.maxEntity).
+func (m *Merges) maxEntity(limit uint32) uint32 {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out uint32
+	for _, r := range m.recs {
+		for _, id := range []uint32{r.From, r.To} {
+			if id > out && id <= limit {
+				out = id
+			}
+		}
+	}
+	return out
 }
 
 // Records отдаёт журнал целиком: он нужен, чтобы показать человеку, на каком
@@ -254,7 +327,11 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 		if r.From == 0 || r.To == 0 || r.From == r.To {
 			continue
 		}
-		if _, done := m.to[r.From]; done {
+		// Уже поглощено — значит, ведёт не в себя. Выживший круга (A→B и B→A
+		// в журнале) ведёт в себя, и до 07.10.2026 его новая склейка
+		// отбрасывалась молча, как «уже склеенное»: склеить такое понятие
+		// с третьим было нельзя никогда (аудит, 4.5).
+		if dst, done := m.to[r.From]; done && dst != r.From {
 			continue
 		}
 		// Встречная склейка: To уже поглощён понятием From (прямо или через
@@ -274,28 +351,11 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 		return 0, nil
 	}
 
-	f, err := os.OpenFile(m.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
+	if err := appendJSONL(m.path, fresh, false); err != nil {
 		return 0, err
 	}
-	w := bufio.NewWriter(f)
-	for _, r := range fresh {
-		b, err := json.Marshal(r)
-		if err != nil {
-			f.Close()
-			return 0, err
-		}
-		if _, err := w.Write(append(b, '\n')); err != nil {
-			f.Close()
-			return 0, err
-		}
-	}
-	if err := w.Flush(); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := f.Close(); err != nil {
-		return 0, err
+	if fi, err := os.Stat(m.path); err == nil {
+		m.size = fi.Size()
 	}
 	m.recs = append(m.recs, fresh...)
 	m.rebuild()
@@ -304,22 +364,3 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 
 // Merges отдаёт журнал склеек.
 func (g *Graph) Merges() *Merges { return g.merges }
-
-// removeFile снимает файл из каталога графа. Нужен, чтобы отменить склейку.
-func removeFile(dir, name string) error {
-	err := os.Remove(filepath.Join(dir, name))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// DropMerges снимает все склейки: граф возвращается в прежний вид.
-//
-// Затем граф надо открыть заново — наложение читается при открытии.
-func (g *Graph) DropMerges() error {
-	if g == nil {
-		return nil
-	}
-	return removeFile(g.dir, mergesFile)
-}

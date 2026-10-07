@@ -3,26 +3,43 @@ package redact
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
+
+// ExitError — ошибка ключа командной строки со своим кодом выхода: 3 —
+// проверка нашла скрытое в итоге, 130 — прервано сигналом. Процесс
+// завершает main, а не библиотека: прежде RunCLI звал os.Exit(3) сам,
+// и отложенные действия вызывающего не выполнялись.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitError) Error() string { return e.Err.Error() }
+func (e *ExitError) Unwrap() error { return e.Err }
 
 // RunCLI — ключ --scan-redact: та же обработка, что у инструмента scan_redact,
 // но без модели. Нужна, чтобы проверить документ, не занимая видеокарту,
 // и чтобы сравнить итог с тем, что сделает модель. На экран — только числа:
 // значения скрытого в вывод не попадают.
-func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
+func RunCLI(stdout, stderr io.Writer, path string, args []string) (err error) {
 	fs := flag.NewFlagSet("scan-redact", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	formats := fs.String("formats", DefaultFormats, "что сделать — "+FormatsHelp)
 	outPDF := fs.String("out-pdf", "", "куда записать PDF с замазанными данными; по умолчанию <имя>.redacted.pdf рядом с исходным")
 	outMD := fs.String("out-md", "", "куда записать .md без персональных данных; по умолчанию <имя>.redacted.md рядом с исходным")
-	outOCRPDF := fs.String("out-ocr-pdf", "", "куда записать текстовый PDF распознанного (с персональными данными); по умолчанию <имя>.ocr.pdf")
-	outOCRMD := fs.String("out-ocr-md", "", "куда записать .md распознанного (с персональными данными); по умолчанию <имя>.ocr.md")
+	outOCRPDF := fs.String("out-ocr-pdf", "", "куда записать текстовый PDF распознанного (с персональными данными), "+
+		"если он заказан в -formats; по умолчанию <имя>.ocr.pdf")
+	outOCRMD := fs.String("out-ocr-md", "", "куда записать .md распознанного (с персональными данными), "+
+		"если он заказан в -formats; по умолчанию <имя>.ocr.md")
 	lang := fs.String("lang", "", "языки tesseract: eng, rus, eng+rus; по умолчанию решают первые листы — английский документ читается одним eng, прочие eng+rus")
 	clients := fs.String("clients", "", "имена клиентов сверх найденного, через «;»")
 	doctors := fs.String("doctors", "", "имена врачей сверх найденного, через «;»")
@@ -49,7 +66,20 @@ func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	// Ctrl+C прерывает распознавание, а не процесс: картинки страниц для
+	// tesseract и pdftoppm — с персональными данными, и убирают их отложенные
+	// действия, которых при гибели процесса по сигналу нет; во временном
+	// каталоге оставались страницы медицинского документа. Повторное нажатие
+	// завершает процесс сразу: перехват снимается после первого.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(ctx, stop)
+	defer func() {
+		if err != nil && ctx.Err() != nil {
+			err = &ExitError{Code: 130, Err: fmt.Errorf("прервано, временные файлы убраны: %w", err)}
+		}
+	}()
+
 	fmt.Fprintf(stderr, "читаю %s\n", path)
 	pages, notes, err := Load(ctx, path, 0)
 	if err != nil {
@@ -91,7 +121,8 @@ func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 	}
 	fmt.Fprint(stdout, res.Check.Line())
 	if !res.Check.OK() {
-		os.Exit(3)
+		return &ExitError{Code: 3, Err: errors.New("проверка повторным распознаванием нашла скрытое в итоге: " +
+			"обезличенные файлы записаны с пометкой UNVERIFIED в имени")}
 	}
 	return nil
 }

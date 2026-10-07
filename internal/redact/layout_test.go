@@ -210,10 +210,15 @@ func TestLeftoversSeeHeadingsAndCells(t *testing.T) {
 	}
 }
 
+// По умолчанию — только обезличенные итоги: копии со всеми персональными
+// данными делаются лишь по явной просьбе (слово владельца 07.10.2026).
 func TestParseFormats(t *testing.T) {
 	f, err := ParseFormats("")
-	if err != nil || f != (Formats{true, true, true, true}) {
-		t.Errorf("пусто — все четыре, а вышло %+v, %v", f, err)
+	if err != nil || f != (Formats{PDF: true, MD: true}) {
+		t.Errorf("пусто — замазанный PDF и .md, а вышло %+v, %v", f, err)
+	}
+	if f, err := ParseFormats("all"); err != nil || f != (Formats{true, true, true, true}) {
+		t.Errorf("all — все четыре, а вышло %+v, %v", f, err)
 	}
 	f, err = ParseFormats("ocr-pdf")
 	if err != nil || f != (Formats{OCRPDF: true}) {

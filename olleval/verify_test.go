@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // Checklist считает попадания и штрафы.
@@ -195,5 +198,133 @@ func TestStripsBuildLeftovers(t *testing.T) {
 	}
 	if _, err := os.Stat(rustLib); err != nil {
 		t.Errorf("ответ модели удалён вместе с потрохами: %v", err)
+	}
+}
+
+func containerTask(timeout time.Duration) *Task {
+	return &Task{ID: "a", Level: 1, Answer: AnswerSpec{File: "main.go", Lang: "go"},
+		Verify: Verify{Kind: VerifyContainer, Image: "olleval/go", Timeout: Duration(timeout),
+			Steps: []Step{{Name: "сборка", Cmd: "go build ./...", Score: 1}}}}
+}
+
+// argAfter — значение ключа в строке docker run.
+func argAfter(args []string, key string) string {
+	for i, a := range args {
+		if a == key && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// Контейнер проверки запускается с именем, без скачивания образов и без
+// привилегий: без имени его нечем снять по таймауту, а без --pull=never
+// отсутствующий образ пришёл бы из чужого пространства имён.
+func TestContainerRunHardened(t *testing.T) {
+	var run []string
+	v := &Verifier{Docker: "docker", Memory: "2g", CPUs: "4",
+		Runner: func(_ context.Context, _ string, args ...string) (string, int, error) {
+			run = args
+			return "", 0, nil
+		}}
+	v.Verify(context.Background(), containerTask(0), t.TempDir(), "```go\npackage main\n```")
+	if name := argAfter(run, "--name"); !strings.HasPrefix(name, "olleval-") {
+		t.Errorf("контейнер без имени: %v", run)
+	}
+	for _, want := range []string{"--network=none", "--pull=never", "--pids-limit=1024",
+		"--cap-drop=ALL", "--security-opt=no-new-privileges"} {
+		if !slices.Contains(run, want) {
+			t.Errorf("в docker run нет %s: %v", want, run)
+		}
+	}
+}
+
+// По пределу времени снимается сам контейнер, а не только клиент docker:
+// иначе вечный цикл в коде модели держал бы ядра стенда и после проверки.
+func TestContainerTimeoutRemovesContainer(t *testing.T) {
+	var started, removed string
+	v := &Verifier{Docker: "docker",
+		Runner: func(ctx context.Context, _ string, args ...string) (string, int, error) {
+			switch args[0] {
+			case "run":
+				started = argAfter(args, "--name")
+				<-ctx.Done() // код модели не кончается сам
+				return "", -1, nil
+			case "rm":
+				if ctx.Err() != nil {
+					t.Error("docker rm получил уже истёкший контекст")
+				}
+				removed = args[len(args)-1]
+			}
+			return "", 0, nil
+		}}
+	res := v.Verify(context.Background(), containerTask(50*time.Millisecond), t.TempDir(),
+		"```go\npackage main\n```")
+	if started == "" || removed != started {
+		t.Errorf("запущен %q, снят %q", started, removed)
+	}
+	if res.Score != 0 || res.NeedsReview || !strings.Contains(res.Verdict, "не уложился") {
+		t.Errorf("вердикт по таймауту: %+v", res)
+	}
+
+	// Остановка прогона — тоже снятие контейнера, но это не провал модели.
+	ctx, cancel := context.WithCancel(context.Background())
+	removed = ""
+	v.Runner = func(c context.Context, _ string, args ...string) (string, int, error) {
+		if args[0] == "run" {
+			started = argAfter(args, "--name")
+			cancel()
+			<-c.Done()
+			return "", -1, nil
+		}
+		removed = args[len(args)-1]
+		return "", 0, nil
+	}
+	res = v.Verify(ctx, containerTask(time.Minute), t.TempDir(), "```go\npackage main\n```")
+	if removed != started || !res.NeedsReview {
+		t.Errorf("остановка прогона: снят %q из %q, вердикт %+v", removed, started, res)
+	}
+}
+
+// Коды 125–127 — беда docker или образа, а не модели: попытка уходит
+// на разбор человеком, а не получает ноль.
+func TestDockerInfraCodesNeedReview(t *testing.T) {
+	for _, code := range []int{125, 126, 127} {
+		v := &Verifier{Docker: "docker", Runner: func(context.Context, string, ...string) (string, int, error) {
+			return "docker: Error response from daemon", code, nil
+		}}
+		res := v.Verify(context.Background(), containerTask(0), t.TempDir(), "```go\npackage main\n```")
+		if !res.NeedsReview || res.Score != 0 || !strings.Contains(res.Verdict, "сорвалась") {
+			t.Errorf("код %d засчитан модели: %+v", code, res)
+		}
+	}
+	// Обычный провал сборки остаётся провалом модели.
+	v := &Verifier{Docker: "docker", Runner: func(context.Context, string, ...string) (string, int, error) {
+		return "undefined: x", 1, nil
+	}}
+	if res := v.Verify(context.Background(), containerTask(0), t.TempDir(), "```go\npackage main\n```"); res.NeedsReview {
+		t.Errorf("провал сборки ушёл на разбор: %+v", res)
+	}
+}
+
+// Вывод шага держится хвостом: вечный цикл с печатью не раздувает память.
+func TestTailBufferKeepsTail(t *testing.T) {
+	b := &tailBuffer{max: 1000}
+	chunk := strings.Repeat("я", 300) // 600 байт, буква — два байта
+	for range 50 {
+		if _, err := b.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.Write([]byte("конец"))
+	got := b.String()
+	if len(got) > 1000 || !strings.HasSuffix(got, "конец") {
+		t.Errorf("хвост %d байт, конец %q", len(got), got[max(0, len(got)-10):])
+	}
+	if !utf8.ValidString(got) {
+		t.Error("хвост начинается с середины буквы")
+	}
+	if cap(b.buf) > 4000 {
+		t.Errorf("буфер разросся до %d байт", cap(b.buf))
 	}
 }

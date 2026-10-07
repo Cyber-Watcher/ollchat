@@ -82,23 +82,41 @@ JSON
 ask() { # $1 — не используется, оставлен для читаемости вызова; $2 — файл времени
 	local start finish
 	start=$(date +%s%3N)
-	curl -s -m 600 "$URL/api/chat" -H 'Content-Type: application/json' \
-		-d "$(body)" -o /dev/null
+	# -f обязателен: без него ответ с ошибкой (нет модели, 500, 503 под
+	# нагрузкой) приходит за миллисекунды и выглядит самым быстрым ответом —
+	# четыре мгновенных отказа разом давали «ускорение» и вердикт
+	# «параллельно». Сорванный запрос помечается, и замер не засчитывается.
+	if ! curl -sf -m 600 "$URL/api/chat" -H 'Content-Type: application/json' \
+		-d "$(body)" -o /dev/null; then
+		echo fail >"$2"
+		return 1
+	fi
 	finish=$(date +%s%3N)
 	echo $((finish - start)) >"$2"
+}
+
+# refused — выйти с кодом 2, если хоть один из замеров сорвался.
+refused() { # $1 — что мерили; дальше — файлы времени
+	local what=$1
+	shift
+	if grep -qx fail "$@" 2>/dev/null; then
+		echo
+		echo "$what: сервер ответил ошибкой — проверить не удалось" >&2
+		exit 2
+	fi
 }
 
 ms() { awk -v v="$1" 'BEGIN{printf "%.1f", v/1000}'; }
 
 echo "сервер: $URL"
-ver=$(curl -s -m 10 "$URL/api/version")
+ver=$(curl -sf -m 10 "$URL/api/version")
 [ -n "$ver" ] || {
 	echo "сервер не отвечает" >&2
 	exit 2
 }
 echo "версия Ollama: ${ver//[\{\}\"]/}"
 
-if ! curl -s -m 20 "$URL/api/tags" | grep -q "\"$MODEL\""; then
+if ! curl -sf -m 20 "$URL/api/tags" | grep -q "\"$MODEL\""; then
 	echo "модели $MODEL на сервере нет" >&2
 	exit 2
 fi
@@ -108,12 +126,14 @@ echo "модель: $MODEL, запросов разом: $JOBS, длина от�
 # не относится.
 echo -n "прогрев (загрузка модели)... "
 ask "прогрев" "$WORK/warm"
+refused "прогрев" "$WORK/warm"
 echo "$(ms "$(cat "$WORK/warm")") с"
 
 # Опорное время меряем дважды и берём меньшее: на нём держится весь вывод,
 # и один шумный замер испортил бы вердикт.
 ask "один" "$WORK/single-1"
 ask "один" "$WORK/single-2"
+refused "одиночный запрос" "$WORK"/single-*
 single=$(cat "$WORK"/single-* | sort -n | head -1)
 echo "один запрос:      $(ms "$single") с (лучшее из двух)"
 
@@ -124,6 +144,7 @@ done
 wait
 finish=$(date +%s%3N)
 total=$((finish - start))
+refused "$JOBS запросов разом" "$WORK"/job-*
 
 fastest=$(cat "$WORK"/job-* | sort -n | head -1)
 slowest=$(cat "$WORK"/job-* | sort -n | tail -1)

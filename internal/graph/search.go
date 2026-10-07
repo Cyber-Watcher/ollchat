@@ -380,7 +380,7 @@ func (g *Graph) linkEntities(query string, opt SearchOpts) []FoundEntity {
 			if _, dup := found[ent.ID]; dup {
 				continue
 			}
-			mentions := len(g.ment.Of(ent.ID))
+			mentions := len(g.mentionsOf(ent.ID))
 			if opt.MinMentions > 0 && mentions < opt.MinMentions {
 				continue
 			}
@@ -494,7 +494,7 @@ func (g *Graph) Entity(name string, opt SearchOpts) (FoundEntity, bool) {
 	}
 	return FoundEntity{
 		Entity:      ent,
-		Mentions:    len(g.ment.Of(ent.ID)),
+		Mentions:    len(g.mentionsOf(ent.ID)),
 		Books:       booksOf(g, ent.ID),
 		Matched:     Normalize(name),
 		Aliases:     g.ents.DisplayAliases(ent),
@@ -502,7 +502,7 @@ func (g *Graph) Entity(name string, opt SearchOpts) (FoundEntity, bool) {
 		// Карточка одного понятия: других понятий вопроса тут нет,
 		// поднимать нечего.
 		Neighbors:      g.neighborsOf(ent.ID, opt.TopNeighbors, opt.QueryVector, opt.Neighbors, nil),
-		NeighborsTotal: len(g.edge.Neighbors(ent.ID)),
+		NeighborsTotal: len(g.neighbors(ent.ID)),
 	}, true
 }
 
@@ -539,7 +539,7 @@ func (g *Graph) Entity(name string, opt SearchOpts) (FoundEntity, bool) {
 func (g *Graph) neighborsOf(id uint32, limit int, qv []int8, rank NeighborRank,
 	inSeeds map[uint32]bool) []NeighborInfo {
 
-	full := g.edge.Neighbors(id) // уже по убыванию веса
+	full := g.neighbors(id) // уже по убыванию веса; без отброшенных книг
 	if len(full) == 0 {
 		return nil
 	}
@@ -820,7 +820,7 @@ func (g *Graph) Path(from, to string, maxHops int) ([]PathStep, bool) {
 	for hop := 0; hop < maxHops && len(queue) > 0; hop++ {
 		var next []uint32
 		for _, cur := range queue {
-			for _, e := range g.edge.around(cur) {
+			for _, e := range g.around(cur) {
 				other, back := e.Dst, false
 				if e.Dst == cur {
 					other, back = e.Src, true
@@ -837,7 +837,7 @@ func (g *Graph) Path(from, to string, maxHops int) ([]PathStep, bool) {
 				// через Go с его 11 466 связями проходит что угодно (замер
 				// 08.09.2026, этап 101 D1). Конец пути хабом быть может —
 				// его назвал вопрос, — а середина нет.
-				if hubLimit > 0 && len(g.edge.Neighbors(other)) >= hubLimit {
+				if hubLimit > 0 && len(g.neighbors(other)) >= hubLimit {
 					continue
 				}
 				next = append(next, other)
@@ -905,7 +905,7 @@ func (g *Graph) pathByFlow(from, to uint32, maxHops, hubLimit int) ([]PathStep, 
 		}
 		arcs := map[uint32]*arc{}
 		total, degree := 0.0, 0
-		for _, e := range g.edge.around(cur.id) {
+		for _, e := range g.around(cur.id) {
 			other, back := e.Dst, false
 			if e.Dst == cur.id {
 				other, back = e.Src, true
@@ -998,10 +998,11 @@ func buildPath(g *Graph, visited map[uint32]link, from, to uint32) []PathStep {
 	return steps
 }
 
-// booksOf считает, в скольких книгах встречается понятие.
+// booksOf считает, в скольких книгах встречается понятие; отброшенные
+// книги не в счёт (dropbook.go).
 func booksOf(g *Graph, id uint32) int {
 	seen := map[uint32]bool{}
-	for _, k := range g.ment.Of(id) {
+	for _, k := range g.mentionsOf(id) {
 		seen[k.Doc] = true
 	}
 	return len(seen)
@@ -1079,7 +1080,7 @@ func (g *Graph) addSenseSeeds(seeds []FoundEntity, opt SearchOpts) []FoundEntity
 		}
 		have[ent.ID] = true
 		h.ID = ent.ID
-		mentions := len(g.ment.Of(h.ID))
+		mentions := len(g.mentionsOf(h.ID))
 		if opt.MinMentions > 0 && mentions < opt.MinMentions {
 			continue
 		}
@@ -1164,7 +1165,7 @@ func (g *Graph) addTripleSeeds(seeds []FoundEntity, opt SearchOpts) []FoundEntit
 			if !ok || have[ent.ID] {
 				continue
 			}
-			mentions := len(g.ment.Of(ent.ID))
+			mentions := len(g.mentionsOf(ent.ID))
 			if opt.MinMentions > 0 && mentions < opt.MinMentions {
 				continue
 			}
@@ -1208,5 +1209,5 @@ func (g *Graph) addTripleSeeds(seeds []FoundEntity, opt SearchOpts) []FoundEntit
 // А вот у понятия без упоминаний и без связей нет ни выдержки, ни соседа,
 // ни цепочки: показать по нему нечего, и в выдаче оно занимает место молча.
 func (g *Graph) emptyNode(id uint32, mentions int) bool {
-	return mentions == 0 && len(g.edge.Neighbors(id)) == 0
+	return mentions == 0 && len(g.neighbors(id)) == 0
 }

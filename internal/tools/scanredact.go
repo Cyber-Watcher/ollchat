@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -35,10 +36,11 @@ func (t *scanRedactTool) Spec() ollama.Tool {
 		Name: NameScanRedact,
 		Description: "Обрабатывает PDF, который на деле скан (страницы — картинки, текста нет): " +
 			"распознаёт текст, находит персональные данные клиента и врача и скрывает их. " +
-			"По умолчанию делает четыре файла: PDF точно такой же, как исходный, но с замазанными чёрным " +
-			"персональными данными; файл .md с текстом документа и таблицами, где имя клиента заменено на CLIENT, " +
+			"По умолчанию делает два файла: PDF точно такой же, как исходный, но с замазанными чёрным " +
+			"персональными данными, и файл .md с текстом документа и таблицами, где имя клиента заменено на CLIENT, " +
 			"имя врача — на DOCTOR, а адреса, телефоны, почта, номера карт, полисов, страховок и исследований " +
-			"и даты рождения убраны; и две распознанные копии со всеми данными — .md и текстовый PDF с таблицами. " +
+			"и даты рождения убраны. Распознанные копии со всеми данными — .md и текстовый PDF с таблицами — " +
+			"делай, только если пользователь прямо попросил их: тогда передай formats (ocr, ocr-pdf, ocr-md или all). " +
 			"Возвращает сводку и текст документа уже без персональных данных; текст распознанных копий не возвращается. " +
 			"Если в обезличенном тексте осталось чьё-то имя, адрес, телефон или номер — вызови инструмент снова " +
 			"и передай это в clients, doctors или hide. " +
@@ -47,7 +49,7 @@ func (t *scanRedactTool) Spec() ollama.Tool {
 			Type: "object",
 			Properties: map[string]ollama.ToolProp{
 				"path":        {Type: "string", Description: "Путь к документу PDF"},
-				"formats":     {Type: "string", Description: "Что сделать, " + redact.FormatsHelp + "; по умолчанию все четыре"},
+				"formats":     {Type: "string", Description: "Что сделать, " + redact.FormatsHelp + "; по умолчанию " + redact.DefaultFormats},
 				"out_pdf":     {Type: "string", Description: "Куда записать PDF с замазанными данными; по умолчанию рядом с исходным, <имя>.redacted.pdf"},
 				"out_md":      {Type: "string", Description: "Куда записать .md без персональных данных; по умолчанию рядом с исходным, <имя>.redacted.md"},
 				"out_ocr_pdf": {Type: "string", Description: "Куда записать текстовый PDF распознанного; по умолчанию рядом с исходным, <имя>.ocr.pdf"},
@@ -78,7 +80,7 @@ func (t *scanRedactTool) SafeArgs(args map[string]any) string {
 }
 
 func (t *scanRedactTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "path")
+	raw, err := requireText(args, "path")
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +126,13 @@ func (t *scanRedactTool) Plan(args map[string]any) (*Plan, error) {
 	extra := []permissions.Request{{Kind: permissions.KindRead, Target: in, Tool: NameScanRedact}}
 	for _, p := range writes[1:] {
 		extra = append(extra, permissions.Request{Kind: permissions.KindWrite, Target: p, Tool: NameScanRedact})
+	}
+	// Найдёт проверка скрытое — замазанный PDF и .md лягут под именами
+	// *.UNVERIFIED.*: это тоже цели записи, и правила проверяют их наравне.
+	for _, p := range outs.Unverified().List() {
+		if !slices.Contains(writes, p) {
+			extra = append(extra, permissions.Request{Kind: permissions.KindWrite, Target: p, Tool: NameScanRedact})
+		}
 	}
 	rel := t.opts.Sandbox.Rel
 	shown := make([]string, 0, len(writes))

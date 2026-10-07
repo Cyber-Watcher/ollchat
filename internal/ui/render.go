@@ -50,6 +50,12 @@ type block struct {
 	// только под ним идентификатор показывается в ленте.
 	turn       string
 	showTurnID bool
+
+	// id — постоянный номер блока в сеансе, его выдаёт addBlock. Индекс
+	// блока уезжает: /clear и /resume заменяют ленту целиком, и тот, кто
+	// запомнил индекс, затирал бы чужой блок. Номер остаётся за блоком,
+	// пока тот в ленте (см. blockIndex).
+	id uint64
 }
 
 // renderer превращает блоки в текст для области истории.
@@ -120,13 +126,6 @@ func (r *renderer) setWidth(w int) {
 		return
 	}
 	r.glam = g
-}
-
-func (r *renderer) setMarkdown(on bool) {
-	r.markdown = on
-	w := r.width
-	r.width = 0 // заставляем пересоздать рендерер
-	r.setWidth(w)
 }
 
 // renderMarkdown форматирует текст ответа модели.

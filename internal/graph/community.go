@@ -317,7 +317,7 @@ func (g *Graph) partition(opt CommunityOpts, save bool) (*Communities, error) {
 		}
 	}
 
-	if err := g.saveCommunities(res); err != nil {
+	if err := g.saveNewPartition(res); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -337,8 +337,45 @@ func (g *Graph) LoadCommunities() (*Communities, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("разбиение на сообщества не читается: %w", err)
 	}
+	uniqueTopicIDs(c.List)
 	c.loaded = communityStamp(filepath.Join(g.dir, CommunityFile))
 	return &c, nil
+}
+
+// uniqueTopicIDs раздаёт новые номера темам, чей номер занят другой темой,
+// и возвращает, сколько тем перенумеровано.
+//
+// Разбиения, посчитанные до 07.10.2026, давали отрезанной части несвязной
+// темы номер её наименьшего ПОНЯТИЯ (splitparts.go), и он совпадал с номером
+// чужой темы: graph_topic #N отдавал первую из двух, а перенос описаний
+// (carry.go), сопоставляющий темы по номеру, путал их составы. Чинится при
+// чтении, файл при этом не правится — ближайшая запись разбиения ляжет уже
+// с исправленными номерами. Порядок не случаен и повторяется от чтения
+// к чтению: номер сохраняют верхние темы (на них ссылается Parent), из
+// нижних — первая по списку (её и находил прежний поиск по номеру);
+// остальным — номера выше всех занятых, по порядку списка.
+func uniqueTopicIDs(list []Community) int {
+	used := make(map[int]bool, len(list))
+	next := 0
+	for _, com := range list {
+		next = max(next, com.ID+1)
+		if com.Level != 0 {
+			used[com.ID] = true
+		}
+	}
+	renamed := 0
+	for i := range list {
+		if list[i].Level != 0 {
+			continue
+		}
+		if used[list[i].ID] {
+			list[i].ID = next
+			next++
+			renamed++
+		}
+		used[list[i].ID] = true
+	}
+	return renamed
 }
 
 // communityStamp — отпечаток файла разбиения: размер и время. По нему
@@ -368,31 +405,48 @@ func (g *Graph) saveCommunitiesGuarded(c *Communities) error {
 // PrevCommunityFile — прежнее разбиение, сохранённое перед перезаписью.
 const PrevCommunityFile = "communities.prev.json"
 
+// saveCommunities пишет разбиение на место прежнего: описания, разборы,
+// перенумерация — всё, что правит ТО ЖЕ разбиение. Копию прежнего не трогает.
 func (g *Graph) saveCommunities(c *Communities) error {
 	b, err := json.MarshalIndent(c, "", " ")
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(g.dir, CommunityFile)
+	return fsx.WriteFileAtomic(filepath.Join(g.dir, CommunityFile), b, 0o644)
+}
 
-	// Прежнее разбиение сохраняется перед перезаписью.
-	//
-	// **Замер 02.09.2026.** Пересчёт на выросшем графе стёр 1584 описания тем
-	// и все разборы, кроме 35: преемника с совпадением состава от 70% им
-	// не нашлось. Половина этой потери неизбежна — темы как группировки
-	// перестали существовать, — но текст писала модель, и это двадцать минут
-	// карты, выброшенных безвозвратно.
-	//
-	// Копия стоит одного файла на диске (14 МБ на нашем графе) и даёт три
-	// возможности: посмотреть, что именно потеряно; перенести описания заново
-	// с меньшим порогом, если решим, что 0.7 строг; вернуть прежнее разбиение
-	// целиком, если пересчёт оказался неудачным.
-	//
-	// Хранится ровно одно поколение: копить их незачем, а место они занимают.
-	if _, err := os.Stat(path); err == nil {
-		_ = os.Rename(path, filepath.Join(g.dir, PrevCommunityFile))
+// saveNewPartition пишет НОВОЕ разбиение, сохранив прежнее рядом.
+//
+// **Замер 02.09.2026.** Пересчёт на выросшем графе стёр 1584 описания тем
+// и все разборы, кроме 35: преемника с совпадением состава от 70% им
+// не нашлось. Половина этой потери неизбежна — темы как группировки
+// перестали существовать, — но текст писала модель, и это двадцать минут
+// карты, выброшенных безвозвратно.
+//
+// Копия стоит одного файла на диске (14 МБ на нашем графе) и даёт три
+// возможности: посмотреть, что именно потеряно; перенести описания заново
+// с меньшим порогом, если решим, что 0.7 строг; вернуть прежнее разбиение
+// целиком, если пересчёт оказался неудачным.
+//
+// Хранится ровно одно поколение: копить их незачем, а место они занимают.
+//
+// **Только при новом разбиении.** До 07.10.2026 копия перекладывалась при
+// любой записи, и первое же ленивое описание темы или порция резюме
+// затирали прежнее разбиение копией текущего — копия пропадала ровно тогда,
+// когда могла понадобиться (аудит, 4.5). И копия — копия, а не переименование:
+// обрыв между переименованием и записью оставлял граф без разбиения вовсе.
+func (g *Graph) saveNewPartition(c *Communities) error {
+	path := filepath.Join(g.dir, CommunityFile)
+	old, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := fsx.WriteFileAtomic(filepath.Join(g.dir, PrevCommunityFile), old, 0o644); err != nil {
+			return fmt.Errorf("копия прежнего разбиения не записана, новое не записано тоже: %w", err)
+		}
+	case !os.IsNotExist(err):
+		return err
 	}
-	return fsx.WriteFileAtomic(path, b, 0o644)
+	return g.saveCommunities(c)
 }
 
 // undirected собирает неориентированный взвешенный граф.
@@ -497,6 +551,10 @@ func (g *Graph) assembleFor(adj map[uint32]map[uint32]float64, order []uint32,
 
 	var out []Community
 	upper := map[uint32][]uint32{} // сообщество уровня 1 → его мелкие
+	// Сдвиг номеров верхнего уровня — один на всё разбиение (upperBase):
+	// считать его заново для каждой темы — квадрат от числа тем, около двух
+	// миллиардов шагов на 47 тысячах (аудит 07.10.2026, 4.5).
+	base := upperBase(ids)
 	for _, c := range ids {
 		list := members[c]
 		sort.Slice(list, func(i, j int) bool {
@@ -507,7 +565,7 @@ func (g *Graph) assembleFor(adj map[uint32]map[uint32]float64, order []uint32,
 		})
 		parent := -1
 		if p, ok := big[c]; ok {
-			parent = upperID(ids, p)
+			parent = base + int(p)
 			upper[p] = append(upper[p], c)
 		}
 		out = append(out, Community{
@@ -535,7 +593,7 @@ func (g *Graph) assembleFor(adj map[uint32]map[uint32]float64, order []uint32,
 			return all[i] < all[j]
 		})
 		out = append(out, Community{
-			ID: upperID(ids, p), Level: 1, Parent: -1,
+			ID: base + int(p), Level: 1, Parent: -1,
 			Members: all, Weight: inner(adj, all),
 		})
 	}
@@ -559,19 +617,19 @@ func inner(adj map[uint32]map[uint32]float64, list []uint32) float64 {
 	return sum / 2 // каждая связь посчитана с обоих концов
 }
 
-// upperID даёт объединению верхнего уровня номер, не совпадающий ни с одним
-// мелким сообществом.
+// upperBase — сдвиг номеров объединений верхнего уровня: объединение p
+// получает номер upperBase + p, не совпадающий ни с одним мелким сообществом.
 //
 // Оба уровня нумеруются с нуля независимо, и без сдвига номера накладываются:
 // «сообщество №5» означает разное на разных уровнях. Поймано на живом графе —
 // обзор выдал тему на 1 715 понятий при пределе в 200, подставив объединение
 // вместо мелкого сообщества с тем же номером.
-func upperID(small []uint32, p uint32) int {
+func upperBase(small []uint32) int {
 	var max uint32
 	for _, c := range small {
 		if c > max {
 			max = c
 		}
 	}
-	return int(max) + 1 + int(p)
+	return int(max) + 1
 }

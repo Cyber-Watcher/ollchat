@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
@@ -134,6 +133,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleImagePasted(msg)
 		return m, nil
 
+	case confirmQuietMsg:
+		return m, m.onConfirmQuiet(msg)
+
 	case answerCopiedMsg:
 		return m, m.handleAnswerCopied(msg)
 
@@ -161,6 +163,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case attachMsg:
+		// Посреди хода историю дописывает агент из своей горутины: вызов
+		// инструмента, следом его результат. Вложение, вставшее между ними,
+		// ломает порядок, которого требует сервер (аудит 07.10.2026). Файл
+		// уже прочитан — в историю он ляжет, как только ход кончится.
+		// Во время сжатия тоже: CompactWith оставит последние N сообщений,
+		// и вложение вытеснило бы из хвоста то, чего нет и в сводке.
+		if m.streaming || m.compacting {
+			m.heldAttach = append(m.heldAttach, msg)
+			m.statusMsg = "файл " + msg.rel + " приложится после ответа модели"
+			return m, nil
+		}
 		return m, m.attach(msg.rel, msg.body, msg.notice)
 
 	case graphRemovedMsg:
@@ -174,6 +187,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onCompactDone(msg)
 
 	case sessionLoadedMsg:
+		// Восстановление заменяет и историю, и ленту. Посреди хода агент
+		// дописывал бы ответ в чужой диалог, а индекс живого блока указывал
+		// за конец новой ленты — программа падала с index out of range, и
+		// диалог пропадал (аудит 07.10.2026). Сессия дочиталась, когда вопрос
+		// уже задан; восстанавливать её поверх ответа нельзя, а повторить
+		// команду дёшево.
+		if m.streaming || m.mixing || m.compacting {
+			again := strings.TrimSpace("/resume " + msg.rec.ID)
+			m.addBlock(block{kind: blockError, text: "сессия не восстановлена: она дочиталась, " +
+				"когда уже шёл ответ модели. Повторите " + again + " после ответа"})
+			return m, nil
+		}
 		m.applyResumed(msg.rec)
 		return m, nil
 
@@ -194,7 +219,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Пока открыт список выбора или панель подтверждения, вводить некуда: там ждут
 // ответа одной клавишей, и вставка целого абзаца только запутала бы.
 func (m *Model) handlePaste(msg tea.PasteMsg) tea.Cmd {
-	if m.picker != nil || m.confirm != nil {
+	// Вставка при открытом окне подтверждения — верный признак, что окна
+	// не заметили и пишут вопрос: следующий Enter не должен стать «да».
+	if m.confirm != nil {
+		return m.armConfirm()
+	}
+	if m.picker != nil {
 		return nil
 	}
 	// Вставка в окно сохранения — это имя файла, а не текст вопроса: путь
@@ -308,6 +338,7 @@ func (m *Model) handleResize(msg tea.WindowSizeMsg) tea.Cmd {
 		m.savePDF.input.SetWidth(savePDFInputWidth(msg.Width))
 	}
 	// Крайняя колонка отдана полосе прокрутки, поэтому текст переносим уже.
+	wasWidth := m.rend.width
 	m.rend.setWidth(msg.Width - 3)
 
 	vpHeight := m.viewportHeight()
@@ -315,14 +346,23 @@ func (m *Model) handleResize(msg tea.WindowSizeMsg) tea.Cmd {
 	if vpWidth < 1 {
 		vpWidth = 1
 	}
-	if !m.ready {
-		m.vp = viewport.New(viewport.WithWidth(vpWidth), viewport.WithHeight(vpHeight))
+	first := !m.ready
+	if first {
+		m.vp = newFeedView(vpWidth, vpHeight)
 		m.ready = true
 	} else {
 		m.vp.SetWidth(vpWidth)
 		m.vp.SetHeight(vpHeight)
 	}
-	m.rerenderAll()
+	// Отрисовка блоков зависит от ширины, но не от высоты. Прогонять всю
+	// историю через markdown на каждое изменение высоты окна — секунды
+	// на длинном сеансе (2.7 с при 500 обменах, аудит 07.10.2026) ради
+	// того же самого текста.
+	if first || m.rend.width != wasWidth {
+		m.rerenderAll()
+	} else {
+		m.refreshViewport(false)
+	}
 	m.vp.GotoBottom()
 	return nil
 }
@@ -376,10 +416,21 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.stopStreaming()
 			m.addBlock(block{kind: blockNotice, text: "генерация прервана"})
 		}
+		m.abortCompaction("Ctrl+C")
 		m.statusMsg = "нажмите Ctrl+C ещё раз для выхода"
+		if m.job != nil {
+			// Выход обрывает и фоновую работу: часы индексации не должны
+			// пропадать без единого слова об этом.
+			m.statusMsg = "идёт " + m.job.title + " — Ctrl+C ещё раз выйдет и оборвёт её"
+		}
 		return m, nil
 	}
 	m.quitConfirm = false
+	// Остановку задачи готовит только Esc, нажатый подряд: любая другая
+	// клавиша между ними её отменяет.
+	if !key.Matches(msg, keys.esc) {
+		m.jobEscAt = time.Time{}
+	}
 
 	// Окно сохранения в PDF перехватывает управление первым: пока в нём
 	// набирают имя файла, Esc обязан закрывать окно, а не прерывать генерацию.
@@ -439,10 +490,33 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.addBlock(block{kind: blockNotice, text: "генерация прервана"})
 			return m, nil
 		}
-		// Вне генерации Esc останавливает индексацию книг: другой длительной
-		// работы в приложении нет.
+		// Подмешивание — тоже часть хода, и строка состояния обещает, что Esc
+		// его прерывает. Раньше нажатие проваливалось ниже и без вопроса
+		// останавливало индексацию, идущую рядом.
+		if m.mixing {
+			m.stopStreaming()
+			m.addBlock(block{kind: blockNotice, text: "вопрос отменён: знания к нему ещё готовились"})
+			return m, nil
+		}
+		// Сжатие истории — часть хода: Esc прерывает его, а не индексацию,
+		// идущую рядом.
+		if m.compacting {
+			m.abortCompaction("Esc")
+			return m, nil
+		}
+		// Вне хода Esc останавливает фоновую задачу — но только второй подряд
+		// в пределах jobStopWindow. Одним Esc прерывают ответ, и если тот
+		// успел кончиться, нажатие убивало многочасовую индексацию или
+		// уплотнение без вопроса (аудит 07.10.2026).
 		if m.job != nil {
-			m.stopJob("остановлено")
+			now := m.now()
+			if !m.jobEscAt.IsZero() && now.Sub(m.jobEscAt) <= jobStopWindow {
+				m.jobEscAt = time.Time{}
+				m.stopJob("остановлено")
+				return m, nil
+			}
+			m.jobEscAt = now
+			m.statusMsg = "идёт " + m.job.title + " — Esc ещё раз в течение 2 с остановит её"
 			return m, nil
 		}
 		return m, nil
@@ -457,6 +531,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// истории диалога — два вопроса подряд без ответа между ними.
 		if m.mixing {
 			m.statusMsg = "готовлю знания к вопросу — Esc отменяет"
+			return m, nil
+		}
+		// То же со сжатием: вопрос принят и уйдёт сам, а второй Enter запускал
+		// второе сжатие и терял первый вопрос.
+		if m.compacting {
+			m.statusMsg = "сжимаю историю — вопрос уйдёт следом, Esc отменяет"
 			return m, nil
 		}
 		text := m.ta.Value()
@@ -686,6 +766,11 @@ func (m *Model) handleCmdMenuKey(key string) (tea.Cmd, bool) {
 
 // handleConfirmKey обрабатывает ответ на запрос подтверждения.
 func (m *Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
+	// Пока клавиатура не помолчала, нажатие — продолжение набора, а не ответ:
+	// отбрасываем его и начинаем отсчёт тишины заново (confirmguard.go).
+	if m.confirmTyping() {
+		return m, m.armConfirm()
+	}
 	// Русские буквы — те, что находятся на тех же клавишах: пользователь может
 	// не переключать раскладку. Плюс «д»/«н» как первые буквы да/нет.
 	answer := agent.AnswerNo
@@ -707,12 +792,15 @@ func (m *Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 		m.confirmScroll++
 		return m, nil
 	default:
-		return m, nil
+		// Клавиша окну ничего не говорит — человек печатает вопрос и окна
+		// не заметил. Следующая буква его слова не должна стать ответом.
+		return m, m.armConfirm()
 	}
 
 	req := m.confirm
 	m.confirm = nil
 	m.confirmScroll = 0
+	m.confirmArmed = false
 	if m.ready {
 		m.vp.SetHeight(m.viewportHeight())
 		m.refreshViewport(true)
@@ -740,7 +828,10 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	case agent.EventContent:
 		m.speed.Tick(time.Now())
 		m.turnAnswer.WriteString(ev.Text)
-		if m.liveIdx < 0 {
+		// Индекс живого блока сверяется с лентой: если её заменили посреди
+		// хода, устаревший индекс ронял программу, а теперь ответ просто
+		// продолжится новым блоком.
+		if m.liveIdx < 0 || m.liveIdx >= len(m.blocks) {
 			// Модель проставляем сразу, а не в конце хода: копировать ответ
 			// можно и посреди генерации.
 			m.liveIdx = m.addBlock(block{kind: blockAssistant, text: ev.Text,
@@ -760,7 +851,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	case agent.EventThinking:
 		m.speed.Tick(time.Now())
 		m.turnThink.WriteString(ev.Text)
-		if m.thinkIdx < 0 {
+		if m.thinkIdx < 0 || m.thinkIdx >= len(m.blocks) {
 			m.thinkIdx = m.addBlock(block{kind: blockThinking, text: ev.Text})
 		} else {
 			b := m.blocks[m.thinkIdx]
@@ -776,13 +867,20 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 		return nil
 
 	case agent.EventToolConfirm:
+		// Клавиши достаются окну подтверждения раньше всех, значит, и на
+		// экране обязано быть оно. Список выбора и окно сохранения рисуются
+		// вместо него: человек открыл Ctrl+S посреди хода, видел список
+		// серверов, а его Enter одобрял скрытый bash(rm -rf build) (аудит
+		// 07.10.2026, находка 4). Всё, что заслоняет окно, закрывается;
+		// подсказки над строкой ввода тоже — они откроются снова с набором.
+		if m.picker != nil || m.savePDF != nil {
+			m.statusMsg = "модель ждёт подтверждения — открытое окно закрыто"
+		}
+		m.picker, m.savePDF, m.files, m.cmds = nil, nil, nil, nil
 		m.confirm = ev.Confirm
 		m.confirmScroll = 0
-		if m.ready {
-			m.vp.SetHeight(m.viewportHeight())
-			m.refreshViewport(true)
-		}
-		return nil
+		m.confirmArmed = false
+		return m.armConfirm()
 
 	case agent.EventToolResult:
 		status := "ok"
@@ -1033,6 +1131,9 @@ func (m *Model) onGraphProgress(msg graphProgressMsg) (tea.Model, tea.Cmd) {
 
 // onMixReady — обработка mixReadyMsg, вынесена из Update (этап 91, R6.12).
 func (m *Model) onMixReady(msg mixReadyMsg) (tea.Model, tea.Cmd) {
+	// Команда вернулась — граф, которым она считала, свободен, даже если
+	// вопрос брошен: его горутина больше не читает.
+	m.returnGraph(msg.lent)
 	// Открытый граф забираем всегда, даже если вопрос уже брошен: он стоил
 	// десятков секунд, и выбрасывать его из-за отменённого хода — значит
 	// заплатить за него ещё раз на следующем вопросе.

@@ -97,6 +97,48 @@ func TestSplitTextMarksCode(t *testing.T) {
 	}
 }
 
+// Строка длиннее куска режется на куски целевого размера, а не становится
+// одним куском на 30 000 знаков.
+//
+// Кусок набирается целыми строками, и абзац markdown одной строкой или сжатый
+// JSON давали кусок длиной во весь файл: он не влезал ни в выдачу, ни в окно
+// модели. Ветка «одна строка длиннее целевого размера» была мёртвой.
+func TestSplitTextCutsLongLine(t *testing.T) {
+	opt := DefaultChunkOpts()
+	var prose strings.Builder
+	for i := 0; i < 550; i++ { // около 30 000 знаков
+		fmt.Fprintf(&prose, "Предложение %d рассказывает о настройке таймаутов службы. ", i)
+	}
+	blob := strings.Repeat("QUJDRA", 5000) // base64 без единого пробела
+	for name, line := range map[string]string{"проза": prose.String(), "сплошная строка": blob} {
+		text := "# Раздел\n\n" + line + "\n"
+		chunks := SplitText(lineParts(text), opt)
+		if len(chunks) < 10 {
+			t.Fatalf("%s: строка в %d знаков дала %d кусков", name, len([]rune(line)), len(chunks))
+		}
+		total := 0
+		for i, c := range chunks {
+			body := strings.TrimPrefix(c.Text, "‹ Раздел ›\n")
+			if n := len([]rune(body)); n > opt.Chars+1 {
+				t.Fatalf("%s: кусок %d длиной %d знаков при целевом %d", name, i, n, opt.Chars)
+			}
+			if c.UnitFrom < 1 || c.UnitTo > 4 { // строки файла: заголовок, пустая, длинная, пустая
+				t.Fatalf("%s: кусок %d ссылается на строки %d–%d", name, i, c.UnitFrom, c.UnitTo)
+			}
+			total += len([]rune(body))
+		}
+		// С перекрытием текста в кусках больше, чем в строке, но не меньше.
+		if total < len([]rune(line)) {
+			t.Fatalf("%s: в кусках %d знаков из %d — текст потерян", name, total, len([]rune(line)))
+		}
+	}
+	// Конец строки на месте: последний кусок кончается её последним словом.
+	chunks := SplitText(lineParts("# Раздел\n\n"+prose.String()+"\n"), opt)
+	if last := chunks[len(chunks)-1].Text; !strings.HasSuffix(strings.TrimSpace(last), "службы.") {
+		t.Fatalf("конец строки потерян: …%q", last[max(0, len(last)-60):])
+	}
+}
+
 // Пустой и почти пустой файл не дают кусков, а не падают.
 func TestSplitTextEmpty(t *testing.T) {
 	if got := SplitText(lineParts(""), DefaultChunkOpts()); len(got) != 0 {

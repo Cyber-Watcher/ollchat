@@ -2,6 +2,7 @@ package kb
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -243,6 +244,44 @@ func TestSearchByBookFilter(t *testing.T) {
 	}
 }
 
+// Настройки без TopK получают умолчания, но отбор книг не теряют.
+//
+// Нулевой TopK заменял настройки умолчаниями целиком: поиск «только в этой
+// книге» искал по всей коллекции, а отбор живых книг выпадал, и удалённая
+// книга возвращалась в выдачу.
+func TestSearchZeroTopKKeepsFilters(t *testing.T) {
+	_, coll, _ := mergeFixture(t) // go, k8s и удалённая perl
+	if found(t, coll, "perl") {
+		t.Fatal("удалённая книга ищется и с TopK")
+	}
+	hits, err := coll.Search("perl regular expressions", SearchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) > 0 {
+		t.Fatalf("без TopK вернулась удалённая книга: %s", hits[0].Path)
+	}
+
+	var k8s uint32
+	for _, b := range coll.Books() {
+		if filepath.Base(b.Path) == "k8s.pdf" {
+			k8s = b.ID
+		}
+	}
+	hits, err = coll.Search("plain sentence of book text", SearchOpts{Docs: []uint32{k8s}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("в отобранной книге ничего не нашлось")
+	}
+	for _, h := range hits {
+		if filepath.Base(h.Path) != "k8s.pdf" {
+			t.Fatalf("отбор по книге без TopK пропустил %s", h.Path)
+		}
+	}
+}
+
 // TestSearchEmptyAndUnknown — пустой запрос и слово, которого нет, не должны
 // ломать поиск.
 func TestSearchEmptyAndUnknown(t *testing.T) {
@@ -291,6 +330,145 @@ func TestSegmentSurvivesReopen(t *testing.T) {
 			t.Fatalf("открытие %d: постинги потеряны (%v)", i, err)
 		}
 		seg.Close()
+	}
+}
+
+// Испорченный словарь сегмента — ошибка открытия, а не мусор и не паника.
+//
+// Последние поля записи словаря (частота, смещение, длина) читались без
+// проверки: переполненное число давало отрицательный сдвиг и панику на срезе
+// посреди открытия коллекции, а ссылка за конец post.dat принималась молча.
+func TestOpenSegmentRejectsCorruptDictionary(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := CreateWriter(dir)
+	w.Append(1, chunksOf("Горутины и каналы составляют основу конкурентности в Go. "+filler(5)))
+	w.Commit()
+	w.Close()
+	store, _ := OpenStore(dir)
+	defer store.Close()
+	segDir := filepath.Join(dir, "seg-00001")
+	if _, err := BuildSegment(segDir, store, 0, store.Count(), nil); err != nil {
+		t.Fatal(err)
+	}
+	dic := filepath.Join(segDir, "terms.dic")
+	good, err := os.ReadFile(dic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overflow := []byte{0, 1, 'a', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	beyond := []byte{0, 1, 'a', 1, 0, 0xff, 0x7f} // постинги длиной 16383 байта с нуля
+	for name, raw := range map[string][]byte{
+		"переполнение":    overflow,
+		"за концом post":  beyond,
+		"обрыв записи":    good[:len(good)-1],
+		"хвост без полей": append(append([]byte{}, good...), 0, 1, 'z'),
+	} {
+		if err := os.WriteFile(dic, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: паника при открытии сегмента: %v", name, r)
+				}
+			}()
+			if seg, err := OpenSegment(segDir); err == nil {
+				seg.Close()
+				t.Errorf("%s: испорченный словарь принят", name)
+			}
+		}()
+	}
+}
+
+// Хранилище с чужим заголовком не открывается: иначе выдача показывала бы
+// мусор вместо цитат. Заголовок писался всегда, но не проверялся.
+func TestOpenStoreChecksMagic(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := CreateWriter(dir)
+	w.Append(1, chunksOf("кусок книги"))
+	w.Commit()
+	w.Close()
+	if s, err := OpenStore(dir); err != nil {
+		t.Fatalf("целое хранилище не открылось: %v", err)
+	} else {
+		s.Close()
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "chunks.dat"), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteAt([]byte("GARBAGE"), 0)
+	f.Close()
+	if s, err := OpenStore(dir); err == nil {
+		s.Close()
+		t.Fatal("хранилище с чужим заголовком открылось")
+	}
+
+	// Пустое хранилище без заголовка — обрыв сразу после создания файлов —
+	// открывается: читать в нём нечего.
+	empty := t.TempDir()
+	for _, name := range []string{"chunks.dat", "chunks.idx"} {
+		if err := os.WriteFile(filepath.Join(empty, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s, err := OpenStore(empty); err != nil {
+		t.Fatalf("пустое хранилище не открылось: %v", err)
+	} else {
+		s.Close()
+	}
+}
+
+// Хранилище без заголовка, у которого и указатели начинаются с нуля, — формат
+// без заголовка вовсе, а не порча: оно открывается и читается, как прежде.
+// Отказ здесь стоил бы коллекции, которую нечем пересобрать.
+func TestOpenStoreWithoutHeaderStillOpens(t *testing.T) {
+	src := t.TempDir()
+	w, err := CreateWriter(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Append(1, chunksOf("первая книга, первый кусок"))
+	w.Append(2, chunksOf("вторая книга"))
+	w.Commit()
+	w.Close()
+
+	// Та же коллекция без заголовка: блоки с нуля, указатели сдвинуты.
+	head := int64(len(storeMagic) + 1)
+	dat, err := os.ReadFile(filepath.Join(src, "chunks.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := os.ReadFile(filepath.Join(src, "chunks.idx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len(idx); i += chunkRecSize {
+		rec := decodeRec(idx[i:])
+		rec.BlockOff -= uint64(head)
+		rec.encode(idx[i:])
+	}
+	old := t.TempDir()
+	if err := os.WriteFile(filepath.Join(old, "chunks.dat"), dat[head:], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "chunks.idx"), idx, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenStore(old)
+	if err != nil {
+		t.Fatalf("хранилище без заголовка перестало открываться: %v", err)
+	}
+	defer s.Close()
+	want, _ := OpenStore(src)
+	defer want.Close()
+	for i := 0; i < want.Count(); i++ {
+		got, err := s.Text(i)
+		exp, _ := want.Text(i)
+		if err != nil || got != exp {
+			t.Fatalf("кусок %d: %q (%v), ожидалось %q", i, got, err, exp)
+		}
 	}
 }
 

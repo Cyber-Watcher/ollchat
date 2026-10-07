@@ -93,6 +93,13 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 		if sync {
 			return err
 		}
+		// Заводится только коллекция, которой нет. Та, что есть, но не открылась
+		// (испорченный индекс, нет прав), — это её ошибка, и показать надо её:
+		// прежде вместо неё приходил отказ Create «коллекция уже есть», и
+		// человек не узнавал, что с коллекцией на самом деле.
+		if _, serr := os.Stat(filepath.Join(base.CollectionDir(name), "meta.json")); serr == nil {
+			return err
+		}
 		if coll, err = base.Create(name, ""); err != nil {
 			return err
 		}
@@ -165,6 +172,12 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 		fmt.Fprintf(stdout, ", тощих %d", res.Thin)
 	}
 	fmt.Fprintf(stdout, "\n")
+	// Каталог, из которого пропали все книги, сверка не трогает — но молчать
+	// об этом нельзя: человек должен понять, что том не подключён.
+	for _, root := range res.LostRoots {
+		fmt.Fprintf(stdout, "внимание: из каталога %s пропали все книги — похоже, том не подключён;\n"+
+			"  они НЕ помечены удалёнными. Если удалили их намеренно — уберите книги из коллекции командой удаления книги\n", root)
+	}
 	// Тощие книги печатаются с причиной и числами сразу, а не отсылкой
 	// к доктору: это отказ взять книгу, которую человек только что положил
 	// в каталог, и он вправе тут же увидеть, почему, и не согласиться.
@@ -941,8 +954,15 @@ func Reindex(stdout io.Writer, cfg *config.Config, name string, paths []string) 
 	if res.Scans+res.Errors > 0 {
 		fmt.Fprintf(stdout, "  сканов %d, со сбоями %d\n", res.Scans, res.Errors)
 	}
-	fmt.Fprintln(stdout, "  прежние куски этих книг помечены удалёнными; место освободит /kb merge,")
-	fmt.Fprintln(stdout, "  но его нельзя запускать, пока по коллекции собран граф понятий")
+	// Прежняя версия помечается удалённой только у перечитанной книги:
+	// прерванная работа оставляет остальные как были (kb.Reindex).
+	if res.Canceled {
+		fmt.Fprintln(stdout, "  работа прервана: книги, до которых не дошло, остались в прежнем виде")
+	}
+	if res.Added > 0 {
+		fmt.Fprintln(stdout, "  прежние куски перечитанных книг помечены удалёнными; место освободит /kb merge,")
+		fmt.Fprintln(stdout, "  но его нельзя запускать, пока по коллекции собран граф понятий")
+	}
 	return nil
 }
 
@@ -1047,11 +1067,11 @@ func Doctor(stdout io.Writer, cfg *config.Config, name string, quick bool) error
 		// Граф открывается только ради одного вопроса — «разобрана ли книга»,
 		// — и потому по требованию: на большой коллекции это секунды и гигабайт.
 		var inGraph kb.InGraph
+		var g *graph.Graph
 		if !quick {
 			line.step("открываю граф", 0, 0)
-			if g, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules()); err == nil {
-				inGraph = g.CoversDoc
-				defer g.Close()
+			if gr, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules()); err == nil {
+				g, inGraph = gr, gr.CoversDoc
 			}
 		}
 		report := kb.Doctor(coll, kb.DoctorOpts{
@@ -1063,6 +1083,12 @@ func Doctor(stdout io.Writer, cfg *config.Config, name string, quick bool) error
 			Step:  line.step,
 		})
 		line.stop()
+		// Граф закрывается сразу после отчёта, а не отложенно: defer в цикле
+		// по `--kb-doctor all` держал открытыми графы всех коллекций до конца
+		// проверки, а открытый граф большой библиотеки — это гигабайт памяти.
+		if g != nil {
+			g.Close()
+		}
 		fmt.Fprintln(stdout, report)
 	}
 	return nil
@@ -1226,7 +1252,13 @@ type mergeInfo struct {
 	bytes       int64
 	segments    int
 	hasGraph    bool
-	graph       graph.Meta // паспорт графа: читается даром, граф не открывается
+	graphs      []namedGraph // каталоги графов коллекции: рабочий и именованные
+}
+
+// namedGraph — каталог графа и его паспорт: читается даром, граф не открывается.
+type namedGraph struct {
+	dir  string
+	meta graph.Meta
 }
 
 func mergePreview(c *kb.Collection) mergeInfo {
@@ -1248,13 +1280,17 @@ func mergePreview(c *kb.Collection) mergeInfo {
 	if o := mi.physical - mi.liveChunks - mi.delChunks; o > 0 {
 		mi.orphanChunk = o
 	}
-	mi.hasGraph = c.HasGraph()
-	if mi.hasGraph {
+	// Все графы коллекции, а не один рабочий: именованный граф (`graph-lab`)
+	// стоит той же работы видеокарты, а до 07.10.2026 предупреждение о нём
+	// молчало.
+	for _, dir := range c.GraphDirs() {
 		// Ошибку глотаем намеренно: паспорт не прочитался — предупреждение
 		// станет короче, но не пропадёт. Отказываться уплотнять из-за этого
 		// не за что, а падать посреди объяснения — тем более.
-		mi.graph, _ = graph.Stat(filepath.Join(c.Dir(), "graph"))
+		m, _ := graph.Stat(filepath.Join(c.Dir(), dir))
+		mi.graphs = append(mi.graphs, namedGraph{dir: dir, meta: m})
 	}
+	mi.hasGraph = len(mi.graphs) > 0
 	return mi
 }
 
@@ -1297,12 +1333,29 @@ func (mi mergeInfo) explain(name string) string {
 	b.WriteString("    вида «" + name + "/12#37» станут указывать не туда;\n")
 	if mi.hasGraph {
 		b.WriteString("  · ГРАФ ПОНЯТИЙ ПЕРЕСТАНЕТ ОТКРЫВАТЬСЯ. Он опирается на эту нумерацию.\n")
+		// Граф уплотнение не стирает: каталоги переезжают в новый каталог
+		// коллекции как есть. Но кусков становится меньше, и граф отказывается
+		// открываться (graph.ErrCompacted) — пользоваться им будет нельзя.
+		names := make([]string, 0, len(mi.graphs))
+		for _, g := range mi.graphs {
+			names = append(names, g.dir)
+		}
+		if len(names) > 0 {
+			fmt.Fprintf(&b, "    Каталоги графов (%s) останутся на месте, но открыть их будет нельзя.\n",
+				strings.Join(names, ", "))
+		}
 		// Числа, а не слово «дорого». «Десятки часов» человек пролистывает,
 		// «116801 понятие и 587644 связи» — нет. Берутся даром из паспорта
 		// графа: открывать его ради предупреждения значило бы ждать 16 секунд.
-		if g := mi.graph; g.Entities > 0 {
-			fmt.Fprintf(&b, "    Потеряется: %d понятий, %d связей, %d упоминаний.\n",
-				g.Entities, g.Edges, g.Mentions)
+		counted := false
+		for _, ng := range mi.graphs {
+			g := ng.meta
+			if g.Entities == 0 {
+				continue
+			}
+			counted = true
+			fmt.Fprintf(&b, "    %s: недоступными станут %d понятий, %d связей, %d упоминаний.\n",
+				ng.dir, g.Entities, g.Edges, g.Mentions)
 			fmt.Fprintf(&b, "    Собрать заново — прогнать %d кусков через %s:\n",
 				g.Covered, g.Model)
 			if g.BuildSeconds > 0 {
@@ -1311,7 +1364,8 @@ func (mi mergeInfo) explain(name string) string {
 			} else {
 				b.WriteString("    ровно столько же работы видеокарты, сколько уже потрачено.\n")
 			}
-		} else {
+		}
+		if !counted {
 			b.WriteString("    Собрать его заново — десятки часов работы видеокарты.\n")
 		}
 	}
@@ -1331,7 +1385,7 @@ func confirmMerge(name string, mi mergeInfo, force, yes bool) error {
 	// Отказ по графу остаётся отказом: подтверждение словом его не снимает.
 	// Снимает только явный ключ — он и означает «я знаю, что теряю».
 	if mi.hasGraph && !force {
-		return fmt.Errorf("по коллекции %s собран граф понятий, и уплотнение сделает его нечитаемым;\n"+
+		return fmt.Errorf("по коллекции %s собран граф понятий, и после уплотнения он перестанет открываться;\n"+
 			"если граф нужен — уплотнять нельзя; если нет — повторите с --kb-merge-force", name)
 	}
 	if yes {

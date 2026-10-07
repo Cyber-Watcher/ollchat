@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -207,5 +208,25 @@ func TestAppendToEmptyIsFirstWrite(t *testing.T) {
 	}
 	if openEntityVectors(dir).Count() != 1 {
 		t.Error("первая дозапись не создала файл")
+	}
+}
+
+// Дозапись по паспорту, который на диске уже сменился, не идёт: иначе она
+// срезала бы чужие данные и записала бы сумму, которая не сойдётся никогда.
+func TestAppendRefusesChangedPassport(t *testing.T) {
+	dir := t.TempDir()
+	const dim = 4
+	stale := vecsAt(t, dir, "bge-m3", "", dim, 3)
+	// Другой процесс переписал векторы целиком — другими числами.
+	other := openEntityVectors(dir)
+	if err := other.save("bge-m3", "", dim, make([]int8, 5*dim)); err != nil {
+		t.Fatal(err)
+	}
+	err := stale.appendVectors("bge-m3", "", dim, []int8{1, 2, 3, 4})
+	if !errors.Is(err, ErrStale) {
+		t.Fatalf("дозапись по устаревшему паспорту: %v, ожидался ErrStale", err)
+	}
+	if v := openEntityVectors(dir); v.Problem() != "" || v.Count() != 5 {
+		t.Fatalf("чужие векторы пострадали: понятий %d, %q", v.Count(), v.Problem())
 	}
 }

@@ -185,8 +185,8 @@ func allowedPipeline(g *Guard, cmd string, segments []string) *Rule {
 		return nil
 	}
 	// Разбор на части решает только вопрос РАЗРЕШЕНИЯ. Запрет разбирается
-	// всегда и до этого места: иначе `cat x > y; rm -rf ~` с небезобидной
-	// склейкой перестал бы натыкаться на deny для rm.
+	// всегда и до этого места (bashDeny): иначе `cat x > y; rm -rf ~`
+	// с небезобидной склейкой перестал бы натыкаться на deny для rm.
 	if !OnlySafePipeline(cmd) {
 		return nil
 	}
@@ -205,16 +205,30 @@ func allowedPipeline(g *Guard, cmd string, segments []string) *Rule {
 }
 
 func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted bool) Result {
+	// Запрет сверяется с каждой командой, которую запустит строка: с частями
+	// составной команды, подстановками, телами `sh -c` и eval, командами
+	// внутри env, nice, timeout, xargs, find -exec. Раньше сверялись только
+	// части, разделённые `;`, `|`, `&`, и сырой префикс строки: `/bin/rm`,
+	// `\rm`, `env rm`, `echo $(rm -rf x)` проходили мимо `Bash(rm:*)`, а в
+	// режиме noask и после «разрешить инструмент целиком» — без вопроса.
+	verdict := g.set.bashDeny(req.Target)
+	if verdict.rule != nil {
+		return Result{Decision: DecisionDeny, Rule: verdict.rule,
+			Reason: fmt.Sprintf("запрещено правилом %s (часть команды: %s)", verdict.rule.Source, verdict.part)}
+	}
+	// Имя программы станет известно только при запуске (`$X -rf ~`,
+	// `$(echo rm) …`, `{rm,-rf,~}`): сверить его с запретами нельзя. Решает
+	// человек — в любом режиме, при любых сеансовых разрешениях и правилах
+	// allow: иначе `X=rm; $X -rf ~` проходил бы в noask молча.
+	if verdict.unknown != "" {
+		return Result{Decision: DecisionAsk, Reason: fmt.Sprintf(
+			"имя программы в «%s» станет известно только при запуске, "+
+				"и сверить его с запретами нельзя: требуется подтверждение", verdict.unknown)}
+	}
+
 	segments := SplitCommand(req.Target)
 	if len(segments) == 0 {
 		segments = []string{req.Target}
-	}
-	// Любая часть составной команды под deny — запрет всей команды.
-	for _, seg := range segments {
-		if r := g.set.DeniedBy(KindBash, seg); r != nil {
-			return Result{Decision: DecisionDeny, Rule: r,
-				Reason: fmt.Sprintf("запрещено правилом %s (часть команды: %s)", r.Source, seg)}
-		}
 	}
 
 	if IsCompound(req.Target) {

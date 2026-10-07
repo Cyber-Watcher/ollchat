@@ -121,6 +121,33 @@ func (c *crypt) decrypt(data []byte) []byte {
 	return out
 }
 
+// strings расшифровывает строки объекта, разобранного из тела файла:
+// каждая строка вне потоков зашифрована сама по себе. Без этого /Title
+// и /Author из /Info, ActualText из раздела Properties и прочие строки
+// зашифрованной книги читались шифротекстом. Строки внутри потоков (в том
+// числе объектных) отдельно не шифруются: их расшифровывает поток целиком.
+// Объект меняется на месте — он только что разобран и ни с кем не делится.
+func (c *crypt) strings(o Object, depth int) Object {
+	if depth > maxDepth {
+		return o
+	}
+	switch v := o.(type) {
+	case String:
+		return String(c.decrypt(v))
+	case Array:
+		for i := range v {
+			v[i] = c.strings(v[i], depth+1)
+		}
+	case Dict:
+		for k, x := range v {
+			v[k] = c.strings(x, depth+1)
+		}
+	case *Stream:
+		c.strings(v.Dict, depth+1)
+	}
+	return o
+}
+
 // hash2B — хеш пароля по алгоритму 2.B из спецификации.
 //
 // У ревизии 5 это простой SHA-256; у ревизии 6 — намеренно дорогой цикл,

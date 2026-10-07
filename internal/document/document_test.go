@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -13,7 +14,7 @@ import (
 // Пробники обоих форматов собираются прямо здесь: тесты не должны зависеть
 // от файлов на машине.
 
-func writeTemp(t *testing.T, name string, data []byte) string {
+func writeTemp(t testing.TB, name string, data []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -55,7 +56,7 @@ func samplePDF() []byte {
 }
 
 // sampleEPUB собирает книгу из одной главы с рисунком.
-func sampleEPUB(t *testing.T) []byte {
+func sampleEPUB(t testing.TB) []byte {
 	t.Helper()
 	png := []byte{
 		0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a,
@@ -124,6 +125,50 @@ func TestDetectByContentNotExtension(t *testing.T) {
 	}
 	if got := DetectFile(writeTemp(t, "документ", samplePDF())); got != KindPDF {
 		t.Fatalf("документ без расширения не распознан: %q", got)
+	}
+}
+
+// Книга со сжатым mimetype узнаётся по оглавлению архива, а архив, который
+// не книга, в память целиком не читается: прежде любой файл с «PK» в начале
+// читался весь ещё до проверки размера.
+func TestDetectZipByDirectory(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range []string{"mimetype", "META-INF/container.xml"} {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte("application/epub+zip"))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := DetectFile(writeTemp(t, "книга", buf.Bytes())); got != KindEPUB {
+		t.Errorf("книга со сжатым mimetype: %q", got)
+	}
+
+	// Разреженный файл в 256 МБ, начинающийся с «PK»: на диске он пуст,
+	// а в память при чтении целиком лёг бы весь.
+	big := filepath.Join(t.TempDir(), "archive.zip")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write([]byte("PK\x03\x04"))
+	if err := f.Truncate(256 << 20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	kind := DetectFile(big)
+	runtime.ReadMemStats(&after)
+	if kind != KindNone {
+		t.Errorf("архив без книги: %q", kind)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > 16<<20 {
+		t.Errorf("на определение вида архива в 256 МБ выделено %d МБ", n>>20)
 	}
 }
 
@@ -259,7 +304,7 @@ func TestPartsGivesUnitNumbers(t *testing.T) {
 		t.Fatalf("Parts вернул склеенный текст длиной %d", len(doc.Text))
 	}
 
-	doc, parts, err = Parts(writeTemp(t, "book.epub", sampleEPUB(t)), 0)
+	_, parts, err = Parts(writeTemp(t, "book.epub", sampleEPUB(t)), 0)
 	if err != nil {
 		t.Fatalf("EPUB: %v", err)
 	}

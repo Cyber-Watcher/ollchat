@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,33 @@ import (
 type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 	Model() string
+}
+
+// EmbedderOrNil отдаёт эмбеддер или настоящий nil, если эмбеддера на деле нет.
+//
+// kbembed.New при незаданной модели возвращает nil своего типа, и положенный
+// в интерфейс он проходит проверку `emb != nil`: смысловой поиск шёл
+// к «эмбеддеру», который молча отдаёт пустоту, а в заметке выдачи появлялось
+// «смысловой поиск недоступен (<nil>)» (аудит 07.10.2026). Каждый, кто
+// принимает эмбеддер снаружи, пропускает его через эту функцию.
+func EmbedderOrNil(e Embedder) Embedder {
+	if nilInside(e) {
+		return nil
+	}
+	return e
+}
+
+// nilInside — пуст ли интерфейс по-настоящему: nil сам или nil внутри
+// (указатель, отображение, функция, канал, срез конкретного типа).
+func nilInside(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // EmbedOpts — как считать.
@@ -179,7 +207,7 @@ func (c *Collection) coverage(model string) Coverage {
 // Embed считает недостающие векторы коллекции.
 func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, report func(Progress)) (res EmbedResult, err error) {
 	defer c.restamp() // запись своей же коллекции не должна выглядеть чужой
-	if emb == nil {
+	if emb = EmbedderOrNil(emb); emb == nil {
 		return res, errors.New("не задана модель эмбеддингов: укажите kb.embed_model в настройках")
 	}
 	start := time.Now()
@@ -188,23 +216,35 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 	}
 	defer c.unlock()
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// **Замок коллекции — только на снимок, а не на весь счёт.** Счёт идёт
+	// часами, и до 07.10.2026 он держал c.mu.Lock от начала до конца: поиск
+	// в том же процессе — /search, kb_search модели, подмешивание — стоял всё
+	// это время. Держать нечего: хранилище кусков дописывают и подменяют только
+	// работы под замком LOCK, а его держит сам счёт; тексты читаются под
+	// коротким замком чтения на каждую пачку (embedTexts), а векторы в памяти
+	// до конца счёта остаются прежними — они верны, просто их меньше.
+	c.mu.RLock()
+	total := 0
+	if c.store != nil {
+		total = c.store.Count()
+	}
+	vectors := c.vectors
+	c.mu.RUnlock()
 
-	if c.store == nil || c.store.Count() == 0 {
+	if total == 0 {
 		return res, fmt.Errorf("коллекция %q пуста — сначала добавьте книги", c.name)
 	}
 	opt = opt.norm()
-	res.Total = c.store.Count()
+	res.Total = total
 	res.Model = emb.Model()
 
 	from := 0
-	if !opt.Recount && c.vectors != nil && c.vectors.Meta().Compatible(emb.Model(), 0) {
-		from = c.vectors.Count()
+	if !opt.Recount && vectors != nil && vectors.Meta().Compatible(emb.Model(), 0) {
+		from = vectors.Count()
 	}
 	if from >= res.Total {
 		res.Covered = from
-		res.Dim = c.vectors.Dim()
+		res.Dim = vectors.Dim()
 		res.Bytes = vecBytes(c.dir)
 		res.Elapsed = time.Since(start)
 		return res, nil
@@ -222,8 +262,24 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 	}
 	res.Dim = dim
 	// Несовместимые прежние векторы дописывать нельзя — только заменять.
-	if c.vectors != nil && !c.vectors.Meta().Compatible(emb.Model(), dim) {
+	if vectors != nil && !vectors.Meta().Compatible(emb.Model(), dim) {
 		from = 0
+	}
+	// Отпечаток весов снимается до счёта: узнать о чужих весах после того,
+	// как хвост посчитан, значит выбросить его. Досчёт хвоста другими весами
+	// того же имени смешал бы пространства молча — поэтому отказ, как у графа.
+	digest := embedderDigest(ctx, emb)
+	if from > 0 && !vectors.Meta().SameWeights(digest) {
+		have := vectors.Meta().Digest
+		return res, fmt.Errorf("векторы(смыслы) коллекции %s посчитаны другим файлом модели %s: "+
+			"в паспорте digest %s, у сервера %s.\n"+
+			"Имя то же, веса разные: тег вроде :latest на двух машинах указывает на разные файлы, "+
+			"и векторы, досчитанные вперемешку, лягут в разные углы пространства.\n"+
+			"Дешёвое лечение: взять на сервере те же веса (ollama rm %s && ollama pull %s@%s).\n"+
+			"Дорогое, если тех весов уже не достать: пересчитать всё — "+
+			"ollchat --kb-embed %s --kb-recount (в приложении /kb embed %s --recount)",
+			c.name, emb.Model(), shortDigest(have), shortDigest(digest),
+			emb.Model(), emb.Model(), have, c.name, c.name)
 	}
 
 	w, err := CreateVecWriter(c.dir, emb.Model(), dim, from, opt.Header)
@@ -231,8 +287,29 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 		return res, err
 	}
 	defer w.Close()
-	// Открытые векторы больше не соответствуют файлу, который мы правим.
-	c.vectors = nil
+	// В паспорт — отпечаток весов. При досчёте прежний остаётся, если он был:
+	// он про голову файла, а сверка выше уже подтвердила, что веса те же.
+	w.meta.Digest = digest
+	if from > 0 && vectors != nil {
+		if have := vectors.Meta().Digest; have != "" {
+			w.meta.Digest = have
+		}
+	}
+	// Посчитанное подхватывается с диска по окончании — и при обрыве тоже:
+	// прежде векторы в памяти обнулялись на старте и после сбоя пачки так
+	// и оставались пустыми, выключая поиск по смыслу до переоткрытия.
+	defer func() {
+		v, verr := OpenVectors(c.dir)
+		if verr != nil {
+			if err == nil {
+				err = verr
+			}
+			return
+		}
+		c.mu.Lock()
+		c.vectors = v
+		c.mu.Unlock()
+	}()
 
 	th := throttle(report)
 	// Размер пачки подстраивается на ходу — см. комментарий к shrink.
@@ -291,10 +368,6 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 	res.Covered = meta.Count
 	res.Bytes = vecBytes(c.dir)
 	res.Elapsed = time.Since(start)
-
-	if c.vectors, err = OpenVectors(c.dir); err != nil {
-		return res, err
-	}
 	return res, nil
 }
 
@@ -354,7 +427,15 @@ func (c *Collection) embedWave(ctx context.Context, emb Embedder, from, to int, 
 //
 // header — дописывать ли шапку (kb.embed_header; замер Г8 этапа 101 показал,
 // что пользы она не даёт, и умолчание теперь — без неё).
+//
+// Берёт замок чтения сам и только на время чтения: сетевой вызов эмбеддера
+// идёт уже без него (см. Embed).
 func (c *Collection) embedTexts(from, to int, header bool) ([]string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.store == nil {
+		return nil, fmt.Errorf("коллекция %q закрыта", c.name)
+	}
 	ids := make([]int, 0, to-from)
 	for i := from; i < to; i++ {
 		ids = append(ids, i)
@@ -380,15 +461,39 @@ func (c *Collection) embedTexts(from, to int, header bool) ([]string, error) {
 	return out, nil
 }
 
-// bookByID ищет книгу по её номеру, не беря замок: вызывается под ним.
-func (c *Collection) bookByID(id uint32) (BookRec, bool) {
-	for _, d := range c.docs {
-		if d.ID == id {
-			return d, true
-		}
+// embedderDigest снимает отпечаток весов эмбеддера, если тот умеет его дать
+// (kbembed.Embedder.Stamp) и сервер его отдаёт.
+//
+// Ошибку глотаем намеренно: отпечаток — проверка, а не условие работы, и его
+// отсутствие не повод отказываться считать. Пустое значение выключает сверку —
+// так же, как у векторов графа (internal/graph/embed.go).
+func embedderDigest(ctx context.Context, emb Embedder) string {
+	st, ok := emb.(interface {
+		Stamp(context.Context) (string, error)
+	})
+	if !ok {
+		return ""
 	}
-	return BookRec{}, false
+	d, err := st.Stamp(ctx)
+	if err != nil {
+		return ""
+	}
+	return d
 }
+
+// shortDigest укорачивает отпечаток до читаемого вида.
+func shortDigest(d string) string {
+	if d == "" {
+		return "(нет)"
+	}
+	if len(d) > 12 {
+		return d[:12]
+	}
+	return d
+}
+
+// bookByID ищет книгу по её номеру, не беря замок: вызывается под ним.
+func (c *Collection) bookByID(id uint32) (BookRec, bool) { return c.book(id) }
 
 // EstimateEmbed меряет скорость на небольшой пробе и оценивает всю работу.
 //
@@ -397,7 +502,7 @@ func (c *Collection) bookByID(id uint32) (BookRec, bool) {
 // это замер, а не таблица.
 func (c *Collection) EstimateEmbed(ctx context.Context, emb Embedder, opt EmbedOpts, sample int) (EmbedResult, error) {
 	var res EmbedResult
-	if emb == nil {
+	if emb = EmbedderOrNil(emb); emb == nil {
 		return res, errors.New("не задана модель эмбеддингов")
 	}
 	c.mu.RLock()
@@ -427,10 +532,9 @@ func (c *Collection) EstimateEmbed(ctx context.Context, emb Embedder, opt EmbedO
 		sample = left
 	}
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	// Меряем ровно тем же способом, каким пойдёт работа: иначе оценка врёт.
+	// Замок не держится: тексты embedWave берёт под своим коротким замком,
+	// а вложенный замок чтения при ждущем писателе заклинил бы оба.
 	// Первая волна прогревает модель на сервере, поэтому её не считаем.
 	if _, err := c.embedWave(ctx, emb, from, min(from+opt.Batch, from+sample), opt); err != nil {
 		return res, err

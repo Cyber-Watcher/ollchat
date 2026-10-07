@@ -25,6 +25,25 @@ var ErrNotEPUB = errors.New("файл не является книгой EPUB")
 // ErrNoText возвращается, когда в книге нет ни одной главы с текстом.
 var ErrNoText = errors.New("в книге не нашлось текста")
 
+// Пределы книги. Распакованный размер файла объявляет сам архив, и верить
+// ему нельзя: глава в 64 КБ разжимается в 64 МБ, а таких глав в архиве бывают
+// сотни. Поэтому у книги общий счёт распакованного — щедрый и растущий
+// с размером файла — и предел всего текста. Настоящая книга даже на тысячи
+// страниц укладывается в них с большим запасом, а раздутая получает
+// ErrTooLarge, а не съедает память.
+//
+// Переменные, а не константы, — только ради тестов.
+var (
+	maxFileRead       = 64 << 20  // байт одного файла архива
+	readBase    int64 = 256 << 20 // распакованного на книгу: столько
+	readPerByte int64 = 32        // и ещё столько на каждый байт файла
+	maxBookText       = 256 << 20 // байт текста на книгу
+)
+
+// ErrTooLarge возвращается, когда книга распаковывается в несоразмерно много.
+var ErrTooLarge = errors.New("книга раздута: распакованного в ней несоразмерно больше, " +
+	"чем у настоящих книг, — похоже на испорченный или намеренно раздутый архив")
+
 // Options ограничивает выборку разделов.
 type Options struct {
 	FirstSection int // с какого раздела начать, начиная с 1
@@ -105,6 +124,7 @@ func IsEPUB(data []byte) bool {
 type book struct {
 	zip   *zip.Reader
 	files map[string]*zip.File // путь внутри архива → файл
+	left  int64                // остаток распакованного на книгу; < 0 — исчерпан
 }
 
 func open(data []byte) (*book, error) {
@@ -115,15 +135,20 @@ func open(data []byte) (*book, error) {
 	if err != nil {
 		return nil, fmt.Errorf("архив книги: %w", err)
 	}
-	b := &book{zip: zr, files: make(map[string]*zip.File, len(zr.File))}
+	b := &book{zip: zr, files: make(map[string]*zip.File, len(zr.File)),
+		left: readBase + readPerByte*int64(len(data))}
 	for _, f := range zr.File {
 		b.files[cleanPath(f.Name)] = f
 	}
 	return b, nil
 }
 
-// read читает файл из архива по пути внутри него.
+// read читает файл из архива по пути внутри него. Прочитанное списывается
+// с общего счёта книги; исчерпав его, read возвращает ErrTooLarge.
 func (b *book) read(name string) ([]byte, error) {
+	if b.left < 0 {
+		return nil, ErrTooLarge
+	}
 	f, ok := b.files[cleanPath(name)]
 	if !ok {
 		return nil, fmt.Errorf("в книге нет файла %s", name)
@@ -134,8 +159,13 @@ func (b *book) read(name string) ([]byte, error) {
 	}
 	defer rc.Close()
 	// Предел на случай испорченного архива: распакованный размер объявляет
-	// сам файл, и верить ему нельзя.
-	return io.ReadAll(io.LimitReader(rc, 64<<20))
+	// сам файл, и верить ему нельзя. На байт больше остатка счёта: файл,
+	// упёршийся в него, счёт исчерпывает.
+	data, err := io.ReadAll(io.LimitReader(rc, min(int64(maxFileRead), b.left+1)))
+	if b.left -= int64(len(data)); b.left < 0 {
+		return nil, ErrTooLarge
+	}
+	return data, err
 }
 
 func cleanPath(p string) string {
@@ -181,14 +211,21 @@ func Extract(data []byte, opt Options) (res *Result, err error) {
 		Date:          pkg.date,
 	}
 	nonEmpty := 0
+	textLeft := maxBookText
 	for i := first - 1; i < last; i++ {
 		href := pkg.spine[i]
 		raw, err := b.read(href)
+		if errors.Is(err, ErrTooLarge) {
+			return nil, err
+		}
 		if err != nil {
 			res.Sections = append(res.Sections, Section{Number: i + 1, Href: href})
 			continue
 		}
 		doc := parseHTML(raw, i+1)
+		if textLeft -= len(doc.text); textLeft < 0 {
+			return nil, ErrTooLarge
+		}
 		if strings.TrimSpace(doc.text) != "" {
 			nonEmpty++
 		}

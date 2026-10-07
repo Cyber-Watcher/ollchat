@@ -126,13 +126,13 @@ func (c *Collection) Reanalyze(ctx context.Context, report func(Progress)) (Rean
 	// Подмена и переоткрытие — под замком коллекции: поиск, идущий в этом же
 	// процессе, не должен увидеть закрытые файлы.
 	c.mu.Lock()
-	c.closeFiles()
+	c.closeFilesLocked()
 	err = applyReanalyze(c.dir)
 	if err == nil {
 		var meta Meta
 		if err = readJSON(filepath.Join(c.dir, "meta.json"), &meta); err == nil {
 			c.meta.Analyzer, c.meta.NextSeg, c.meta.Updated = meta.Analyzer, meta.NextSeg, meta.Updated
-			err = c.reopenIndex()
+			err = c.reopenIndexLocked()
 		}
 	}
 	c.mu.Unlock()

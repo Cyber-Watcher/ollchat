@@ -9,7 +9,8 @@
 //	Fetch(https://pkg.go.dev/**)
 //
 // Порядок проверки: deny → allow → ask → режим по умолчанию.
-// Правило deny не обходится ничем: ни режимом yolo, ни ответом «всегда разрешать».
+// Правило deny не обходится ни режимом noask, ни ответом «всегда разрешать»;
+// для bash оно сверяется с каждой командой, которую запустит строка (shell.go).
 package permissions
 
 import (
@@ -81,6 +82,11 @@ type Rule struct {
 	cmdPrefix string
 	cmdAny    bool
 	cmdExact  string
+	// Для запретов Bash — тот же шаблон с именем программы без каталога
+	// и кавычек: запрет сверяется с командами после разбора (shell.go),
+	// и Bash(/usr/bin/curl:*) обязан ловить и `curl`, и `/bin/curl`.
+	denyPrefix string
+	denyExact  string
 }
 
 // ParseRule разбирает строку правила вида "Bash(go build:*)".
@@ -112,8 +118,10 @@ func ParseRule(s, root string) (Rule, error) {
 			if r.cmdPrefix == "" {
 				return Rule{}, fmt.Errorf("правило %q: пустой префикс команды", s)
 			}
+			r.denyPrefix = canonicalPattern(r.cmdPrefix)
 		default:
 			r.cmdExact = normalizeCommand(strings.ReplaceAll(pattern, ":", " "))
+			r.denyExact = canonicalPattern(r.cmdExact)
 		}
 	case KindFetch:
 		// URL сопоставляется как строка с шаблонами * и **.
@@ -140,6 +148,38 @@ func absolutePattern(pattern, root string) string {
 // normalizeCommand убирает лишние пробелы, чтобы сравнение команд было устойчивым.
 func normalizeCommand(cmd string) string {
 	return strings.Join(strings.Fields(cmd), " ")
+}
+
+// canonicalPattern приводит шаблон команды к виду, в котором разбор отдаёт
+// найденные команды: кавычки сняты, у программы отрезан каталог.
+//
+// Присваивания в начале шаблона снимаются, как и у команды: запрет
+// Bash(LANG=C rm:*) иначе не совпал бы ни с одной найденной командой.
+func canonicalPattern(pattern string) string {
+	words, err := SplitWords(pattern)
+	if err != nil {
+		return pattern
+	}
+	for len(words) > 1 && isAssignment(words[0]) {
+		words = words[1:]
+	}
+	if len(words) == 0 {
+		return pattern
+	}
+	words[0] = programName(words[0])
+	return normalizeCommand(strings.Join(words, " "))
+}
+
+// matchCommand сверяет запрет Bash с командой, найденной разбором строки.
+func (r Rule) matchCommand(cmd string) bool {
+	switch {
+	case r.cmdAny:
+		return true
+	case r.denyPrefix != "":
+		return cmd == r.denyPrefix || strings.HasPrefix(cmd, r.denyPrefix+" ")
+	default:
+		return cmd == r.denyExact
+	}
 }
 
 // Match проверяет, подходит ли действие под правило.
@@ -242,11 +282,13 @@ func compileList(list []string, root, section string) ([]Rule, error) {
 }
 
 // Check возвращает решение по правилам и правило, которое сработало.
+//
+// Запрет для bash сверяется с каждой командой, которую запустит строка,
+// а разрешение — по-прежнему с самой строкой: `Bash(ls:*)` разрешает `ls`,
+// но не `/tmp/ls` и не `env ls` — разрешение расширять незачем.
 func (s *Set) Check(kind Kind, target string) (Decision, *Rule) {
-	for i := range s.deny {
-		if s.deny[i].Match(kind, target) {
-			return DecisionDeny, &s.deny[i]
-		}
+	if r := s.DeniedBy(kind, target); r != nil {
+		return DecisionDeny, r
 	}
 	for i := range s.allow {
 		if s.allow[i].Match(kind, target) {
@@ -262,13 +304,57 @@ func (s *Set) Check(kind Kind, target string) (Decision, *Rule) {
 }
 
 // DeniedBy возвращает первое правило deny, под которое подходит действие.
+// Для bash это значит: под которое подходит хоть одна команда строки.
 func (s *Set) DeniedBy(kind Kind, target string) *Rule {
+	if kind == KindBash {
+		return s.bashDeny(target).rule
+	}
 	for i := range s.deny {
 		if s.deny[i].Match(kind, target) {
 			return &s.deny[i]
 		}
 	}
 	return nil
+}
+
+// bashVerdict — итог сверки командной строки с запретами.
+type bashVerdict struct {
+	rule *Rule  // сработавшее правило deny
+	part string // команда, на которой оно сработало
+	// unknown — команда, имя которой станет известно только при запуске:
+	// сверить её с запретами нельзя, и решать должен человек.
+	unknown string
+}
+
+// bashDeny сверяет с запретами каждую команду, которую запустит строка:
+// части составной команды, подстановки, тела `sh -c` и eval, команды
+// внутри обёрток (env, nice, timeout, xargs, find -exec …).
+func (s *Set) bashDeny(target string) bashVerdict {
+	hasBash := false
+	for i := range s.deny {
+		if s.deny[i].Kind != KindBash {
+			continue
+		}
+		hasBash = true
+		// Bash(*) в запретах — «никаких команд»: даже строка без программы
+		// (`> файл` обнуляет файл) под него попадает.
+		if s.deny[i].cmdAny {
+			return bashVerdict{rule: &s.deny[i], part: target}
+		}
+	}
+	if !hasBash {
+		// Сверять не с чем: имя, вычисляемое при запуске, тоже ничего не обходит.
+		return bashVerdict{}
+	}
+	scan := scanCommands(target)
+	for _, c := range scan.found {
+		for i := range s.deny {
+			if s.deny[i].Kind == KindBash && s.deny[i].matchCommand(c.text) {
+				return bashVerdict{rule: &s.deny[i], part: c.text}
+			}
+		}
+	}
+	return bashVerdict{unknown: scan.unknown}
 }
 
 // Rules возвращает все правила по категориям — для команды /permissions.

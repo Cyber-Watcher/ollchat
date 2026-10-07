@@ -117,16 +117,24 @@ func (r *Reranker) Rerank(ctx context.Context, query string, docs []string) ([]f
 		return nil, fmt.Errorf("ответ переранжирования не разобран: %w", err)
 	}
 	scores := make([]float64, len(docs))
+	// Считаются разные номера, а не строки ответа. Ответ с повтором («0, 0»
+	// вместо «0, 1») прежде проходил проверку числом: оценок столько же, сколько
+	// кусков, а второму куску доставался ноль, и выдача переставлялась по нему
+	// молча.
+	got := make([]bool, len(docs))
 	seen := 0
 	for _, res := range out.Results {
 		if res.Index < 0 || res.Index >= len(docs) {
 			continue // чужой номер: молча пропускаем, но в счёт не берём
 		}
 		scores[res.Index] = res.Score
-		seen++
+		if !got[res.Index] {
+			got[res.Index] = true
+			seen++
+		}
 	}
 	if seen != len(docs) {
-		return nil, fmt.Errorf("переранжирование вернуло %d оценок на %d кусков", seen, len(docs))
+		return nil, fmt.Errorf("переранжирование вернуло оценки для %d кусков из %d", seen, len(docs))
 	}
 	return scores, nil
 }

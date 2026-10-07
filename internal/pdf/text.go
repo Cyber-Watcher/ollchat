@@ -41,7 +41,45 @@ type extractor struct {
 	// spans — открытые блоки размеченного содержимого (см. marked.go). Общие
 	// на страницу: форма, вызванная изнутри блока с ActualText, тоже молчит.
 	spans []mcSpan
+
+	// forms — сколько форм вызвано на этой странице, drawing — какие формы
+	// рисуются сейчас, выше по стеку (см. xobject).
+	forms   int
+	drawing map[*Stream]bool
+
+	// pieces и text — сколько кусков и байт текста набрано на странице,
+	// cut — страница упёрлась в предел и обрезана (см. budget.go).
+	pieces int
+	text   int
+	cut    bool
 }
+
+// room проверяет, есть ли на странице место ещё для одного куска текста
+// в n байт, и занимает его. Места нет — страница помечается обрезанной.
+// Текст списывается и с бюджета документа: у тысяч страниц пределы
+// складываются.
+func (e *extractor) room(n int) bool {
+	if e.pieces >= maxPageFrags || e.text+n > maxPageText || !e.doc.spend(n) {
+		e.cut = true
+		return false
+	}
+	e.pieces++
+	e.text += n
+	return true
+}
+
+// Пределы вызова форм. Глубина ограничена давно, а ширина не была: форма,
+// вызывающая саму себя десять раз, при глубине 8 давала сто миллионов
+// вызовов, и файл в 548 байт разбирался дольше полутора минут. Поэтому форма,
+// уже рисуемая выше по стеку, второй раз не входит, а вызовов на страницу
+// не больше maxPageForms — у настоящих страниц их десятки, у карт с
+// условными знаками тысячи. Каждый вызов к тому же списывает formCost
+// с бюджета документа (budget.go): пустые формы ничего не распаковывают,
+// но время на вызов тратят.
+const (
+	maxPageForms = 1 << 16
+	formCost     = 256
+)
 
 // pageImage — картинка, нарисованная на странице. Порядок отрисовки важен:
 // по нему картинки нумеруются и в тексте, и при выгрузке, иначе метка
@@ -56,7 +94,7 @@ type pageImage struct {
 }
 
 func newExtractor(d *Document) *extractor {
-	return &extractor{doc: d, fonts: map[int]*font{}}
+	return &extractor{doc: d, fonts: map[int]*font{}, drawing: map[*Stream]bool{}}
 }
 
 // page извлекает текст одной страницы.
@@ -64,10 +102,19 @@ func (e *extractor) page(page Dict) string {
 	e.frags = e.frags[:0]
 	e.images = e.images[:0]
 	e.spans = e.spans[:0]
-	content := e.doc.contentOf(page)
+	e.forms, e.pieces, e.text = 0, 0, 0
+	content, cut := e.doc.contentOf(page)
+	e.cut = cut
 	res, _ := e.doc.Resolve(page["Resources"]).(Dict)
 	e.run(content, res)
-	return cleanText(layout(e.frags))
+	text := cleanText(layout(e.frags))
+	if e.cut {
+		if text != "" {
+			text += "\n\n"
+		}
+		text += pageCutMark
+	}
+	return text
 }
 
 // state — состояние текста внутри BT…ET.
@@ -82,12 +129,19 @@ type state struct {
 }
 
 func (e *extractor) run(content []byte, res Dict) {
-	if e.depth > 8 {
+	// Разобранное списывается с бюджета документа, как и распакованное:
+	// одна и та же форма, нарисованная на каждой из тысяч страниц, стоит
+	// работы на каждой из них.
+	if e.depth > 8 || !e.doc.spend(len(content)) {
 		return
 	}
 	p := newParser(content, e.doc)
 	var operands []Object
 	var gstack []matrix
+	// Сверх пределов вложенности «q» и блоки не откладываются, а считаются:
+	// столько же парных «Q» и «EMC» потом пропускается, и равновесие потока
+	// не нарушается (см. maxGStack).
+	var gOver, spanOver int
 	ctm := identity
 	st := state{tm: identity, tlm: identity, hscale: 1}
 
@@ -119,12 +173,19 @@ func (e *extractor) run(content []byte, res Dict) {
 	}
 
 	show := func(s String) {
-		sh := st.cur.decode(s)
+		sh := st.cur.decode(s, maxPageText-e.text)
+		if sh.cut {
+			e.cut = true
+		}
 		e.unmapped += sh.unmapped
 		x, y, size := pos()
 		tx := (sh.width/1000*st.fontSize +
 			float64(sh.glyphs)*st.charSp +
 			float64(sh.spaces)*st.wordSp) * st.hscale
+		if sh.text != "" && !e.room(len(sh.text)) {
+			advance(tx)
+			return
+		}
 		if outer := e.replacing(); outer >= 0 && sh.text != "" {
 			// Внутри блока с ActualText нарисованное в текст не идёт:
 			// запоминаем только место, замену положит closeSpan.
@@ -172,9 +233,15 @@ func (e *extractor) run(content []byte, res Dict) {
 
 		switch op {
 		case "q":
-			gstack = append(gstack, ctm)
+			if len(gstack) < maxGStack {
+				gstack = append(gstack, ctm)
+			} else {
+				gOver++
+			}
 		case "Q":
-			if n := len(gstack); n > 0 {
+			if gOver > 0 {
+				gOver--
+			} else if n := len(gstack); n > 0 {
 				ctm = gstack[n-1]
 				gstack = gstack[:n-1]
 			}
@@ -261,18 +328,22 @@ func (e *extractor) run(content []byte, res Dict) {
 					e.xobject(res, name, ctm, x, y)
 				}
 			}
-		case "BMC":
-			e.openSpan(nil)
-		case "BDC":
+		case "BMC", "BDC":
+			if len(e.spans) >= maxSpans {
+				spanOver++
+				break
+			}
 			var props Dict
-			if len(operands) >= 2 {
+			if op == "BDC" && len(operands) >= 2 {
 				props = e.spanProps(res, operands[len(operands)-1])
 			}
 			e.openSpan(props)
 		case "EMC":
 			// Закрывать можно только своё: блок, открытый вызвавшим потоком,
 			// форме не принадлежит.
-			if len(e.spans) > spanBase {
+			if spanOver > 0 {
+				spanOver--
+			} else if len(e.spans) > spanBase {
 				e.closeSpan()
 			}
 		case "BI":
@@ -319,6 +390,10 @@ func (e *extractor) xobject(res Dict, name Name, ctm matrix, penX, penY float64)
 	}
 	switch st, _ := e.doc.Resolve(s.Dict["Subtype"]).(Name); st {
 	case "Image":
+		if len(e.images) >= maxPageImages {
+			e.cut = true
+			return
+		}
 		num := 0
 		if ref, ok := xobjs[name].(Ref); ok {
 			num = ref.Num
@@ -332,6 +407,16 @@ func (e *extractor) xobject(res Dict, name Name, ctm matrix, penX, penY float64)
 	default:
 		return
 	}
+	// Пределы — см. maxPageForms. Форма, уже рисуемая выше по стеку, ничего
+	// нового не нарисовала бы, а вот недорисованные по пределу — потеря.
+	if e.drawing[s] {
+		return
+	}
+	if e.forms >= maxPageForms || !e.doc.spend(formCost) {
+		e.cut = true
+		return
+	}
+	e.forms++
 	data, err := e.doc.Decode(s)
 	if err != nil && len(data) == 0 {
 		return
@@ -340,9 +425,11 @@ func (e *extractor) xobject(res Dict, name Name, ctm matrix, penX, penY float64)
 	if sub == nil {
 		sub = res
 	}
+	e.drawing[s] = true
 	e.depth++
 	e.run(data, sub)
 	e.depth--
+	delete(e.drawing, s)
 }
 
 // markImage ставит метку рисунка в том месте страницы, где он нарисован.
@@ -358,12 +445,16 @@ func (e *extractor) markImage(idx int, ctm matrix, w, h int) {
 	// «страница.номер». Раньше в метке стоял только номер внутри страницы,
 	// и модель, увидев «[рисунок 1]» на четвёртой странице, просила рисунок 1
 	// и получала картинку с первой. Найдено на живом документе.
+	text := fmt.Sprintf("[рисунок %d.%d: %d×%d]", e.unit, idx, w, h)
+	if !e.room(len(text)) {
+		return
+	}
 	e.frags = append(e.frags, frag{
 		x:    ctm.e,
 		y:    ctm.f + height, // метка ставится по верхнему краю рисунка
 		w:    width,
 		size: 10,
-		text: fmt.Sprintf("[рисунок %d.%d: %d×%d]", e.unit, idx, w, h),
+		text: text,
 	})
 }
 

@@ -40,6 +40,24 @@ type VecMeta struct {
 	// молча при первой доливке: часть коллекции посчитана так, часть иначе,
 	// и близости между ними чуть-чуть разного смысла.
 	Header bool `json:"header,omitempty"`
+
+	// Digest — отпечаток весов модели (sha256 из /api/tags), если сервер его
+	// отдал. Пусто — у паспортов до 07.10.2026 и у серверов без digest.
+	//
+	// **Зачем.** Одно имя `bge-m3:latest` на двух машинах указывает на разные
+	// файлы весов, и векторы, досчитанные вперемешку, лежат в разных углах
+	// пространства — поиск продолжает отвечать, просто хуже, и по выдаче этого
+	// не увидеть. Граф хранит отпечаток в своём паспорте давно, а паспорт
+	// векторов кусков его не хранил, хотя kbembed.Stamp это и обещал.
+	Digest string `json:"digest,omitempty"`
+}
+
+// SameWeights сообщает, что векторы посчитаны теми же весами модели. Сверка
+// идёт, только когда отпечаток известен с обеих сторон: паспорт без него
+// (записанный до 07.10.2026) и сервер, его не отдающий, сверку пропускают,
+// а не проваливают.
+func (m VecMeta) SameWeights(digest string) bool {
+	return m.Digest == "" || digest == "" || m.Digest == digest
 }
 
 // Compatible сообщает, годятся ли векторы для работы с этой моделью.
@@ -109,13 +127,20 @@ func OpenVectors(dir string) (*Vectors, error) {
 			info.Size(), want)
 	}
 
-	buf := make([]byte, want)
-	if _, err := f.ReadAt(buf, 0); err != nil {
-		return nil, err
-	}
+	// Читается окнами прямо в итоговый срез: прежний способ — весь файл
+	// в []byte и копия в []int8 — на миг удваивал память, а у библиотеки
+	// в полмиллиона кусков это лишние полгигабайта на каждое открытие.
 	v := &Vectors{dir: dir, meta: meta, data: make([]int8, want)}
-	for i, b := range buf {
-		v.data[i] = int8(b)
+	buf := make([]byte, min(want, 4<<20))
+	for off := int64(0); off < want; {
+		n := min(int64(len(buf)), want-off)
+		if _, err := f.ReadAt(buf[:n], off); err != nil {
+			return nil, err
+		}
+		for i, b := range buf[:n] {
+			v.data[off+int64(i)] = int8(b)
+		}
+		off += n
 	}
 	return v, nil
 }
@@ -330,6 +355,7 @@ func copyVectors(src *Vectors, dstDir string, keep []int) (VecMeta, error) {
 		return VecMeta{}, err
 	}
 	defer w.Close()
+	w.meta.Digest = src.meta.Digest // те же векторы — те же веса
 
 	buf := make([]byte, 0, 4096*src.meta.Dim)
 	flush := func() error {

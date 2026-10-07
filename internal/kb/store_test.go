@@ -197,3 +197,37 @@ func TestStoreRejectsBadIndex(t *testing.T) {
 		t.Fatal("испорченный указатель принят как исправный")
 	}
 }
+
+// Откат к отметке журнала только укорачивает файлы.
+//
+// Отметка длиннее файла значит, что она чужая или хранилище повреждено;
+// Truncate за конец файла дописал бы нули, и указатели повели бы в пустоту.
+// Так и случалось, когда откат брал отметку из устаревшего паспорта.
+func TestRollbackNeverExtends(t *testing.T) {
+	dir := t.TempDir()
+	w, err := CreateWriter(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.Append(1, chunksOf("кусок первой книги")); err != nil {
+		t.Fatal(err)
+	}
+	st, err := w.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := StoreState{Dat: st.Dat + 4096, Idx: st.Idx + 32*10, Count: st.Count + 10}
+	if err := w.Rollback(bad); err == nil {
+		t.Fatal("откат к отметке длиннее файлов прошёл молча")
+	}
+	for name, want := range map[string]int64{"chunks.dat": st.Dat, "chunks.idx": st.Idx} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != want {
+			t.Errorf("%s: %d байт после отказа, было %d", name, info.Size(), want)
+		}
+	}
+}

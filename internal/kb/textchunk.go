@@ -2,6 +2,7 @@ package kb
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/document"
@@ -30,6 +31,7 @@ func SplitText(parts []document.Part, opt ChunkOpts) []Chunk {
 		opt.Step = opt.Chars * 3 / 4
 	}
 	overlap := opt.Chars - opt.Step
+	parts = splitLongLines(parts, opt.Chars)
 
 	var out []Chunk
 	i := 0
@@ -69,9 +71,6 @@ func SplitText(parts []document.Part, opt ChunkOpts) []Chunk {
 			buf = append(buf, line)
 			runes += n
 		}
-		if len(buf) == 0 { // одна строка длиннее целевого размера
-			buf, runes, j = []string{parts[i].Text}, utf8.RuneCountInString(parts[i].Text), i+1
-		}
 		// Разрыв по пустой строке, если она нашлась во второй половине куска:
 		// так абзац не рвётся посередине.
 		if brk > i && brk < j-1 && !fence {
@@ -105,6 +104,106 @@ func SplitText(parts []document.Part, opt ChunkOpts) []Chunk {
 			next = i + 1
 		}
 		i = next
+	}
+	return out
+}
+
+// splitLongLines режет строки длиннее целевого размера куска на части
+// не длиннее limit знаков; у частей тот же номер строки и тот же раздел.
+//
+// **Зачем.** Кусок набирается целыми строками, и строка длиннее куска
+// становилась куском целиком: абзац markdown, записанный одной строкой, или
+// сжатый JSON в 30 000 знаков давали один кусок на всё. Такой кусок не влезает
+// ни в выдачу, ни в окно модели, а его вектор размазан по всему тексту. Ветка,
+// которая будто бы ловила этот случай, была мёртвой: первая строка куска
+// берётся всегда, и буфер пустым не бывает (замечание staticcheck, 07.10.2026).
+//
+// Режется так же, как `cut` у книг: прозу — по предложениям, код (внутри
+// ограждения из трёх обратных кавычек) — по пробелам; слово длиннее предела —
+// ровно по пределу.
+func splitLongLines(parts []document.Part, limit int) []document.Part {
+	long := false
+	for _, p := range parts {
+		if utf8.RuneCountInString(p.Text) > limit {
+			long = true
+			break
+		}
+	}
+	if !long {
+		return parts
+	}
+	out := make([]document.Part, 0, len(parts)+16)
+	fence := false
+	for _, p := range parts {
+		code := fence
+		if strings.HasPrefix(strings.TrimSpace(p.Text), "```") {
+			fence = !fence
+			code = true
+		}
+		if utf8.RuneCountInString(p.Text) <= limit {
+			out = append(out, p)
+			continue
+		}
+		var pieces []string
+		if code {
+			pieces = wrapRunes(p.Text, limit)
+		} else {
+			pieces = packSentences(p.Text, limit)
+		}
+		for _, piece := range pieces {
+			q := p
+			q.Text = piece
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// packSentences собирает предложения строки в части не длиннее limit знаков.
+func packSentences(line string, limit int) []string {
+	var out, buf []string
+	n := 0
+	for _, s := range sentences(line) {
+		for _, w := range wrapRunes(s, limit) {
+			l := utf8.RuneCountInString(w)
+			if n > 0 && n+1+l > limit {
+				out = append(out, strings.Join(buf, " "))
+				buf, n = buf[:0], 0
+			}
+			if n > 0 {
+				n++ // пробел между предложениями
+			}
+			buf = append(buf, w)
+			n += l
+		}
+	}
+	if len(buf) > 0 {
+		out = append(out, strings.Join(buf, " "))
+	}
+	return out
+}
+
+// wrapRunes режет текст на части не длиннее limit знаков по последнему пробелу
+// во второй половине части, а без пробела — ровно по limit.
+func wrapRunes(text string, limit int) []string {
+	r := []rune(text)
+	var out []string
+	for len(r) > limit {
+		cut := limit
+		for k := limit; k > limit/2; k-- {
+			if unicode.IsSpace(r[k]) {
+				cut = k
+				break
+			}
+		}
+		out = append(out, strings.TrimRightFunc(string(r[:cut]), unicode.IsSpace))
+		r = r[cut:]
+		for len(r) > 0 && unicode.IsSpace(r[0]) {
+			r = r[1:]
+		}
+	}
+	if len(r) > 0 {
+		out = append(out, string(r))
 	}
 	return out
 }

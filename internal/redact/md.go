@@ -63,11 +63,15 @@ func buildMD(title string, words []Word, ink []Region, npages int, plain bool) s
 	if english(words) {
 		note = notesEN
 	}
-	intro := note.introRedacted
+	// Заголовок обезличенного .md — нейтральный, а не имя файла: сканы
+	// называют по фамилии пациента («Иванова М.П. выписка.pdf»), и имя
+	// уходило в .md, который отдают наружу, и в текст для модели. Копии
+	// со всеми данными имя файла не вредит.
+	intro, heading := note.introRedacted, note.titleRedacted
 	if plain {
-		intro = note.introPlain
+		intro, heading = note.introPlain, title
 	}
-	md := []string{"# " + title, "", intro}
+	md := []string{"# " + heading, "", intro}
 
 	byPage := make([][]int, npages)
 	for i, w := range words {
@@ -99,15 +103,18 @@ func buildMD(title string, words []Word, ink []Region, npages int, plain bool) s
 	return strings.TrimSpace(out) + "\n"
 }
 
-// mdNotes — служебные строки .md: пояснение под названием, заголовок листа
-// (с %d — номером) и пометка о скрытых областях (с %d — их числом).
+// mdNotes — служебные строки .md: заголовок обезличенного документа,
+// пояснение под названием, заголовок листа (с %d — номером) и пометка
+// о скрытых областях (с %d — их числом).
 type mdNotes struct {
+	titleRedacted             string
 	introRedacted, introPlain string
 	page                      string
 	inkRedacted, inkPlain     string
 }
 
 var notesRU = mdNotes{
+	titleRedacted: "Обезличенный документ",
 	introRedacted: "_Текст распознан с картинки (tesseract), возможны ошибки распознавания. " +
 		"Имя клиента заменено на CLIENT, имя врача — на DOCTOR, имя с неясной ролью — на PERSON; " +
 		"адреса, телефоны, почта, номера документов и даты рождения убраны._",
@@ -120,6 +127,7 @@ var notesRU = mdNotes{
 }
 
 var notesEN = mdNotes{
+	titleRedacted: "Redacted document",
 	introRedacted: "_Text recognized from the image (tesseract); recognition errors are possible. " +
 		"The client's name is replaced with CLIENT, the doctor's with DOCTOR, a name of unclear role with PERSON; " +
 		"addresses, phone numbers, e-mail, document numbers and dates of birth are removed._",

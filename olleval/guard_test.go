@@ -175,6 +175,9 @@ type fakeRun struct {
 }
 
 func (f *fakeRun) run(ctx context.Context, name string, args ...string) (string, int, error) {
+	if name == "sudo" && len(args) > 0 && args[0] == "-n" {
+		args = args[1:] // sudo -n: ключ самого sudo, команда за ним
+	}
 	key := name
 	if len(args) > 0 {
 		key += " " + args[0]

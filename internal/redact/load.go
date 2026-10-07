@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,11 @@ func renderPage(ctx context.Context, path string, n int) (image.Image, error) {
 	if err != nil {
 		return nil, errors.New("программы pdftoppm в системе нет — установите пакет poppler-utils")
 	}
+	// Путь — полный: относительный, начинающийся с «-» («-скан.pdf»),
+	// pdftoppm прочёл бы как свой ключ, а не как файл.
+	if path, err = filepath.Abs(path); err != nil {
+		return nil, err
+	}
 	tmp, err := os.MkdirTemp("", "ollchat-render-*")
 	if err != nil {
 		return nil, err
@@ -85,5 +91,18 @@ func renderPage(ctx context.Context, path string, n int) (image.Image, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// Размер рисунка задаёт MediaBox из чужого файла: лист в двести дюймов
+	// при 300 dpi — это 3,6 миллиарда точек, и декодер просил бы их память
+	// раньше, чем прочтёт картинку. Проверка та же, что у картинок PDF.
+	cfg, err := png.DecodeConfig(f)
+	if err != nil {
+		return nil, err
+	}
+	if err := pdf.CheckImageConfig(cfg); err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	return png.Decode(f)
 }

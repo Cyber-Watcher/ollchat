@@ -141,10 +141,19 @@ func (m *Model) onArchiveDone(msg archiveDoneMsg) {
 	default:
 		text := "плановый архив коллекции " + msg.coll + " не снялся: " + msg.err.Error() +
 			"\n  проверьте каталог graph.archive_dir; руками — /graph archive " + msg.coll
-		if text != m.archiveErrShown {
-			m.archiveErrShown = text
-			m.holdNote(block{kind: blockHint, text: text})
+		if text == m.archiveErrShown || text == m.archiveErrHeld {
+			return
 		}
+		// Показанным отказ считается, только когда заметка легла в ленту.
+		// Раньше его помечали сразу, а придержанная заметка до ленты не
+		// доходила — и все следующие такие же отказы гасли: плановый архив
+		// падал молча (аудит 07.10.2026).
+		if m.streaming {
+			m.archiveErrHeld = text
+		} else {
+			m.archiveErrShown = text
+		}
+		m.holdNote(block{kind: blockHint, text: text})
 	}
 }
 
@@ -169,11 +178,18 @@ func (m *Model) holdNote(b block) {
 
 // flushHeldNotes выкладывает придержанное после хода: заметки об архиве
 // и подсказку о здоровье графа, которая пришла посреди ответа.
+//
+// Зовётся из finishTurn — им кончается любой ход. Раньше её звал только
+// streamClosedMsg, а он после TurnDone не приходит вовсе (finishTurn
+// отцепляет канал), и придержанное не показывалось никогда.
 func (m *Model) flushHeldNotes() {
 	for _, b := range m.heldNotes {
 		m.addBlock(b)
 	}
 	m.heldNotes = nil
+	if m.archiveErrHeld != "" {
+		m.archiveErrShown, m.archiveErrHeld = m.archiveErrHeld, ""
+	}
 	if m.healthWaiting {
 		m.healthWaiting = false
 		if text := healthHintText(m.healthAdvice, m.kb.use); text != "" && text != m.healthShown {

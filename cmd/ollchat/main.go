@@ -13,6 +13,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/graphex/probes"
 	kmaint "github.com/Cyber-Watcher/ollchat/internal/kb/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,15 +45,52 @@ import (
 var version = buildinfo.Unknown
 
 func main() {
-	if err := run(); err != nil {
-		// Справка по просьбе (`-- -h` у census, probes, graph-stats,
-		// scan-redact) — не сбой: она уже напечатана, код выхода 0.
-		if errors.Is(err, flag.ErrHelp) {
-			return
-		}
-		fmt.Fprintln(os.Stderr, "ollchat: "+err.Error())
-		os.Exit(1)
+	code, msg := exitStatus(run())
+	if msg != "" {
+		fmt.Fprintln(os.Stderr, "ollchat: "+msg)
 	}
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+// exitCode — завершение с особым кодом выхода. Его возвращают из run,
+// а не зовут os.Exit на месте: os.Exit не ждёт отложенных вызовов, и журнал
+// шагов прогона, база знаний и прочее, что закрывается через defer, остались
+// бы незакрытыми — у --scan-redact-llm так терялся хвост журнала шагов.
+type exitCode struct {
+	code int
+	msg  string // пусто — всё нужное уже напечатано
+}
+
+func (e *exitCode) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("код выхода %d", e.code)
+}
+
+// exitStatus — код выхода и сообщение по итогу run. Единственное место,
+// где решается, чем завершится процесс.
+func exitStatus(err error) (int, string) {
+	// Справка по просьбе (`-- -h` у census, probes, graph-stats,
+	// scan-redact) — не сбой: она уже напечатана, код выхода 0.
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return 0, ""
+	}
+	var ec *exitCode
+	if errors.As(err, &ec) {
+		return ec.code, ec.msg
+	}
+	// Свой код у --scan-redact: 3 — проверка нашла скрытое в итоге, 130 —
+	// прервано Ctrl+C. Библиотека возвращает его ошибкой, а не зовёт os.Exit
+	// сама: иначе временные снимки страниц с персональными данными
+	// не убирались бы отложенной уборкой.
+	var re *redact.ExitError
+	if errors.As(err, &re) {
+		return re.Code, err.Error()
+	}
+	return 1, err.Error()
 }
 
 // cliFlags — все ключи командной строки. Раньше 131 ключ жил локальными
@@ -242,13 +280,81 @@ type cliFlags struct {
 	askPerBook            *int
 	askMinCos             *float64
 	askSemW               *float64
+
+	// args — значения командной строки, не относящиеся к ключам: пути книг
+	// у --kb-index и --kb-reindex, всё после «--» у подкоманд. Вместо
+	// flag.Args(): после разбора вперемешку (parseArgs) там лишь хвост.
+	args []string
 }
 
 // parseFlags объявляет и разбирает ключи.
 func parseFlags() *cliFlags {
 	f := parseFlagsNoParse()
-	flag.Parse()
+	// Ошибка разбора до нас не доходит: flag.CommandLine сам печатает её
+	// и завершает процесс с кодом 2, как и прежний flag.Parse.
+	f.args, _ = parseArgs(flag.CommandLine, os.Args[1:])
 	return f
+}
+
+// parseArgs разбирает ключи вперемешку со значениями и возвращает значения.
+//
+// Пакет flag останавливается на первом значении, и всё после него, включая
+// ключи, молча уходит в значения: `--ask q --tools on --json` давал
+// json=false — «on» переключателю не нужно, на нём разбор и встал.
+// Здесь разбор продолжается и за значением. Останавливает его только «--»:
+// за ним идут ключи подкоманды (`--graph-stats books -- -hubs`), и разбирать
+// их — её дело.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var values []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		left := fs.Args()
+		if stoppedAtDashes(fs, args[:len(args)-len(left)]) {
+			return append(values, left...), nil
+		}
+		if len(left) == 0 {
+			return values, nil
+		}
+		values = append(values, left[0])
+		args = left[1:]
+	}
+}
+
+// stoppedAtDashes — разобранная часть кончается разделителем «--», а не
+// значением ключа, которое случайно выглядит так же (`--ask --`).
+func stoppedAtDashes(fs *flag.FlagSet, used []string) bool {
+	for i := 0; i < len(used); i++ {
+		if used[i] == "--" {
+			return i == len(used)-1
+		}
+		if takesValue(fs, used[i]) {
+			i++ // следующее слово — значение этого ключа, каким бы оно ни было
+		}
+	}
+	return false
+}
+
+// takesValue — ключ ждёт значения следующим словом: он не переключатель
+// и записан без «=».
+func takesValue(fs *flag.FlagSet, arg string) bool {
+	name, ok := strings.CutPrefix(arg, "-")
+	if !ok {
+		return false
+	}
+	name = strings.TrimPrefix(name, "-")
+	if name == "" || strings.Contains(name, "=") {
+		return false
+	}
+	fl := fs.Lookup(name)
+	if fl == nil {
+		return false
+	}
+	if b, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+		return false
+	}
+	return true
 }
 
 // parseFlagsNoParse объявляет ключи, но не разбирает командную строку.
@@ -270,8 +376,8 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-merge: уплотнить, даже если по коллекции собран граф;\n"+
 			"граф после этого не откроется, и собирать его придётся заново")
 	f.kbYes = flag.Bool("kb-yes", false,
-		"с --kb-merge: не спрашивать подтверждений (для скриптов);\n"+
-			"без него уплотнение дважды переспрашивает и требует ответа ДА")
+		"с --kb-merge и --graph-merge-drop: не спрашивать подтверждений (для скриптов);\n"+
+			"без него уплотнение дважды переспрашивает и требует ответа ДА, снятие склеек — один раз")
 	f.kbRetitle = flag.String("kb-retitle", "",
 		"починить технические названия книг из метаданных: --kb-retitle books (с --kb-dry-run — только показать)")
 	f.kbEmbed = flag.String("kb-embed", "", "посчитать векторы(смыслы) коллекции (эмбеддинги) без запуска интерфейса")
@@ -283,7 +389,7 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-rebase: новый корень, где книги лежат теперь")
 	f.kbRefresh = flag.String("kb-refresh", "",
 		"долить новое и сразу досчитать векторы(смыслы): --kb-refresh projectdocs")
-	f.kbDry = flag.Bool("kb-dry-run", false, dryRunFlagHelp)
+	f.kbDry = flag.Bool("kb-dry-run", false, dryRunHelp())
 	f.kbKeepThin = flag.Bool("kb-keep-thin", false,
 		"с --kb-sync и --kb-index: брать в индекс и книги, отвергнутые как тощие (страницы-картинки, превью издательства)")
 	f.kbList = flag.Bool("kb-list", false, "показать коллекции базы знаний и выйти")
@@ -357,7 +463,7 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphStatus = flag.String("graph-status", "", "показать состояние графа коллекции (\"all\" — всех)")
 	f.graphStats = flag.String("graph-stats", "", "исследовательские счёты по графу коллекции (бывший graphstats): --graph-stats books -- -hubs; свои ключи после «--», список: --graph-stats books -- -h")
 	f.docProbe = flag.String("doc-probe", "", "что наш разбор достаёт из файла книги (бывшие docprobe и pagedump): --doc-probe «книга.pdf» -- -unit 120 | -page 40")
-	f.scanRedact = flag.String("scan-redact", "", "обезличить скан PDF без модели (то же, что инструмент scan_redact): замазанный PDF, .md без персональных данных и распознанные копии .ocr.md и .ocr.pdf: --scan-redact «скан.pdf» -- -formats pdf,md; ключи: --scan-redact x -- -h")
+	f.scanRedact = flag.String("scan-redact", "", "обезличить скан PDF без модели (то же, что инструмент scan_redact): замазанный PDF и .md без персональных данных; распознанные копии со всеми данными .ocr.md и .ocr.pdf — только по просьбе: --scan-redact «скан.pdf» -- -formats all; ключи: --scan-redact x -- -h")
 	f.scanRedactLLM = flag.String("scan-redact-llm", "", "обезличить скан PDF С МОДЕЛЬЮ, как в диалоге: модель зовёт scan_redact и дозамазывает оставшиеся имена; ЗАНИМАЕТ КАРТУ: --scan-redact-llm «скан.pdf» -- -formats all; ключи: --scan-redact-llm x -- -h")
 	f.census = flag.String("census", "", "перепись состояния коллекции и графа: --census books -- -only toc; список режимов: --census books -- -h")
 	f.probes = flag.String("probes", "", "замеры извлечения (КАРТА у режимов stability и seq): --probes books -- -only stability -axis temp; список: --probes books -- -h")
@@ -447,11 +553,12 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphMergeFile = flag.String("graph-merge-file", "",
 		"с --graph-merge: файл разбора (verdicts.tsv); без него — показать уже склеенное")
 	f.graphMergeLevel = flag.String("graph-merge-level", "strict",
-		"с --graph-merge: строгость отбора — strict, alias, vector, mixed, soft, all-yes")
+		"с --graph-merge: строгость отбора — strict, alias, vector, mixed, mutual (взаимный синоним и близость ≥ 0.70), soft, all-yes")
 	f.graphMergeMinSame = flag.Float64("graph-merge-min-cos-same", 0,
 		"с --graph-merge: отдельный порог близости для пар внутри одного языка (0 — не применять)")
 	f.graphMergeDrop = flag.Bool("graph-merge-drop", false,
-		"с --graph-merge: снять все склейки, вернув граф в прежний вид")
+		"с --graph-merge: снять все склейки, вернув граф в прежний вид; журнал уходит в копию merges.jsonl.bak-<время>,\n"+
+			"нужен ответ ДА (в скрипте — --kb-yes); с --graph-merge-dry или --kb-dry-run — только показать")
 	f.graphBook = flag.String("graph-book", "",
 		"показать вклад книги в граф: --graph-book books --graph-book-name <часть имени>")
 	f.graphDocsFile = flag.String("graph-docs-file", "",
@@ -546,7 +653,7 @@ func parseFlagsNoParse() *cliFlags {
 	// Ради замеров: числа отбора подбираются только прогоном, а прогон
 	// должен идти без интерфейса и без временных скриптов вокруг него.
 	f.askQ = flag.String("ask", "", "спросить модель и напечатать ответ: --ask \"вопрос\"")
-	f.askStdin = flag.Bool("ask-stdin", false, "с --ask: вопрос читается со стандартного ввода")
+	f.askStdin = flag.Bool("ask-stdin", false, "то же, что --ask, но вопрос читается со стандартного ввода")
 	f.askFile = flag.String("questions", "", "файл с вопросами, по одному в строке — спросить каждый")
 	f.askJSON = flag.Bool("json", false, "с --ask: строка JSON на ответ (вопрос, ответ, счётчики, настройки)")
 	f.askRep = flag.Int("repeat", 0, "с --ask: повторить каждый вопрос N раз — видно разброс от сэмплирования")
@@ -560,7 +667,9 @@ func parseFlagsNoParse() *cliFlags {
 	f.askColl = flag.String("kb-use", "", "с --ask: коллекция базы знаний")
 
 	// Служба знаний: тот же бинарь раздаёт собранную библиотеку по сети.
-	f.serveAddr = flag.String("serve", "", "поднять службу знаний: --serve 0.0.0.0:8377")
+	f.serveAddr = flag.String("serve", "",
+		"поднять службу знаний: --serve 127.0.0.1:8377; сетевой адрес (--serve 0.0.0.0:8377) —\n"+
+			"только с ключом в OLLMCP_TOKEN, без него служба на таком адресе не стартует")
 	f.serveMCP = flag.Bool("mcp", false, "с --serve: отдавать и протокол MCP на том же порту")
 
 	// Числа отбора: те же, что в конфиге и в командах /graph tune, /kb tune.
@@ -580,7 +689,7 @@ func parseFlagsNoParse() *cliFlags {
 // которые разбирают ключи, не трогая os.Args.
 func parseFlagsWith(args []string) *cliFlags {
 	f := parseFlagsNoParse()
-	_ = flag.CommandLine.Parse(args)
+	f.args, _ = parseArgs(flag.CommandLine, args)
 	return f
 }
 
@@ -591,8 +700,10 @@ func parseFlagsWith(args []string) *cliFlags {
 //
 // Список перечисляет запрещённое, а не разрешённое, намеренно: новая команда
 // чтения должна работать на читателе сразу, а новая команда записи — быть
-// внесена сюда сознательно (тест TestReaderForbidsWritingFlags следит за тем,
-// чтобы список не расходился с набором ключей).
+// внесена сюда сознательно. Тест TestEveryFlagClassified держит каждый ключ
+// в одном из трёх списков — пишет, читает, уточняет: --kb-hash и --kb-retitle
+// правят паспорта книг, а сюда не попали, и до 07.10.2026 читатель мог ими
+// писать в коллекцию.
 //
 // Что читателю ОСТАЁТСЯ: чат и поиск, `--graph-doctor`, `--kb-doctor`,
 // `--kb-list`, `--graph-status`, `--graph-find`, `--graph-book`,
@@ -610,6 +721,8 @@ func writingFlags(f *cliFlags) map[string]func() bool {
 		"--kb-merge":              notEmpty(f.kbMerge),
 		"--kb-embed":              notEmpty(f.kbEmbed),
 		"--kb-years":              notEmpty(f.kbYears),
+		"--kb-hash":               notEmpty(f.kbHash),
+		"--kb-retitle":            notEmpty(f.kbRetitle),
 		"--kb-reanalyze":          notEmpty(f.kbReanalyze),
 		"--kb-flag-toc":           notEmpty(f.kbFlagTOC),
 		"--graph-build":           notEmpty(f.graphBuild),
@@ -640,6 +753,226 @@ func writingFlags(f *cliFlags) map[string]func() bool {
 		"--graph-forget-toc":      notEmpty(f.graphForgetTOC),
 	}
 }
+
+// Что команда умеет сверх простого запуска.
+const (
+	// cmdDry — понимает --kb-dry-run: показывает, что сделала бы, и ничего
+	// не меняет.
+	cmdDry = 1 << iota
+	// cmdArgs — берёт значения после ключей: пути книг или «-- ключи»
+	// подкоманды.
+	cmdArgs
+)
+
+// cliCommand — команда командной строки: ключ, который её вызывает, и что
+// о ней надо знать до запуска.
+type cliCommand struct {
+	name string      // ключ, как его пишут: "--kb-index"
+	on   func() bool // запрошена ли команда в этом запуске
+	can  int         // cmdDry, cmdArgs
+	// ownDry — свой ключ сухого прогона у команды, которая --kb-dry-run
+	// не понимает: его называет отказ, чтобы человеку не искать.
+	ownDry string
+}
+
+// commands — все команды командной строки, по строке на ключ.
+//
+// Таблица — единственное место, где сказано, какая команда понимает
+// --kb-dry-run. Ключ общий, и до 07.10.2026 его понимание держалось на памяти:
+// команды, которым его не передали, пропускали его молча. --graph-merge
+// с --kb-dry-run склеивал по-настоящему, --kb-reindex перечитывал книги —
+// тот же путь, которым 29.08.2026 «сухая» синхронизация доиндексировала
+// 49 книг (kbdry_test.go). Новая команда без строки здесь сухого прогона
+// не получит: сочетание с ним будет отказом, а не работой.
+//
+// Порядок — как в dispatchCLI, плюс команды, которые выполняет сам run.
+func commands(f *cliFlags) []cliCommand {
+	str := func(p *string) func() bool { return func() bool { return *p != "" } }
+	on := func(p *bool) func() bool { return func() bool { return *p } }
+	return []cliCommand{
+		{name: "--version", on: on(f.showVer)},
+		{name: "--init-config", on: on(f.initConfig)},
+		{name: "--kb-list", on: on(f.kbList)},
+		{name: "--kb-doctor", on: str(f.kbDoctor)},
+		{name: "--kb-index", on: str(f.kbIndex), can: cmdDry | cmdArgs},
+		{name: "--kb-sync", on: str(f.kbSync), can: cmdDry},
+		{name: "--kb-reindex", on: str(f.kbReindex), can: cmdArgs},
+		{name: "--kb-hash", on: str(f.kbHash)},
+		{name: "--kb-years", on: str(f.kbYears)},
+		{name: "--kb-reanalyze", on: str(f.kbReanalyze), can: cmdDry},
+		{name: "--kb-flag-toc", on: str(f.kbFlagTOC), can: cmdDry},
+		{name: "--kb-merge", on: str(f.kbMerge), can: cmdDry},
+		{name: "--kb-rebase", on: str(f.kbRebase), can: cmdDry},
+		{name: "--kb-refresh", on: str(f.kbRefresh), can: cmdDry},
+		{name: "--kb-retitle", on: str(f.kbRetitle), can: cmdDry},
+		{name: "--kb-embed", on: str(f.kbEmbed), can: cmdDry},
+		{name: "--graph-build", on: str(f.graphBuild)},
+		{name: "--graph-pending", on: str(f.graphPending)},
+		{name: "--nodes", on: on(f.nodes)},
+		{name: "--graph-doctor", on: str(f.graphDoctor)},
+		{name: "--graph-repartition-due", on: str(f.graphRepartition)},
+		{name: "--graph-rebase-books", on: str(f.graphRebaseBooks), can: cmdDry},
+		{name: "--graph-record-books", on: str(f.graphRecordBooks)},
+		{name: "--graph-unmerge", on: str(f.graphUnmerge), can: cmdDry},
+		{name: "--graph-deny-aliases", on: str(f.graphDenyAliases), can: cmdDry},
+		{name: "--graph-drop-dead-marks", on: str(f.graphDropDeadMarks), can: cmdDry},
+		{name: "--graph-forget-chunks", on: str(f.graphForgetChunks), can: cmdDry},
+		{name: "--graph-forget-toc", on: str(f.graphForgetTOC), can: cmdDry},
+		{name: "--graph-archive", on: str(f.graphArchive)},
+		{name: "--graph-archives", on: str(f.graphArchives)},
+		{name: "--graph-restore", on: str(f.graphRestore)},
+		{name: "--graph-find", on: str(f.graphFind)},
+		{name: "--graph-summaries", on: str(f.graphSum)},
+		{name: "--kb-eval-gen", on: str(f.kbEvalGen)},
+		{name: "--kb-sample", on: str(f.kbSample)},
+		{name: "--kb-eval", on: str(f.kbEval)},
+		{name: "--graph-findings", on: str(f.graphFindings), ownDry: "--graph-findings-dry"},
+		{name: "--graph-bench", on: str(f.graphBench)},
+		{name: "--graph-tune", on: str(f.graphTune)},
+		{name: "--graph-drift", on: str(f.graphDrift)},
+		{name: "--graph-entry-eval", on: str(f.graphEntryEval)},
+		{name: "--graph-book", on: str(f.graphBook)},
+		{name: "--graph-groups-build", on: str(f.graphGroupsBuild)},
+		{name: "--graph-drop-book", on: str(f.graphDropBook), ownDry: "запуск без --apply"},
+		{name: "--graph-compact", on: str(f.graphCompact), ownDry: "--graph-compact-check"},
+		// Склейка понимает и свой --graph-merge-dry: см. cliFlags.mergeDry.
+		{name: "--graph-merge", on: str(f.graphMerge), can: cmdDry},
+		{name: "--graph-resolve", on: str(f.graphResolve)},
+		{name: "--graph-queue-doubts", on: str(f.graphQueueDoubts)},
+		{name: "--graph-embed-stale", on: str(f.graphEmbedStale), can: cmdDry},
+		{name: "--graph-embed-edges", on: str(f.graphEmbedEdges), can: cmdDry},
+		{name: "--graph-embed", on: str(f.graphEmbed)},
+		{name: "--graph-embed-follow", on: str(f.graphEmbedFollow)},
+		{name: "--graph-recheck", on: str(f.graphRecheck)},
+		{name: "--graph-communities", on: str(f.graphComm)},
+		{name: "--graph-stats", on: str(f.graphStats), can: cmdArgs},
+		{name: "--doc-probe", on: str(f.docProbe), can: cmdArgs},
+		{name: "--scan-redact", on: str(f.scanRedact), can: cmdArgs},
+		{name: "--census", on: str(f.census), can: cmdArgs},
+		{name: "--probes", on: str(f.probes), can: cmdArgs},
+		{name: "--graph-status", on: str(f.graphStatus)},
+		{name: "--scan-redact-llm", on: str(f.scanRedactLLM), can: cmdArgs},
+		{name: "--ask", on: str(f.askQ)},
+		{name: "--ask-stdin", on: on(f.askStdin)},
+		{name: "--questions", on: str(f.askFile)},
+		{name: "--serve", on: str(f.serveAddr)},
+	}
+}
+
+// requested — команды, запрошенные в этом запуске, по порядку таблицы.
+func requested(f *cliFlags) []cliCommand {
+	var out []cliCommand
+	for _, c := range commands(f) {
+		if c.on() {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// dryRunCommands — ключи команд, которые понимают --kb-dry-run.
+func dryRunCommands() []string {
+	var out []string
+	for _, c := range commands(&cliFlags{}) {
+		if c.can&cmdDry != 0 {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
+// dryRunHelp — описание ключа сухого прогона. Список команд берётся
+// из таблицы, а не пишется руками: описание — обещание пользователю,
+// и разойтись с тем, что команды делают на деле, оно не должно.
+func dryRunHelp() string {
+	return "только показать, что будет сделано, ничего не меняя; понимают: " +
+		strings.Join(dryRunCommands(), ", ")
+}
+
+// checkCommandLine проверяет командную строку целиком до запуска: всё, что
+// раньше молча пропускалось, теперь — отказ с объяснением.
+func checkCommandLine(f *cliFlags) error {
+	if err := checkOneCommand(f); err != nil {
+		return err
+	}
+	if err := checkArgs(f); err != nil {
+		return err
+	}
+	return checkDryRun(f)
+}
+
+// checkArgs — значения после ключей берут только команды, которым они нужны:
+// пути книг у --kb-index и --kb-reindex, «-- ключи» у подкоманд.
+//
+// Остальным лишнее значение — почти всегда ошибка в строке, и глотать его
+// молча нельзя: `--tools off` включал инструменты (переключатель значения
+// не берёт, «off» уходило в никуда), а `--ask как связаны X и Y` без кавычек
+// спрашивал одно слово «как».
+func checkArgs(f *cliFlags) error {
+	if len(f.args) == 0 {
+		return nil
+	}
+	cmds := requested(f)
+	if len(cmds) == 1 && cmds[0].can&cmdArgs != 0 {
+		return nil
+	}
+	who := "запуск без команды их не берёт"
+	if len(cmds) == 1 {
+		who = cmds[0].name + " их не берёт"
+	}
+	return fmt.Errorf("лишние значения в командной строке: %q — %s.\n"+
+		"  Значение ключа пишется сразу за ним, с пробелами — в кавычках: --ask \"как связаны X и Y\".\n"+
+		"  Ключ-переключатель значения не берёт: --tools включает, --tools=false выключает.",
+		f.args, who)
+}
+
+// checkOneCommand — за один запуск выполняется одна команда.
+//
+// dispatchCLI выполняет первую совпавшую ветку, и вторая команда той же строки
+// пропускалась без единого слова: --kb-list --graph-build books печатал список,
+// а сборка не начиналась. То же внутри --ask: файл --questions молча побеждал
+// вопрос из --ask.
+func checkOneCommand(f *cliFlags) error {
+	cmds := requested(f)
+	if len(cmds) < 2 {
+		return nil
+	}
+	names := make([]string, len(cmds))
+	for i, c := range cmds {
+		names[i] = c.name
+	}
+	return fmt.Errorf("за один запуск выполняется одна команда, а запрошено несколько: %s",
+		strings.Join(names, ", "))
+}
+
+// checkDryRun отвергает --kb-dry-run у команды, которая его не понимает:
+// она выполнилась бы по-настоящему, хотя человек просил только показать.
+func checkDryRun(f *cliFlags) error {
+	if !*f.kbDry {
+		return nil
+	}
+	list := strings.Join(dryRunCommands(), ", ")
+	cmds := requested(f)
+	if len(cmds) == 0 {
+		return fmt.Errorf("--kb-dry-run без команды ничего не значит.\n  Сухой прогон понимают: %s", list)
+	}
+	for _, c := range cmds {
+		if c.can&cmdDry != 0 {
+			continue
+		}
+		msg := "команда " + c.name + " сухого прогона не умеет: с --kb-dry-run она выполнилась бы по-настоящему"
+		if c.ownDry != "" {
+			msg += ".\n  Показать, ничего не меняя, у неё можно иначе: " + c.ownDry
+		}
+		return fmt.Errorf("%s.\n  --kb-dry-run понимают: %s", msg, list)
+	}
+	return nil
+}
+
+// mergeDry — сухой ли прогон у --graph-merge. У склейки свой ключ
+// --graph-merge-dry, но и общий --kb-dry-run обязан действовать: иначе
+// «покажи, что склеится» с общим ключом склеивало бы по-настоящему.
+func (f *cliFlags) mergeDry() bool { return *f.graphMergeDry || *f.kbDry }
 
 // readerRefusal — какая из запрещённых команд запрошена; пусто — ни одной.
 // Имена перебираются по порядку, чтобы сообщение не плясало от запуска к запуску.
@@ -676,11 +1009,11 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.kbDoctor != "":
 		return true, kmaint.Doctor(os.Stdout, cfg, *f.kbDoctor, *f.kbQuick)
 	case *f.kbIndex != "":
-		return true, kmaint.Index(os.Stdout, cfg, *f.kbIndex, flag.Args(), false, *f.kbDry, *f.kbKeepThin)
+		return true, kmaint.Index(os.Stdout, cfg, *f.kbIndex, f.args, false, *f.kbDry, *f.kbKeepThin)
 	case *f.kbSync != "":
 		return true, kmaint.Index(os.Stdout, cfg, *f.kbSync, nil, true, *f.kbDry, *f.kbKeepThin)
 	case *f.kbReindex != "":
-		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, flag.Args())
+		return true, kmaint.Reindex(os.Stdout, cfg, *f.kbReindex, f.args)
 	case *f.kbHash != "":
 		return true, kmaint.Hashes(os.Stdout, cfg, *f.kbHash, *f.kbRecnt)
 	case *f.kbYears != "":
@@ -809,7 +1142,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 
 	case *f.graphMerge != "":
 		return true, gmaint.Merge(os.Stdout, cfg, *f.graphMerge, *f.graphMergeFile, *f.graphMergeLevel,
-			*f.graphMergeMinSame, *f.graphMergeDrop, *f.graphMergeDry)
+			*f.graphMergeMinSame, *f.graphMergeDrop, f.mergeDry(), *f.kbYes)
 	case *f.graphResolve != "":
 		return true, gmaint.Resolve(os.Stdout, cfg, *f.graphResolve, *f.graphResolveMinCos, *f.graphResolveMinCosMut, *f.graphResolveFull,
 			*f.graphResolveCross, *f.graphResolveNormKey, *f.graphResolveShow, *f.graphResolveOut)
@@ -840,17 +1173,17 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	case *f.graphComm != "":
 		return true, gmaint.Communities(os.Stdout, cfg, *f.graphComm, *f.graphFreshComm, *f.graphCarrySim)
 	case *f.graphStats != "":
-		return true, gstats.Run(os.Stdout, cfg, *f.graphStats, flag.Args())
+		return true, gstats.Run(os.Stdout, cfg, *f.graphStats, f.args)
 	case *f.docProbe != "":
 		// Ни графа, ни коллекции: проба читает один файл, потому cfg не нужен.
-		return true, docprobe.Run(os.Stdout, *f.docProbe, flag.Args())
+		return true, docprobe.Run(os.Stdout, *f.docProbe, f.args)
 	case *f.scanRedact != "":
 		// Как и проба разбора, читает один файл: cfg не нужен.
-		return true, redact.RunCLI(os.Stdout, os.Stderr, *f.scanRedact, flag.Args())
+		return true, redact.RunCLI(os.Stdout, os.Stderr, *f.scanRedact, f.args)
 	case *f.census != "":
-		return true, census.Run(os.Stdout, cfg, *f.census, flag.Args())
+		return true, census.Run(os.Stdout, cfg, *f.census, f.args)
 	case *f.probes != "":
-		return true, probes.Run(os.Stdout, cfg, *f.probes, flag.Args())
+		return true, probes.Run(os.Stdout, cfg, *f.probes, f.args)
 	case *f.graphStatus != "":
 		name := *f.graphStatus
 		if name == "all" || name == "все" {
@@ -859,6 +1192,18 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Status(os.Stdout, cfg, name, *f.graphFolder, *f.graphBooks)
 	}
 	return false, nil
+}
+
+// warnConfig печатает замечания к файлу настроек — неизвестные ключи.
+//
+// Печатается при каждом запуске и до всякой работы, в том числе до
+// интерфейса: опечатка в имени ключа молча оставляет умолчание, и человек
+// иначе так и не узнал бы, что его настройка ни на что не влияет. В stderr,
+// чтобы не портить вывод команд, который читают скрипты.
+func warnConfig(w io.Writer, cfg *config.Config) {
+	for _, msg := range cfg.Warnings {
+		fmt.Fprintf(w, "ollchat: предупреждение: %s: %s\n", cfg.Path, msg)
+	}
 }
 
 // parseEvery разбирает срок между кругами догонщика векторов.
@@ -882,6 +1227,10 @@ func parseEvery(s string) (time.Duration, error) {
 
 func run() error {
 	f := parseFlags()
+	// До всякой работы: отказ должен прийти раньше, чем команда что-то тронет.
+	if err := checkCommandLine(f); err != nil {
+		return err
+	}
 
 	if *f.showVer {
 		fmt.Println("ollchat " + buildinfo.Describe(version))
@@ -906,6 +1255,7 @@ func run() error {
 	if !exists {
 		return fmt.Errorf("файл настроек %s не найден.\nСоздайте его командой: ollchat --init-config", path)
 	}
+	warnConfig(os.Stderr, cfg)
 
 	if *f.stepsFile != "" {
 		cfg.Log.StepsFile = *f.stepsFile
@@ -992,7 +1342,7 @@ func run() error {
 	// Обезличивание скана с моделью: нужны сервер, модель, песочница
 	// и правила — и больше ничего из того, что ниже.
 	if *f.scanRedactLLM != "" {
-		return runScanRedactLLM(cfg, srv, model, sandbox, guard, *f.scanRedactLLM, flag.Args())
+		return runScanRedactLLM(cfg, srv, model, sandbox, guard, *f.scanRedactLLM, f.args)
 	}
 
 	// Токен Confluence на сеанс: приходит командой /confluencetoken и главнее
@@ -1034,6 +1384,7 @@ func run() error {
 		Live:                 live,
 		Library:              libraryOrNil(library),
 		Sandbox:              sandbox,
+		Isolation:            tools.Isolation{Kind: cfg.Sandbox.Isolation, Network: cfg.Sandbox.IsolationNetwork, Hide: cfg.Sandbox.IsolationHide},
 		BashTimeout:          cfg.Agent.BashTimeoutDuration(),
 		MaxOutputKB:          cfg.Agent.MaxOutputKB,
 		KB:                   base,
@@ -1161,15 +1512,16 @@ func sessionDir() string {
 	if dir, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(dir, ".local", "share", "ollchat", "sessions")
 	}
-	return filepath.Join(os.TempDir(), "ollchat-sessions")
+	// Без HOME — свой каталог: кеш пользователя, если он задан, иначе
+	// временный с номером пользователя в имени. Прежний общий
+	// /tmp/ollchat-sessions делили все пользователи машины: кто создал его
+	// первым, тот и решал, кому в нём писать, и мог подложить чужим
+	// сессиям свою для /resume.
+	if dir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(dir, "ollchat", "sessions")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("ollchat-sessions-%d", os.Getuid()))
 }
-
-// dryRunFlagHelp — описание ключа сухого прогона.
-//
-// Вынесено в постоянную, потому что это обещание пользователю: перечисленные
-// здесь команды обязаны ничего не менять при --kb-dry-run. Проверяется тестом.
-const dryRunFlagHelp = "только показать, что будет сделано: " +
-	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases, --graph-unmerge, --graph-rebase-books"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `ollchat %s — TUI-клиент и агент для Ollama

@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/textx"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
@@ -35,7 +38,7 @@ func (t *httpFetchTool) Spec() ollama.Tool {
 }
 
 func (t *httpFetchTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "url")
+	raw, err := requireText(args, "url")
 	if err != nil {
 		return nil, err
 	}
@@ -48,6 +51,11 @@ func (t *httpFetchTool) Plan(args map[string]any) (*Plan, error) {
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("в адресе %q не указан хост", raw)
+	}
+	// Адрес служебной сети записан цифрами — отказ сразу, до подтверждения:
+	// разрешать здесь нечего, такие адреса закрыты всегда.
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && closedAddr(ip) {
+		return nil, fmt.Errorf("адрес %s закрыт: %s", ip, closedWhy)
 	}
 
 	maxBytes := argInt(args, "max_bytes", t.opts.MaxOutputKB*1024)
@@ -70,7 +78,96 @@ func (t *httpFetchTool) Plan(args map[string]any) (*Plan, error) {
 
 // fetchClient — один клиент на все загрузки: до этапа 91 (R8.4) он создавался
 // на каждый вызов, и соединения не переиспользовались.
-var fetchClient = &http.Client{Timeout: 60 * time.Second}
+var fetchClient = newFetchClient()
+
+// maxRedirects — сколько перенаправлений в пределах того же адреса пройти
+// подряд. Больше — почти всегда петля.
+const maxRedirects = 5
+
+// newFetchClient собирает клиент http_fetch.
+//
+// **Перенаправления.** Прежний клиент сам проходил до десяти перенаправлений,
+// куда бы они ни вели, и правило Fetch проверяло только первый адрес: узкое
+// `Fetch(https://доверенный/**)` обходилось ответом 302 на любой другой хост,
+// в том числе на внутренний. Теперь клиент идёт только в пределах того же
+// источника (схема, хост и порт — те, что проверены правилом), а на чужой
+// останавливается и говорит модели, куда её отправили: следующий запрос туда
+// пройдёт через проверку разрешений, как любой другой.
+//
+// **Служебные адреса.** Link-local (169.254.0.0/16, fe80::/10) и адрес
+// метаданных AWS по IPv6 (fd00:ec2::254) закрыты всегда: там живут метаданные
+// облака — ключи учётной записи машины, — и ни одной законной страницы.
+// Проверка стоит в Control у Dialer, то есть после разрешения имени, на
+// каждом соединении: подмена записи DNS между проверкой и запросом (DNS
+// rebinding) её не обходит. Петля и частные сети не закрыты: владелец ходит
+// на свои службы, и решает о них правило Fetch.
+func newFetchClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: refuseClosed}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = dialer.DialContext
+	return &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !sameOrigin(req.URL, via[0].URL) {
+				return http.ErrUseLastResponse
+			}
+			if len(via) > maxRedirects {
+				return fmt.Errorf("больше %d перенаправлений подряд — похоже на петлю", maxRedirects)
+			}
+			return nil
+		},
+	}
+}
+
+// closedWhy — объяснение отказа для модели и человека.
+const closedWhy = "это служебный адрес (link-local, метаданные облака), запросы к нему не выполняются никогда"
+
+// awsMetadataV6 — адрес службы метаданных AWS по IPv6.
+var awsMetadataV6 = netip.MustParseAddr("fd00:ec2::254")
+
+// closedAddr сообщает, что к адресу ходить нельзя ни при каких правилах.
+func closedAddr(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return ip.IsLinkLocalUnicast() || ip.WithZone("") == awsMetadataV6
+}
+
+// refuseClosed — Control для Dialer: адрес здесь уже разрешён из имени.
+//
+// Через прокси соединение идёт к самому прокси, и имя конечного хоста
+// разрешает уже он; тогда остаётся проверка адреса, записанного цифрами
+// (в Plan) — она от прокси не зависит.
+func refuseClosed(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return err
+	}
+	if closedAddr(ip) {
+		return fmt.Errorf("адрес %s закрыт: %s", ip, closedWhy)
+	}
+	return nil
+}
+
+// sameOrigin — схема, хост и порт совпадают (порт по умолчанию учитывается).
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		portOf(a) == portOf(b)
+}
+
+func portOf(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
 
 func fetchURL(ctx context.Context, target string, maxBytes int, opts Options) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -88,6 +185,16 @@ func fetchURL(ctx context.Context, target string, maxBytes int, opts Options) (s
 		return "", fmt.Errorf("запрос %s: %w", target, err)
 	}
 	defer resp.Body.Close()
+
+	// Перенаправление на другой адрес клиент не прошёл (см. newFetchClient):
+	// модель узнаёт, куда её отправили, и сама решает, запрашивать ли.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if next, err := resp.Location(); err == nil {
+			return fmt.Sprintf("HTTP %d → %s; запросите этот адрес отдельно "+
+				"(на другой адрес перенаправление само не выполняется: каждый адрес проходит "+
+				"проверку разрешений)", resp.StatusCode, next), nil
+		}
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {

@@ -33,7 +33,7 @@ const kbHelp = `База знаний по книгам:
   /kb use <имя|off>            коллекция по умолчанию для поиска моделью
   /kb auto on|off              подмешивать найденное перед каждым вопросом
   /kb style                    как модель отвечает по книгам: действующая политика
-  /kb stop                     остановить индексацию (то же, что Esc)
+  /kb stop                     остановить индексацию (то же, что Esc дважды)
   /kb rm <имя> [--book <путь>] удалить коллекцию или одну книгу
   /kb embed <имя> [--dry-run] [--recount]
                                посчитать смыслы: поиск начнёт понимать запрос,
@@ -657,7 +657,7 @@ func (m *Model) kbEmbed(arg string) tea.Cmd {
 //
 // Задача долгая — на коллекции в четверть миллиона кусков это переписывание
 // всего хранилища, — поэтому идёт через тот же механизм фоновой работы, что
-// и индексация: с прогрессом, с остановкой по Esc.
+// и индексация: с прогрессом, с остановкой по двойному Esc.
 func (m *Model) kbMerge(arg string) tea.Cmd {
 	name := strings.TrimSpace(arg)
 	// «force» последним словом — осознанный обход отказа при собранном графе.
@@ -877,6 +877,12 @@ func (m *Model) kbPathsAllowed(paths []string) ([]string, error) {
 // `strings.Fields` — и отступы пропадают. Для отчёта это не мелочь: он весь
 // построен на них, каталог стоит над именем книги со сдвигом вправо, и без
 // отступов список сливается в кашу.
+//
+// **Граф — из общего кэша, как у /search, а не через graphOf.** graphOf
+// принадлежит циклу событий: он закрывает и подменяет m.gr и пишет строку
+// в ленту. Из горутины команды это гонка с отрисовкой (аудит 07.10.2026,
+// находка 17, поймано -race), а закрытый ею граф мог быть тем, которым
+// в эту минуту считается подмешивание. В горутину уходят только значения.
 func (m *Model) kbDoctor(arg string) tea.Cmd {
 	coll, err := m.kbCollection(strings.TrimSpace(arg))
 	if err != nil {
@@ -884,9 +890,12 @@ func (m *Model) kbDoctor(arg string) tea.Cmd {
 		return nil
 	}
 	m.statusMsg = "проверяю коллекцию…"
+	cache, rules := m.gr.cache, m.cfg.Graph.Rules()
+	dir, chunks := coll.Dir(), coll.ChunkCount()
 	return func() tea.Msg {
 		var inGraph kb.InGraph
-		if g := m.graphOf(coll); g != nil {
+		if g, release := openGraphForSearch(cache, dir, chunks, rules); g != nil {
+			defer release()
 			inGraph = g.CoversDoc
 		}
 		return rawMsg{text: kb.Doctor(coll, kb.DoctorOpts{

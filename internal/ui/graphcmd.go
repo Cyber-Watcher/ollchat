@@ -196,8 +196,9 @@ func (m *Model) graphStatus(arg string) tea.Cmd {
 	// не спасает — во время сборки отметка файлов меняется постоянно,
 	// и граф переоткрывается на каждый вызов.
 	//
-	// В горутину уходят только путь и число кусков, а не сама коллекция:
-	// делить объект между потоками ради одной строки отчёта незачем.
+	// Коллекция уходит в горутину целиком: разбор считается по её кускам
+	// (liveGraphCoverage), а читать её из нескольких горутин можно — она
+	// под своим замком, так же её берёт /search.
 	dir, chunks, name := coll.Dir(), coll.ChunkCount(), coll.Name()
 	auto := m.gr.autoOn
 	rules := m.cfg.Graph.Rules()
@@ -211,23 +212,83 @@ func (m *Model) graphStatus(arg string) tea.Cmd {
 				name, name)}
 		}
 		defer g.Close()
-		return noticeMsg{text: graphStatusText(g, name, chunks, auto)}
+		text, err := graphStatusText(g, coll, auto)
+		if err != nil {
+			return errorMsg{err: fmt.Errorf("/graph status: %w", err)}
+		}
+		return noticeMsg{text: text}
 	}
+}
+
+// graphCoverage — разбор кусков живых книг коллекции, по видам отметок.
+type graphCoverage struct {
+	total, pending                int
+	done, empty, skipped, service int
+}
+
+// marked — куски с отметкой любого вида: «разобрано».
+func (c graphCoverage) marked() int { return c.done + c.empty + c.skipped + c.service }
+
+// liveGraphCoverage считает разбор одним проходом по кускам живых книг — тем
+// же правилом, что доктор графа и --graph-status (liveCoverage в graph/maint):
+// «разобрано» — отметка любого вида, «осталось» — то, что сборка ещё возьмёт
+// (graph.WillTake).
+//
+// Прежде статус брал все отметки журнала вместе с отметками удалённых книг
+// и делил их на все куски хранилища — выходило «разобрано 67 из 34, осталось
+// 0», — а «пропущено» складывало потерю (модель не ответила) с нормой работы
+// (служебный кусок). Обход идёт по кускам живых книг, поэтому следы удалённых
+// в счёт не попадают; их число называется отдельной строкой.
+func liveGraphCoverage(coll *kb.Collection, g *graph.Graph) (graphCoverage, error) {
+	var cov graphCoverage
+	err := coll.EachChunkRef(kb.ChunkFilter{}, func(r kb.ChunkRef) error {
+		cov.total++
+		mark, ok := g.Progress().MarkOf(graph.ChunkKey{Doc: r.Doc, Ord: r.Ord})
+		switch {
+		case !ok:
+		case mark == graph.MarkDone:
+			cov.done++
+		case mark == graph.MarkEmpty:
+			cov.empty++
+		case mark == graph.MarkSkipped:
+			cov.skipped++
+		case mark == graph.MarkService:
+			cov.service++
+		}
+		if g.WillTake(r) {
+			cov.pending++
+		}
+		return nil
+	})
+	return cov, err
 }
 
 // graphStatusText собирает отчёт о состоянии графа.
 //
 // Отдельной функцией, потому что считается она в горутине, а к модели
 // оттуда прикасаться нельзя.
-func graphStatusText(g *graph.Graph, name string, chunks int, auto bool) string {
-	st := g.Stats(chunks)
-	done, empty, skipped := g.Progress().Counts()
+func graphStatusText(g *graph.Graph, coll *kb.Collection, auto bool) (string, error) {
+	name := coll.Name()
+	st := g.Stats(coll.ChunkCount())
+	cov, err := liveGraphCoverage(coll, g)
+	if err != nil {
+		return "", err
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Граф коллекции %s\n", name)
 	fmt.Fprintf(&b, "  понятий %d, связей %d, упоминаний %d\n", st.Entities, st.Edges, st.Mentions)
-	fmt.Fprintf(&b, "  разобрано кусков %d из %d (осталось %d)\n", st.Covered, chunks, st.Pending)
-	fmt.Fprintf(&b, "  из них с понятиями %d, пустых %d, пропущено %d\n", done, empty, skipped)
+	fmt.Fprintf(&b, "  разобрано кусков %d из %d (осталось %d)\n", cov.marked(), cov.total, cov.pending)
+	fmt.Fprintf(&b, "  из них с понятиями %d, пустых %d, не разобрала модель %d, служебных %d\n",
+		cov.done, cov.empty, cov.skipped, cov.service)
+	alive := map[uint32]bool{}
+	for _, bk := range coll.LiveBooks() {
+		alive[bk.ID] = true
+	}
+	if ms := g.Progress().Stats(func(doc uint32) bool { return alive[doc] }); ms.Gone > 0 {
+		fmt.Fprintf(&b, "  отметок книг, которых в коллекции НЕТ: %d (в %d книгах) — в счёт выше не входят\n",
+			ms.Gone, ms.GoneBooks)
+	}
 	if st.Model != "" {
 		fmt.Fprintf(&b, "  модель извлечения: %s\n", st.Model)
 	}
@@ -252,7 +313,7 @@ func graphStatusText(g *graph.Graph, name string, chunks int, auto bool) string 
 	} else {
 		b.WriteString("  подмешивание выключено (/graph auto on — включить)")
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // graphCommunities показывает темы графа: их размеры, названия и описания.
@@ -367,9 +428,14 @@ func (m *Model) graphPack(arg string) tea.Cmd {
 		if err != nil {
 			return errorMsg{err: fmt.Errorf("/graph pack: %w", err)}
 		}
-		if _, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules); err != nil {
+		g, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules)
+		if err != nil {
 			return errorMsg{err: fmt.Errorf("/graph pack: граф коллекции %s: %w", name, err)}
 		}
+		// Граф открывался только ради проверки, что он годен и привязан
+		// к коллекции. Не закрытый, он держал бы журналы открытыми и сотни
+		// мегабайт памяти до самого выхода (аудит 07.10.2026).
+		_ = g.Close()
 		res, err := graph.Pack(coll.Dir(), path)
 		if err != nil {
 			return errorMsg{err: fmt.Errorf("/graph pack: упаковать не вышло: %w", err)}
@@ -425,24 +491,4 @@ func (m *Model) graphRemove(arg string) tea.Cmd {
 		}
 		return graphRemovedMsg{name: name, size: size}
 	}
-}
-
-// openGraphFor открывает граф названной или выбранной коллекции.
-func (m *Model) openGraphFor(arg string) (*graph.Graph, *kb.Collection, error) {
-	name := strings.TrimSpace(arg)
-	if name == "" {
-		name = m.kb.use
-	}
-	if name == "" {
-		return nil, nil, fmt.Errorf("коллекция не выбрана: /kb use <имя>")
-	}
-	coll, err := m.kbCollection(name)
-	if err != nil {
-		return nil, nil, err
-	}
-	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), m.cfg.Graph.Rules())
-	if err != nil {
-		return nil, nil, fmt.Errorf("граф коллекции %s: %w", name, err)
-	}
-	return g, coll, nil
 }

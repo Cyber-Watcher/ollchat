@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Математика расчёта видеопамяти.
@@ -270,12 +272,18 @@ type UserLimit struct {
 	ContextMax int `json:"context_max"`
 }
 
+// WriteProfile записывает профиль целиком или не трогает прежний.
+//
+// Профиль — итог получаса нагрузочных загрузок, а /calc в ollchat читает его
+// в любой момент. Запись на месте (os.WriteFile) сначала обрезала прежний
+// файл: оборванная запись оставляла пустой или половинный JSON, и вместе
+// с ним пропадали и старые замеры, и новые.
 func WriteProfile(path string, p Profile) error {
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return fsx.WriteFileAtomic(path, append(data, '\n'), 0o644)
 }
 
 // GPU — состояние видеокарты на момент замера.

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"github.com/Cyber-Watcher/ollchat/internal/textx"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -468,6 +469,48 @@ func rejected(status, note string) callInfo {
 	return callInfo{outcome: callRejected, status: status, note: note}
 }
 
+// planTool готовит вызов инструмента. Переменная, а не прямой вызов, — шов
+// для тестов: подложить инструмент, который падает, без настоящего набора.
+var planTool = func(reg *tools.Registry, name string, args map[string]any) (*tools.Plan, error) {
+	return reg.Plan(name, args)
+}
+
+// toolPanic — паника внутри инструмента, превращённая в ошибку. Стек идёт
+// в журнал шагов: по одному значению паники место поломки не найти.
+type toolPanic struct {
+	value any
+	stack []byte
+}
+
+func (p *toolPanic) Error() string {
+	return fmt.Sprintf("внутренняя ошибка инструмента (паника): %v", p.value)
+}
+
+// guarded вызывает часть инструмента и превращает панику в ошибку.
+//
+// **Почему.** Инструмент — это разбор PDF, граф, база знаний, сеть: много
+// чужого ввода и много кода. Паника в нём шла прямо в горутину агента, а там
+// recover не было, и падал весь процесс: интерфейс оставался в alt-screen,
+// терминал приходилось сбрасывать вручную, диалог пропадал. Ошибкой же
+// модель получает объяснение, а ход продолжается.
+func guarded[T any](f func() (T, error)) (out T, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = &toolPanic{value: p, stack: debug.Stack()}
+		}
+	}()
+	return f()
+}
+
+// noteOf — пояснение для журнала шагов; у паники — со стеком.
+func noteOf(err error) string {
+	var p *toolPanic
+	if errors.As(err, &p) {
+		return err.Error() + "\n" + string(p.stack)
+	}
+	return err.Error()
+}
+
 // executeCall готовит, согласует и выполняет один вызов инструмента.
 // Возвращаемая строка всегда пригодна для отправки модели: и успех, и ошибка.
 func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan<- Event) (_ string, _ []string, info callInfo) {
@@ -482,19 +525,29 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 		return msg, nil, rejected(steplog.OutcomeInvalid, "инструменты отключены")
 	}
 
-	plan, err := r.Tools.Plan(name, call.Function.Arguments)
+	plan, err := guarded(func() (*tools.Plan, error) {
+		return planTool(r.Tools, name, call.Function.Arguments)
+	})
 	if err != nil {
 		// Плана нет — нет и plan.LogArgs, а аргументы с персональными
 		// данными не должны уйти в событие и журналы и на этой ветке:
 		// инструмент спрашивается напрямую.
-		if safe := r.Tools.SafeArgs(name, call.Function.Arguments); safe != "" {
+		safe, safeErr := guarded(func() (string, error) {
+			return r.Tools.SafeArgs(name, call.Function.Arguments), nil
+		})
+		switch {
+		case safeErr != nil:
+			// Прятать нечем — аргументы не показываем вовсе: в них могут
+			// быть персональные данные.
+			argsJSON = "(аргументы скрыты: инструмент упал)"
+		case safe != "":
 			argsJSON = safe
 		}
 		msg := fmt.Sprintf("Ошибка: %v", err)
 		emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name,
 			Title: fmt.Sprintf("%s(%s)", name, textx.Shorten(argsJSON, 60)), Args: argsJSON,
 			Output: msg, Reason: err.Error()}})
-		return msg, nil, rejected(steplog.OutcomeInvalid, err.Error())
+		return msg, nil, rejected(steplog.OutcomeInvalid, noteOf(err))
 	}
 
 	// Аргументы с персональными данными (имена из подсказок модели
@@ -577,11 +630,11 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 	}
 
 	started := time.Now()
-	output, err := plan.Run(ctx)
+	output, err := guarded(func() (string, error) { return plan.Run(ctx) })
 	ms := time.Since(started).Milliseconds()
 	var images []string
-	if plan.Images != nil {
-		images = plan.Images()
+	if plan.Images != nil && err == nil {
+		images, err = guarded(func() ([]string, error) { return plan.Images(), nil })
 	}
 	if err != nil {
 		msg := fmt.Sprintf("Ошибка выполнения: %v", err)
@@ -590,7 +643,7 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 		}
 		emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
 			Output: msg, Reason: err.Error()}})
-		return msg, nil, callInfo{outcome: callFailed, status: steplog.OutcomeFailed, note: err.Error(), ms: ms}
+		return msg, nil, callInfo{outcome: callFailed, status: steplog.OutcomeFailed, note: noteOf(err), ms: ms}
 	}
 	// Чужой текст помечается здесь, в одном месте, а не в каждом инструменте:
 	// так новый источник не остаётся непомеченным по забывчивости.

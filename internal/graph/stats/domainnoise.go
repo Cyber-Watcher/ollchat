@@ -15,29 +15,19 @@ package stats
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/graph/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // folderOf — каталог библиотеки по пути книги: «/AI», «/DevOps», «(корень)».
+// Правило одно с доктором графа — maint.TopFolder: по границе каталога и от
+// самого короткого подходящего корня. Своя копия здесь сравнивала корень
+// подстрокой, и /data/lib находил книги из /data/library.
 func folderOf(path string, roots []string) string {
-	p := path
-	// Самый короткий подходящий корень: у коллекции lab корень — сам
-	// <корень библиотеки>/Раздел, и по нему каталог книги вырождался в «(корень)»
-	// (20.09.2026: 100 % «чужих» у lab). Корни библиотеки (kb.roots) короче
-	// корней коллекции — их и надо резать.
-	best := ""
-	for _, r := range roots {
-		if r != "" && strings.HasPrefix(p, r) && (best == "" || len(r) < len(best)) {
-			best = r
-		}
-	}
-	p = strings.TrimPrefix(p, best)
-	p = strings.TrimPrefix(p, "/")
-	if i := strings.Index(p, "/"); i > 0 {
-		return "/" + p[:i]
+	if f := maint.TopFolder(path, roots); f != "" {
+		return f
 	}
 	return "(корень)"
 }

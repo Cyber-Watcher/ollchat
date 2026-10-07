@@ -3,6 +3,7 @@ package graph
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,7 +129,7 @@ func TestMergeIsRemovable(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeFile(dir, mergesFile); err != nil {
+	if err := os.Remove(filepath.Join(dir, mergesFile)); err != nil {
 		t.Fatal(err)
 	}
 	g2, err := open(dir, Meta{Version: FormatVersion}, Rules{})
@@ -257,5 +258,103 @@ func TestMergeRefusesReverseDirection(t *testing.T) {
 	}
 	if got := g.Merges().Count(); got != 2 {
 		t.Errorf("поглощено %d, ожидалось 2", got)
+	}
+}
+
+// Выключенные склейки (merges_enabled = false) выключены целиком: граф такой,
+// будто журнала нет. До 07.10.2026 выключался лишь Resolve — поглощённое
+// понятие находилось само, его связи доставались ещё и выжившему, а из Live
+// оно пропадало: одна связь читалась с двух концов (аудит, 4.5).
+func TestMergesOffIsWhole(t *testing.T) {
+	g := mergeFixture(t)
+	if _, err := g.Merges().Add([]MergeRec{{From: 2, To: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := g.Dir()
+	must(t, g.Close())
+	off, err := open(dir, Meta{Version: FormatVersion}, Rules{MergesOff: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer off.Close()
+
+	if n := off.Merges().Count(); n != 0 {
+		t.Errorf("при выключенных склейках поглощено %d", n)
+	}
+	if n := len(off.Entities().Live()); n != 4 {
+		t.Errorf("живых понятий %d, ожидалось 4 — поглощённое пропало", n)
+	}
+	// Связь английского имени — только у него, не у русского.
+	if got := off.Edges().Of(1); len(got) != 1 || got[0].Dst != 3 {
+		t.Errorf("связи русского имени: %+v — ожидалась одна, с кучей", got)
+	}
+	if got := off.Mentions().Of(1); len(got) != 2 {
+		t.Errorf("упоминаний русского имени %d, ожидалось 2 — без чужих", len(got))
+	}
+	if ent, _ := off.Entities().Get(1); len(ent.Aliases) != 0 {
+		t.Errorf("русскому имени приписаны синонимы поглощённого: %v", ent.Aliases)
+	}
+	// Связь видна с обоих концов одинаково: у кого сосед Y, тот и сосед Y.
+	// В гибриде связь английского имени у русского читалась исходящей,
+	// а у её второго конца — входящей от английского.
+	for _, ent := range off.Entities().Live() {
+		for _, nb := range off.Edges().Neighbors(ent.ID) {
+			back := false
+			for _, x := range off.Edges().Neighbors(nb.ID) {
+				back = back || x.ID == ent.ID
+			}
+			if !back {
+				t.Errorf("связь %d—%d видна только с одного конца", ent.ID, nb.ID)
+			}
+		}
+	}
+}
+
+// Выжившего круга (A→B и B→A после ручной правки журнала) можно склеить
+// с третьим понятием. До 07.10.2026 его новая склейка отбрасывалась молча,
+// как «уже склеенное» (аудит, 4.5).
+func TestCircleSurvivorCanBeMerged(t *testing.T) {
+	g := mergeFixture(t)
+	dir := g.Dir()
+	must(t, g.Close())
+	circle := `{"from":1,"to":2,"at":1}` + "\n" + `{"from":2,"to":1,"at":2}` + "\n"
+	must(t, os.WriteFile(filepath.Join(dir, mergesFile), []byte(circle), 0o644))
+	g2, err := open(dir, Meta{Version: FormatVersion}, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	m := g2.Merges()
+	survivor := m.Resolve(1)
+	if survivor != 1 && survivor != 2 {
+		t.Fatalf("круг разрешился в %d", survivor)
+	}
+	if n, err := m.Add([]MergeRec{{From: survivor, To: 3}}); err != nil || n != 1 {
+		t.Fatalf("склейка выжившего круга с третьим: записано %d, %v", n, err)
+	}
+	for _, id := range []uint32{1, 2} {
+		if got := m.Resolve(id); got != 3 {
+			t.Errorf("понятие %d ведёт к %d, ожидалось 3", id, got)
+		}
+	}
+}
+
+// Слишком длинная строка в журнале склеек пропускается, как битая, а склейки
+// после неё действуют. До 07.10.2026 чтение на ней останавливалось молча,
+// и снятие склеек затем переписывало журнал по усечённому — навсегда.
+func TestMergesSurviveLongLine(t *testing.T) {
+	g := mergeFixture(t)
+	dir := g.Dir()
+	must(t, g.Close())
+	long := `{"from":3,"to":4,"why":"` + strings.Repeat("x", 2<<20) + `"}` + "\n"
+	rec := `{"from":2,"to":1,"at":1}` + "\n"
+	must(t, os.WriteFile(filepath.Join(dir, mergesFile), []byte(long+rec), 0o644))
+	g2, err := open(dir, Meta{Version: FormatVersion}, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	if got := g2.Merges().Resolve(2); got != 1 {
+		t.Fatalf("склейка после длинной строки потеряна: 2 ведёт к %d", got)
 	}
 }

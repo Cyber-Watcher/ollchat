@@ -1,10 +1,13 @@
 package graph
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Забытый кусок уносит свои упоминания и подтверждения, отметка становится
@@ -153,5 +156,61 @@ func TestParseChunkKey(t *testing.T) {
 		if _, err := ParseChunkKey(bad); err == nil {
 			t.Errorf("%q принято, а должно быть отвергнуто", bad)
 		}
+	}
+}
+
+// Чистка держит замок сборки всю перезапись, а не проверяет его в начале:
+// сборка, пришедшая посреди чистки, получает отказ, а не дескрипторы
+// журналов, которые вот-вот уйдут в «.bak-…» (аудит 07.10.2026, №9).
+func TestForgetHoldsBuildLock(t *testing.T) {
+	coll, chunk := buildFixture(t)
+	build, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer build.Close()
+
+	var lockErr error
+	asked := false
+	_, err = ForgetChunks(build.Dir(), func(k ChunkKey) bool {
+		if !asked {
+			asked = true
+			// Посреди чистки приходит сборка.
+			lockErr = build.Lock()
+		}
+		return k == chunk
+	}, false)
+	if err != nil {
+		t.Fatalf("чистка: %v", err)
+	}
+	if !errors.Is(lockErr, ErrLocked) {
+		t.Fatalf("сборка посреди чистки получила %v, ожидался отказ ErrLocked", lockErr)
+	}
+	if build.Locked() {
+		t.Error("признак сборки остался после чистки")
+	}
+}
+
+// Признак неживого процесса чистка подбирает и снимает за собой — значит,
+// замок она действительно занимает; сухой прогон замка не берёт.
+func TestForgetTakesOverStaleLock(t *testing.T) {
+	coll, chunk := buildFixture(t)
+	dir := filepath.Join(coll, DirName)
+	lock := filepath.Join(dir, lockFile)
+	stale := fmt.Sprintf("pid %d, начато %s\n", findDeadPID(t), time.Now().Format(time.RFC3339))
+	must(t, os.WriteFile(lock, []byte(stale), 0o644))
+
+	drop := func(k ChunkKey) bool { return k == chunk }
+	if _, err := ForgetChunks(dir, drop, true); err != nil {
+		t.Fatalf("сухой прогон при брошенном признаке: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("сухой прогон тронул признак сборки")
+	}
+	if _, err := ForgetChunks(dir, drop, false); err != nil {
+		t.Fatalf("чистка при брошенном признаке: %v", err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatal("чистка не заняла признак сборки: брошенный признак остался на месте")
 	}
 }

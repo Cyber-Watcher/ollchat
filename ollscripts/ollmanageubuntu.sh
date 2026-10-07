@@ -46,6 +46,12 @@ readonly DEFAULT_MODELS=/usr/share/ollama/.ollama/models
 readonly DEFAULT_OLLAMA_HOST=0.0.0.0:11434
 readonly DEFAULT_CONTEXT_LENGTH=32768
 readonly RELEASES_API=https://api.github.com/repos/ollama/ollama/releases/latest
+# Контрольные суммы резервных копий — у root, а не рядом с копией. Сама копия
+# лежит в доме пользователя и принадлежит ему (так её удобно смотреть
+# и переносить), значит, любой его процесс может её переписать. Запись здесь
+# позволяет восстановлению заметить подмену, прежде чем root выложит файлы
+# в /etc/systemd/system.
+readonly CHECKSUM_DIR=/var/lib/ollmanageubuntu/backups
 readonly DOWNLOAD_BASE=https://github.com/ollama/ollama/releases/download
 
 ASSUME_YES=0
@@ -366,7 +372,17 @@ backup_configs() {
     dest="$home/ollobackups/$stamp"
 
     step "Резервная копия настроек"
-    mkdir -p "$dest"
+    # Каталог копий — в доме пользователя, а скрипт работает от root:
+    # подложенная на его место ссылка (~/ollobackups → /etc/…) повела бы
+    # root создавать каталоги и менять права там, куда она указывает.
+    # Пользователю здесь ничего не стоит её убрать, root — дорого не заметить.
+    if [ -L "$home/ollobackups" ] || { [ -e "$home/ollobackups" ] && [ ! -d "$home/ollobackups" ]; }; then
+        die "$home/ollobackups — не каталог (ссылка или файл); уберите его и запустите скрипт снова"
+    fi
+    # Каталог копии закрыт с самого создания: в Environment= юнита
+    # и в манифесте бывают ключи и пароли прокси, а копируется всё это
+    # раньше, чем доходит до прав в конце.
+    install -d -m 0700 "$dest"
 
     local saved=0
     if [ -f "$UNIT_FILE" ]; then
@@ -408,16 +424,79 @@ backup_configs() {
 
     [ "$saved" -eq 1 ] || warn "файлов настроек не нашлось — сохранён только манифест"
 
-    # Права: каталог должен остаться доступным тому, кто запускал скрипт.
+    # Права: копия принадлежит тому, кто запускал скрипт, и только ему.
+    # Прежде файлы получали 0644, и значения Environment= — ключи, пароли
+    # прокси — читал любой пользователь машины.
     local group
     group=$(id -gn "$user" 2>/dev/null || echo "$user")
     chown -R "$user:$group" "$home/ollobackups"
-    chmod 755 "$home/ollobackups" "$dest"
-    find "$dest" -type f -exec chmod 644 {} +
+    chmod 755 "$home/ollobackups"
+    find "$dest" -type d -exec chmod 700 {} +
+    find "$dest" -type f -exec chmod 600 {} +
+    record_checksums "$dest" "$user" "$stamp"
 
     say ""
     ok "копия: $dest (владелец $user)"
     BACKUP_DIR=$dest
+}
+
+# backup_sums печатает контрольные суммы обычных файлов копии в постоянном
+# порядке, с путями относительно её каталога. Ссылки не берутся: восстановление
+# их тоже не трогает.
+backup_sums() {
+    (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum)
+}
+
+# checksum_file — где лежит контрольная запись копии: по пользователю и метке
+# времени, то есть по имени каталога копии.
+checksum_file() {
+    printf '%s/%s/%s.sha256' "$CHECKSUM_DIR" "$1" "$2"
+}
+
+# record_checksums записывает суммы только что снятой копии туда, куда
+# пользователь писать не может.
+record_checksums() {
+    local dest=$1 user=$2 stamp=$3 file
+    file=$(checksum_file "$user" "$stamp")
+    install -d -o root -g root -m 0700 "$CHECKSUM_DIR" "$CHECKSUM_DIR/$user"
+    backup_sums "$dest" > "$file.tmp"
+    chmod 600 "$file.tmp"
+    mv -f "$file.tmp" "$file"
+}
+
+# backup_trusted — можно ли восстанавливать из копии.
+#
+# Копия принадлежит пользователю, и подменённый в ней unit-файл root выложил
+# бы в /etc/systemd/system: ExecStartPre=+… — и любой процесс пользователя
+# (хоть bash агента) получает root при следующем перезапуске службы.
+# Расхождение с контрольной записью — всегда «нет». Записи нет у копий,
+# снятых до её появления: тогда решает человек с терминала, и ключ -y за него
+# не отвечает — иначе подброшенный каталог восстанавливался бы молча.
+backup_trusted() {
+    local src=$1 user stamp file
+    user=$(invoking_user)
+    stamp=$(basename "$src")
+    file=$(checksum_file "$user" "$stamp")
+    if [ ! -f "$file" ]; then
+        warn "у копии $src нет контрольной записи ($file): её сняли старой версией скрипта"
+        warn "или перенесли с другой машины, и подмену файлов в ней не заметить"
+        confirm_tty "Восстановить из неё всё равно?"
+        return
+    fi
+    if ! diff -q <(backup_sums "$src") "$file" >/dev/null; then
+        diff <(backup_sums "$src") "$file" | sed 's/^/    /' >&2 || true
+        warn "файлы копии $src изменились после её снятия"
+        return 1
+    fi
+    ok "копия сверена с контрольной записью"
+}
+
+# confirm_tty — вопрос, на который -y не отвечает: только человек с терминала.
+confirm_tty() {
+    local answer
+    printf '%s [y/N] ' "$1"
+    read -r answer </dev/tty 2>/dev/null || answer=n
+    case "$answer" in [yYдД]*) return 0 ;; *) return 1 ;; esac
 }
 
 # newest_backup — самая свежая копия того, кто запустил скрипт.
@@ -434,25 +513,55 @@ newest_backup() {
         | sort -n | tail -1 | cut -d' ' -f2-
 }
 
+# restore_configs SRC [auto] — вернуть настройки из копии. В режиме auto
+# (переустановка сама нашла копию) копию, которой нельзя верить, пропускаем:
+# установка продолжается с умолчаниями, а не обрывается на полпути.
 restore_configs() {
-    local src=$1
+    local src=$1 mode=${2:-}
     [ -d "$src" ] || die "каталог резервной копии не найден: $src"
 
     step "Восстановление настроек из $src"
-    if [ -f "$src/ollama.service" ]; then
-        cp -a "$src/ollama.service" "$UNIT_FILE"
+    if ! backup_trusted "$src"; then
+        if [ "$mode" = auto ]; then
+            warn "настройки из копии не восстановлены — будут поставлены умолчания"
+            return 1
+        fi
+        die "восстановление из $src отменено"
+    fi
+    # Копия лежит у пользователя и принадлежит ему, а cp -a переносил
+    # владельца вместе с файлом: unit root-службы и её переопределения
+    # становились файлами пользователя, и любой его процесс — хоть bash
+    # агента — вписал бы ExecStartPre=+ и получил root при перезапуске.
+    # Поэтому файлы ставятся заново: владелец root, права 0644, каталог 0755.
+    # Ссылки и всё, что не обычный файл, пропускаются: ссылка из копии
+    # заставила бы root прочитать чужой файл и выложить его в /etc.
+    if regular "$src/ollama.service"; then
+        install -o root -g root -m 0644 "$src/ollama.service" "$UNIT_FILE"
         ok "unit-файл службы"
     fi
-    if [ -d "$src/ollama.service.d" ]; then
-        mkdir -p "$OVERRIDE_DIR"
-        cp -a "$src/ollama.service.d/." "$OVERRIDE_DIR/"
+    if [ -d "$src/ollama.service.d" ] && [ ! -L "$src/ollama.service.d" ]; then
+        install -d -o root -g root -m 0755 "$OVERRIDE_DIR"
+        local f
+        for f in "$src/ollama.service.d"/*; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            if ! regular "$f"; then
+                warn "пропускаю $(basename "$f"): не обычный файл"
+                continue
+            fi
+            install -o root -g root -m 0644 "$f" "$OVERRIDE_DIR/"
+        done
         ok "переопределения службы"
     fi
-    for extra in ollama; do
-        [ -e "$src/$extra" ] && [ ! -e /etc/default/ollama ] && cp -a "$src/$extra" /etc/default/ollama && ok "/etc/default/ollama"
-    done
+    if regular "$src/ollama" && [ ! -e /etc/default/ollama ]; then
+        install -o root -g root -m 0644 "$src/ollama" /etc/default/ollama
+        ok "/etc/default/ollama"
+    fi
     systemctl daemon-reload
 }
+
+# regular — обычный файл, а не ссылка: install идёт по ссылке и прочитал бы
+# от имени root то, на что она указывает.
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 
 # ── Установка ────────────────────────────────────────────────────────────────
 
@@ -639,7 +748,7 @@ do_install_or_update() {
                 if [ -d "$backup/ollama.service.d" ]; then
                     warn "нашлась резервная копия настроек: $backup"
                     if confirm "  Восстановить из неё переопределения службы?"; then
-                        restore_configs "$backup"
+                        restore_configs "$backup" auto || true
                     fi
                 fi
             fi

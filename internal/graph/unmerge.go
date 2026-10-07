@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -77,6 +76,13 @@ func (g *Graph) UndoMerges(pairs [][2]uint32, why string, dry bool) (UnmergeResu
 		}
 		defer release()
 	}
+	// Журнал перечитывается — под замком, — а не берётся снимком с открытия
+	// графа: --graph-merge и разбор очереди (/graph review) дописывают склейки
+	// без замка сборки, и подмена журнала по устаревшему снимку молча стёрла
+	// бы их решения (аудит 07.10.2026, №9).
+	if err := g.merges.reload(); err != nil {
+		return res, err
+	}
 	return g.merges.undo(pairs, why, dry, &res)
 }
 
@@ -132,7 +138,18 @@ func (m *Merges) undo(pairs [][2]uint32, why string, dry bool, res *UnmergeResul
 		return *res, nil
 	}
 
-	// 1. Копия прежнего журнала. 2. След снятого. 3. Атомарная подмена.
+	// Склейку могли дописать без замка, пока шла подготовка: подмена стёрла
+	// бы её. Окно узкое, но решение арбитра дороже повтора команды.
+	if fi, err := os.Stat(m.path); err != nil || fi.Size() != m.size {
+		return *res, fmt.Errorf("журнал склеек дописан, пока готовилось снятие — ничего не подменено, повторите команду")
+	}
+
+	// 1. Копия прежнего журнала. 2. Атомарная подмена. 3. След снятого.
+	//
+	// След — после подмены, а не до: до 07.10.2026 он писался первым, и если
+	// подмена срывалась, merges-undone.jsonl называл снятыми склейки, которые
+	// в журнале остались, а повтор команды записывал их туда ещё раз (аудит,
+	// 4.5). Сорвётся теперь след — снятое всё равно цело в копии журнала.
 	stamp := time.Now().Format("20060102-150405")
 	old, err := os.ReadFile(m.path)
 	if err != nil {
@@ -141,32 +158,6 @@ func (m *Merges) undo(pairs [][2]uint32, why string, dry bool, res *UnmergeResul
 	res.Backup = m.path + ".bak-" + stamp
 	if err := fsx.WriteFileAtomic(res.Backup, old, 0o644); err != nil {
 		return *res, fmt.Errorf("копия журнала склеек: %w", err)
-	}
-	now := time.Now().Unix()
-	uf, err := os.OpenFile(filepath.Join(filepath.Dir(m.path), undoneMergesFile),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return *res, err
-	}
-	uw := bufio.NewWriter(uf)
-	for _, r := range res.Undone {
-		b, err := json.Marshal(UndoneMerge{MergeRec: r, UndoneAt: now, UndoneBy: why})
-		if err != nil {
-			uf.Close()
-			return *res, err
-		}
-		uw.Write(append(b, '\n'))
-	}
-	if err := uw.Flush(); err != nil {
-		uf.Close()
-		return *res, err
-	}
-	if err := uf.Sync(); err != nil {
-		uf.Close()
-		return *res, err
-	}
-	if err := uf.Close(); err != nil {
-		return *res, err
 	}
 
 	var buf bytes.Buffer
@@ -180,9 +171,24 @@ func (m *Merges) undo(pairs [][2]uint32, why string, dry bool, res *UnmergeResul
 	if err := fsx.WriteFileAtomic(m.path, buf.Bytes(), 0o644); err != nil {
 		return *res, fmt.Errorf("подмена журнала склеек: %w", err)
 	}
-	m.recs = keep
+	m.recs, m.size = keep, int64(buf.Len())
 	m.rebuild()
+
+	if err := appendUndone(filepath.Join(filepath.Dir(m.path), undoneMergesFile), res.Undone, why); err != nil {
+		return *res, fmt.Errorf("склейки сняты, но след в %s не записан (%w): снятые записи — в копии %s",
+			undoneMergesFile, err, res.Backup)
+	}
 	return *res, nil
+}
+
+// appendUndone дописывает снятые склейки в журнал снятого и пишет его на диск.
+func appendUndone(path string, undone []MergeRec, why string) error {
+	now := time.Now().Unix()
+	recs := make([]UndoneMerge, len(undone))
+	for i, r := range undone {
+		recs[i] = UndoneMerge{MergeRec: r, UndoneAt: now, UndoneBy: why}
+	}
+	return appendJSONL(path, recs, true)
 }
 
 // RawEntity отдаёт запись понятия БЕЗ наложения склеек: у поглощённого —

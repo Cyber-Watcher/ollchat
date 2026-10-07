@@ -477,7 +477,14 @@ func (m *Model) confirmView() string {
 		}
 	}
 
-	b.WriteString(styConfirmKeys.Render("[y] выполнить   [n] отклонить") + "\n")
+	if m.confirmArmed {
+		// Ответы пока не принимаются (confirmguard.go): вместо строки клавиш —
+		// почему нажатие ничего не сделало. Обрезается по ширине, чтобы окно
+		// не стало выше от одной этой строки.
+		b.WriteString(styNotice.Render(truncateLine(confirmQuietHint, m.width-6)) + "\n")
+	} else {
+		b.WriteString(styConfirmKeys.Render("[y] выполнить   [n] отклонить") + "\n")
+	}
 	b.WriteString(styConfirmKeys.Render("[a] это действие до конца сеанса   [t] весь инструмент " +
 		c.Tool + " до конца сеанса"))
 	return styConfirmBox.Width(m.width - 2).Render(b.String())

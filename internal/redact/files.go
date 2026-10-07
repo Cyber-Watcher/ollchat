@@ -25,15 +25,20 @@ type Formats struct {
 	OCRMD  bool // .md распознанного текста, С персональными данными
 }
 
-// DefaultFormats — все четыре: так просили пользователи.
-const DefaultFormats = "pdf,md,ocr-pdf,ocr-md"
+// DefaultFormats — замазанный PDF и обезличенный .md. Распознанные копии
+// со всеми персональными данными делаются только по явной просьбе (слово
+// владельца 07.10.2026): прежде по умолчанию делались все четыре файла,
+// и копия медицинского документа со всеми данными ложилась рядом
+// с исходником при каждом запуске, даже когда её никто не просил.
+const DefaultFormats = "pdf,md"
 
 // FormatsHelp — подсказка к ключу и к описанию инструмента.
-const FormatsHelp = "через запятую: pdf (замазанный PDF), md (.md без персональных данных), " +
-	"ocr-pdf (текстовый PDF распознанного, с персональными данными), " +
-	"ocr-md (.md распознанного, с персональными данными), ocr — оба распознанных, all — все четыре"
+const FormatsHelp = "через запятую: pdf (замазанный PDF) и md (.md без персональных данных) — " +
+	"эти два по умолчанию; ocr-pdf (текстовый PDF распознанного, со ВСЕМИ персональными данными) " +
+	"и ocr-md (.md распознанного, со ВСЕМИ персональными данными) — только по просьбе; " +
+	"ocr — оба распознанных, all — все четыре"
 
-// ParseFormats разбирает список форматов; пустой — все четыре.
+// ParseFormats разбирает список форматов; пустой — DefaultFormats.
 func ParseFormats(s string) (Formats, error) {
 	var f Formats
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -108,11 +113,42 @@ func (o Outputs) List() []string {
 	return out
 }
 
+// unverifiedMark вставляется перед расширением обезличенного итога, в котором
+// проверка нашла скрытое: «скан.redacted.UNVERIFIED.pdf».
+const unverifiedMark = ".UNVERIFIED"
+
+// Unverified — имена итогов на случай, когда проверка нашла скрытое в самих
+// обезличенных файлах: замазанный PDF и .md получают пометку UNVERIFIED.
+// Прежде они ложились под обычными именами, и файл, который нельзя
+// показывать наружу, ничем не отличался от проверенного — только код
+// выхода 3, которого в папке не видно. Распознанные копии и так со всеми
+// данными: их имена не меняются.
+func (o Outputs) Unverified() Outputs {
+	mark := func(p string) string {
+		if p == "" {
+			return ""
+		}
+		ext := filepath.Ext(p)
+		return strings.TrimSuffix(p, ext) + unverifiedMark + ext
+	}
+	o.PDF, o.MD = mark(o.PDF), mark(o.MD)
+	return o
+}
+
 // Check — отказы до работы. Исходник не перезаписывается: запись идёт
 // переименованием, и оригинал скана пропал бы без следа. Два итога не
 // пишутся в один файл: второй затёр бы первый, и обезличенный PDF мог бы
-// оказаться под распознанным, со всеми данными.
+// оказаться под распознанным, со всеми данными. Проверяются оба набора
+// имён — и обычный, и с пометкой UNVERIFIED: исходник «скан.UNVERIFIED.pdf»
+// иначе затёрся бы итогом -out-pdf скан.pdf, не прошедшим проверку.
 func (o Outputs) Check(in string) error {
+	if err := o.check(in); err != nil {
+		return err
+	}
+	return o.Unverified().check(in)
+}
+
+func (o Outputs) check(in string) error {
 	abs := func(p string) string {
 		if a, err := filepath.Abs(p); err == nil {
 			return a
@@ -153,14 +189,23 @@ type Written struct {
 
 // WriteOutputs пишет заказанные файлы. Распознанные копии берутся из
 // res.OCRMD — в них всё прочитанное, с персональными данными; вызывающий
-// отдаёт модели только пути и размеры, но не их текст.
+// отдаёт модели только пути и размеры, но не их текст. Если проверка нашла
+// скрытое, обезличенные итоги пишутся под именами Unverified.
 func WriteOutputs(o Outputs, title string, pages []Page, res *Result) ([]Written, error) {
+	leak := !res.Check.OK()
+	if leak {
+		o = o.Unverified()
+	}
 	var out []Written
 	put := func(i int, path string, data []byte, note string) error {
 		if err := WriteFile(path, data); err != nil {
 			return err
 		}
-		out = append(out, Written{What: outputNames[i], Path: path, Bytes: len(data), Note: note})
+		what := outputNames[i]
+		if leak && i < 2 {
+			what += " — НЕ ПРОВЕРЕН: проверка нашла в нём скрытое"
+		}
+		out = append(out, Written{What: what, Path: path, Bytes: len(data), Note: note})
 		return nil
 	}
 	if o.PDF != "" {

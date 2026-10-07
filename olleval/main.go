@@ -42,6 +42,35 @@ const version = "olleval 0.3.0"
 // а лишняя строка в журнале ночи только мешает читать.
 var errSilent = errors.New("")
 
+// exitServerDown — код выхода «сервер Ollama не ответил».
+//
+// Свой код, а не общий 1: у pending код 1 значит «работы нет», и скрипт ночи
+// читал погашенную службу как доделанную ночь — выходил, не дойдя до
+// guard --start-service, и поднять забытую после обучения службу было
+// некому. Теперь скрипт по этому коду идёт к guard.
+const exitServerDown = 3
+
+// serverDownError — сервер Ollama не ответил на запрос, без которого
+// команда не может ответить сама.
+type serverDownError struct{ err error }
+
+func (e *serverDownError) Error() string {
+	return "сервер Ollama не отвечает: " + e.err.Error()
+}
+func (e *serverDownError) Unwrap() error { return e.err }
+
+// exitCodeFor — код выхода по ошибке команды.
+func exitCodeFor(err error) int {
+	var down *serverDownError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &down):
+		return exitServerDown
+	}
+	return 1
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -84,7 +113,7 @@ func main() {
 		if !errors.Is(err, errSilent) {
 			fmt.Fprintln(os.Stderr, "ошибка: "+err.Error())
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -98,7 +127,7 @@ func usage() {
   olleval config   [флаги]   показать настройки (--init создать, --get ключ)
   olleval timers   [флаги]   напечатать юниты systemd по расписанию из настроек
   olleval window   [флаги]   идёт ли сейчас окно прогонов (код 1 — нет)
-  olleval pending  [флаги]   сколько попыток ночи не сделано (код 1 — работы нет)
+  olleval pending  [флаги]   сколько попыток ночи не сделано (код 1 — работы нет, 3 — сервер не отвечает)
   olleval night    [флаги]   какую ночь брать: продолжить незаконченную или завести новую
   olleval running  [флаги]   жив ли прогон прямо сейчас (код 1 — нет)
 
@@ -352,6 +381,13 @@ func cmdRun(ctx context.Context, args []string) error {
 		OllamaVersion: srvVersion, NumCtx: *numCtx, Repeats: *repeats,
 		Deadline: deadline, Suites: suiteList, Models: cards, Note: *note,
 	}
+	// Заход в начатую ночь паспорт не переписывает, а дополняет.
+	switch prev, err := store.LoadPassport(); {
+	case err == nil:
+		passport = resumePassport(prev, passport)
+	case !errors.Is(err, os.ErrNotExist):
+		waitLog("паспорт ночи не читается (" + err.Error() + ") — пишу новый")
+	}
 	if err := store.SavePassport(passport); err != nil {
 		return err
 	}
@@ -586,7 +622,7 @@ func cmdPending(ctx context.Context, args []string) error {
 	client := f.client()
 	tags, err := client.Tags(ctx)
 	if err != nil {
-		return err
+		return &serverDownError{err}
 	}
 	cards := keepOnly(SelectModels(tags, strings.Split(*exclude, ",")), *models)
 
@@ -792,6 +828,22 @@ func cmdWindow(args []string) error {
 
 // ── running ──────────────────────────────────────────────────────────────────
 
+// staleAfter — после какого молчания отметки прогон считается мёртвым.
+//
+// Живой прогон обновляет отметку раз в минуту (heartbeatEvery), но запись
+// может и не пройти — диск полон, каталог недоступен, — и тогда порог
+// остаётся последним рубежом. Он не меньше самой долгой попытки: генерация
+// (run.timeout) плюс проверка (verify.timeout) с запасом. Прежние
+// 15 минут были короче одной генерации, и служба возврата открывала сервер
+// с перезапуском Ollama посреди живого прогона.
+func staleAfter(c Config) time.Duration {
+	d := c.Run.Timeout.Get(20*time.Minute) + c.Verify.Timeout.Get(10*time.Minute) + 5*time.Minute
+	if d < 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	return d
+}
+
 // cmdRunning отвечает, идёт ли прогон прямо сейчас. Нужна службе возврата
 // сервера: закрытый стенд при живом прогоне — норма, при мёртвом — беда.
 func cmdRunning(args []string) error {
@@ -799,7 +851,7 @@ func cmdRunning(args []string) error {
 	if err != nil {
 		return err
 	}
-	stale := f.fs.Duration("stale", 15*time.Minute, "после какого молчания считать прогон мёртвым")
+	stale := f.fs.Duration("stale", staleAfter(f.cfg), "после какого молчания считать прогон мёртвым")
 	quiet := f.fs.Bool("quiet", false, "молча, только код возврата")
 	_ = f.fs.Parse(args)
 

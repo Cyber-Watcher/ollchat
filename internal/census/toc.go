@@ -81,7 +81,13 @@ func tocCensus(stdout io.Writer, cfg *config.Config, collName string) error {
 		fmt.Fprintf(stdout, "больше всего у книги %d: %d из %d кусков\n", worst, worstN, perBook[worst][0])
 	}
 
-	gdir := filepath.Join(c.Dir(), "graph")
+	// Каталог графа — по настройке, как у самого ollchat: у именованного графа
+	// (graph.name = lab → graph-lab) он свой, и прежний жёсткий «graph» молча
+	// считал не тот граф или не находил никакого.
+	gdir := cfg.Graph.Rules().Dir(c.Dir())
+	if _, err := os.Stat(filepath.Join(gdir, "graph.meta")); err != nil {
+		fmt.Fprintf(stdout, "графа в %s нет — доли упоминаний и связей не считаются\n", gdir)
+	}
 	if data, err := os.ReadFile(filepath.Join(gdir, "mentions.log")); err == nil {
 		n, in := len(data)/mentionRec, 0
 		for i := 0; i < n; i++ {

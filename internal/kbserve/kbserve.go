@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"hash/fnv"
@@ -122,7 +123,58 @@ type Opts struct {
 	// и клиент получит внятный отказ вместо молчания.
 	Graph GraphServer
 
+	// HeavySlots — сколько тяжёлых запросов (поиск, граф) идёт разом;
+	// 0 — heavySlots.
+	HeavySlots int
+
 	Verbose bool
+}
+
+// Пределы входа данных (аудит 07.10.2026, 4.2).
+//
+// Каждый поиск — это вектор вопроса и вторая ступень на видеокарте, а запрос
+// к графу на холодной службе — открытие графа на десятки секунд и гигабайт
+// памяти. Ни числа отбора, ни число таких запросов разом служба прежде
+// не ограничивала: top_k = 1e6 или сотня параллельных вопросов занимали
+// карту и память машины владельца, сколько хотел клиент.
+const (
+	// maxTopK — потолок top_k и max_per_book. Клиенту со своей второй ступенью
+	// кандидатов нужно больше, чем показывать (rerank_candidates, умолчание —
+	// двадцать), но не тысячи. Предел на книгу выше top_k ничего не значит.
+	maxTopK = 100
+
+	// heavySlots — сколько тяжёлых запросов служба ведёт разом. Остальные
+	// ждут своей очереди, пока ждёт их клиент: на одной карте больше
+	// одновременных векторов и переранжирований не ускоряют, а копят очередь
+	// в Ollama.
+	heavySlots = 4
+)
+
+// searchOpts переводит запрос в числа поиска, приводя их к пределам службы.
+//
+// Ноль и отрицательное — «как настроено на сервере». Прежде отрицательный
+// max_per_book снимал предел на книгу вовсе (так его читает find), а top_k
+// не ограничивался ничем.
+func searchOpts(req SearchRequest, name string, o Opts) find.Opts {
+	return find.Opts{
+		Mode: "serve", Collection: name, TableBoost: o.TableBoost,
+		TopK: clampPositive(req.TopK, maxTopK), MaxPerBook: clampPositive(req.MaxPerBook, maxTopK),
+		MinCosine: req.MinCosine, SemanticWeight: req.SemanticWeight,
+		Docs: req.Books, Exact: req.Exact,
+		Semantic: true, QueryTimeout: kb.DefaultQueryTimeout,
+		Rerank: true, RerankOpts: o.RerankOpts,
+	}
+}
+
+// clampPositive — v в пределах 1..max; ноль и меньше — ноль, то есть умолчание.
+func clampPositive(v, max int) int {
+	switch {
+	case v <= 0:
+		return 0
+	case v > max:
+		return max
+	}
+	return v
 }
 
 // GraphServer — то, что умеет отвечать на вопросы к графу.
@@ -172,6 +224,25 @@ func Mount(mux *http.ServeMux, o Opts) {
 		}
 	}
 
+	// enter занимает место тяжёлого запроса, когда запрос уже разобран: тело
+	// читается до очереди, и медленный клиент места не держит. Ждёт, пока
+	// ждёт клиент, — ушедший клиент из очереди уходит.
+	slots := o.HeavySlots
+	if slots <= 0 {
+		slots = heavySlots
+	}
+	heavy := make(chan struct{}, slots)
+	enter := func(w http.ResponseWriter, r *http.Request) (leave func(), ok bool) {
+		select {
+		case heavy <- struct{}{}:
+			return func() { <-heavy }, true
+		case <-r.Context().Done():
+			apiError(w, http.StatusServiceUnavailable,
+				errors.New("служба занята другими запросами, а клиент перестал ждать"))
+			return nil, false
+		}
+	}
+
 	mux.HandleFunc("/api/v1/collections", guard(func(w http.ResponseWriter, r *http.Request) {
 		names, err := base.Names()
 		if err != nil {
@@ -204,16 +275,14 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusNotFound, err)
 			return
 		}
-		// Одно ядро с /search и kb_search (этап 91, R2.8).
-		fo := find.Opts{
-			Mode: "serve", Collection: name, TableBoost: o.TableBoost,
-			TopK: req.TopK, MaxPerBook: req.MaxPerBook, MinCosine: req.MinCosine,
-			SemanticWeight: req.SemanticWeight, Docs: req.Books, Exact: req.Exact,
-			Semantic: true, QueryTimeout: kb.DefaultQueryTimeout,
-			Rerank: true, RerankOpts: o.RerankOpts,
+		leave, ok := enter(w, r)
+		if !ok {
+			return
 		}
+		defer leave()
+		// Одно ядро с /search и kb_search (этап 91, R2.8).
 		hits, note, err := find.Books(r.Context(), find.Deps{Coll: coll, Embedder: o.Emb, Reranker: o.Reranker},
-			req.Query, req.Query, fo)
+			req.Query, req.Query, searchOpts(req, name, o))
 		if err != nil {
 			apiError(w, http.StatusInternalServerError, err)
 			return
@@ -262,7 +331,19 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusNotImplemented, errNoGraph)
 			return
 		}
+		leave, ok := enter(w, r)
+		if !ok {
+			return
+		}
+		defer leave()
 		text, err := o.Graph.Tool(r.Context(), req.Collection, req.Name, req.Args)
+		if errors.Is(err, ErrToolNotServed) {
+			// Отдельный код, а не общий 400: «так нельзя никогда» и «довод
+			// не разобрался» — разные ответы, и клиент не должен повторять
+			// запрос, который служба не исполнит ни при каких доводах.
+			apiError(w, http.StatusForbidden, err)
+			return
+		}
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err)
 			return
@@ -279,6 +360,11 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusNotImplemented, errNoGraph)
 			return
 		}
+		leave, ok := enter(w, r)
+		if !ok {
+			return
+		}
+		defer leave()
 		res, err := o.Graph.Search(r.Context(), req.Collection, req.Query)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err)
@@ -400,6 +486,13 @@ type GraphSearchRequest struct {
 	Collection string `json:"collection"`
 	Query      string `json:"query"`
 }
+
+// ErrToolNotServed — служба этот инструмент не исполняет и исполнять не будет.
+//
+// Вход `/api/v1/graph/tool` принимает только инструменты графа: всё прочее,
+// от `bash` до `write_file`, означало бы чужие руки на машине службы.
+// GraphServer возвращает эту ошибку (обёрнутой), и вход отвечает 403.
+var ErrToolNotServed = errors.New("служба не исполняет этот инструмент")
 
 // errNoGraph — отказ, который объясняет себя.
 //

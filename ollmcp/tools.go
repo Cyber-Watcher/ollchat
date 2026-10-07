@@ -33,8 +33,9 @@ import (
 // двух представлений о том, что безопасно раздавать, быть не должно.
 var readOnlyTools = tools.ReadOnlyNames()
 
-// build собирает сервер по настройкам ollchat.
-func build(cfg *config.Config, service bool) (*mcp.Server, kbserve.Opts, error) {
+// build собирает сервер по настройкам ollchat. so — политика и журнал службы:
+// собираются они той же mcp.NewService, что и у `ollchat --serve --mcp`.
+func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server, kbserve.Opts, error) {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return nil, kbserve.Opts{}, fmt.Errorf("база знаний %s: %w", cfg.KB.Dir, err)
@@ -47,9 +48,14 @@ func build(cfg *config.Config, service bool) (*mcp.Server, kbserve.Opts, error) 
 		return nil, kbserve.Opts{}, err
 	}
 
+	// Вектор вопроса служба считает через первый сервер конфига — и с его
+	// заголовками, как диалог со своим сервером. Без них Ollama за прокси
+	// с авторизацией отказывала эмбеддеру, и служба молча откатывалась
+	// на поиск по словам.
 	fallback := ""
+	var headers map[string]string
 	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
+		fallback, headers = cfg.Servers[0].URL, cfg.Servers[0].Headers
 	}
 
 	enabled := make([]string, 0, len(readOnlyTools))
@@ -129,18 +135,22 @@ func build(cfg *config.Config, service bool) (*mcp.Server, kbserve.Opts, error) 
 		AnswerStyle:    cfg.KB.AnswerStyle,
 		SearxURL:       cfg.Web.SearxngURL,
 		SearxTimeout:   cfg.Web.TimeoutDuration(),
-		Embedder:       kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, nil),
+		Embedder:       kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
 	})
 	if err != nil {
 		return nil, kbserve.Opts{}, err
 	}
-	return mcp.NewServer(registry, statusTool(base, cfg.Graph.Rules(), graphCache)),
+	srv, err := mcp.NewService(registry, []mcp.Tool{statusTool(base, cfg.Graph.Rules(), graphCache)}, so)
+	if err != nil {
+		return nil, kbserve.Opts{}, err
+	}
+	return srv,
 		kbserve.Opts{
 			TableBoost: cfg.KB.TableBoost,
 			Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
 			RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
 			Base:       base,
-			Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, nil),
+			Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
 			Default:    cfg.KB.Default,
 			Token:      kbserve.Token(),
 		}, nil

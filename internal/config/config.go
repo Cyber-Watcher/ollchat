@@ -69,6 +69,11 @@ type Config struct {
 	// Path — фактический путь, откуда загружен конфиг (не из файла).
 	Path string `toml:"-"`
 
+	// Warnings — замечания к файлу, которые запуск не останавливают:
+	// неизвестные ключи, см. unknownKeys. Печатаются при запуске, до
+	// интерфейса. Не настройка: в TOML не читается.
+	Warnings []string `toml:"-"`
+
 	// sections — разделы, написанные в самом файле. Пусто означает «файла
 	// не было»; см. Has.
 	sections []string
@@ -451,6 +456,16 @@ type Sandbox struct {
 	FollowSymlinks bool   `toml:"follow_symlinks"`
 	MaxFileKB      int    `toml:"max_file_kb"`
 	MaxPDFMB       int    `toml:"max_pdf_mb"`
+
+	// Isolation — изоляция команд bash средствами ОС: "" — выключена,
+	// "bwrap" — bubblewrap (только Linux). Зачем и что она даёт — в шаблоне
+	// конфига и в sandbox.go.
+	Isolation string `toml:"isolation"`
+	// IsolationNetwork — оставить командам сеть внутри изоляции.
+	IsolationNetwork bool `toml:"isolation_network"`
+	// IsolationHide — что спрятать от команд пустым каталогом (файл —
+	// пустым файлом). Пути раскрываются при проверке конфига.
+	IsolationHide []string `toml:"isolation_hide"`
 }
 
 // KB — база знаний по книгам.
@@ -1360,25 +1375,34 @@ func Default() *Config {
 			MaxRetries:    2,
 			CompactAt:     0.75,
 			CompactKeep:   6,
+			// Тот же список, что в образце конфига (template.go): поиск слит
+			// в один search по замеру 25.09.2026, а умолчание оставалось
+			// с kb_search, и конфиг без tools получал не тот набор, что
+			// созданный --init-config. Расхождение ловит TestTemplateMatchesDefaults.
 			Tools: []string{"read_file", "list_dir", "grep", "write_file", "edit_file",
-				"bash", "http_fetch", "view_image", "scan_redact", "kb_search", "kb_read"},
+				"bash", "http_fetch", "view_image", "scan_redact", "search", "kb_read",
+				"graph_entity", "graph_path"},
 			BashTimeout: "120s",
 			MaxOutputKB: 64,
 		},
 		Permissions: Permissions{
-			Allow: []string{"Read(./**)", "Bash(go build:*)", "Bash(go test:*)", "Bash(git status:*)", "Bash(git diff:*)"},
-			Ask:   []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
+			// Списки совпадают с образцом (--init-config) слово в слово и в том же
+			// порядке: конфиг без раздела [permissions] берёт их отсюда, и машина
+			// с «нетронутыми» настройками не должна получать другие права, чем
+			// созданная командой --init-config. Сверяет TestTemplateMatchesDefaults.
+			Allow: []string{"Read(./**)", "Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)",
+				"Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(ls:*)"},
+			Ask: []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
 			Deny: []string{
-				"Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)",
-				"Write(~/.ssh/**)",
-				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(sudo:*)", "Bash(su:*)",
-				"Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(dd:*)", "Bash(fdisk:*)", "Bash(parted:*)",
+				"Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
+				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
+				"Bash(mount:*)", "Bash(umount:*)",
+				"Bash(sudo:*)", "Bash(su:*)", "Bash(useradd:*)", "Bash(userdel:*)", "Bash(passwd:*)", "Bash(visudo:*)",
+				"Bash(chmod:*)", "Bash(chown:*)",
 				"Bash(shutdown:*)", "Bash(reboot:*)", "Bash(halt:*)", "Bash(poweroff:*)", "Bash(init:*)",
-				"Bash(chmod:*)", "Bash(chown:*)", "Bash(mount:*)", "Bash(umount:*)",
-				"Bash(kill:*)", "Bash(killall:*)", "Bash(pkill:*)",
 				"Bash(systemctl:*)", "Bash(service:*)", "Bash(crontab:*)",
-				"Bash(apt:*)", "Bash(apt-get:*)", "Bash(dpkg:*)", "Bash(snap:*)",
-				"Bash(useradd:*)", "Bash(userdel:*)", "Bash(passwd:*)", "Bash(visudo:*)",
+				"Bash(kill:*)", "Bash(killall:*)", "Bash(pkill:*)",
+				"Bash(apt:*)", "Bash(apt-get:*)", "Bash(dpkg:*)", "Bash(snap:*)", "Bash(pip:*)",
 				"Bash(iptables:*)", "Bash(nft:*)", "Bash(ip:*)",
 				"Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ssh:*)", "Bash(scp:*)",
 			},
@@ -1452,6 +1476,11 @@ func Default() *Config {
 			FollowSymlinks: false,
 			MaxFileKB:      512,
 			MaxPDFMB:       64,
+			// Изоляция выключена: включается сознательно, она меняет среду
+			// команд (всё вне корня — только чтение, /tmp свой).
+			Isolation:        "",
+			IsolationNetwork: true,
+			IsolationHide:    []string{"~/.ssh", "~/.gnupg", "~/.aws", "~/.config/ollchat"},
 		},
 		Servers: []Server{{
 			Name:      "local",
@@ -1552,9 +1581,11 @@ func Load(path string) (cfg *Config, exists bool, err error) {
 	}
 
 	// Настройки отдельных графов: [graph.lab] поверх общего [graph].
-	if loaded.GraphNamed, err = namedGraphs(string(data), loaded.Graph); err != nil {
+	var namedUnknown []string
+	if loaded.GraphNamed, namedUnknown, err = namedGraphs(string(data), loaded.Graph); err != nil {
 		return nil, true, fmt.Errorf("разбор конфига %s: %w", path, err)
 	}
+	loaded.Warnings = unknownKeys(md.Undecoded(), loaded.GraphNamed, namedUnknown)
 
 	if err := loaded.finalize(); err != nil {
 		return nil, true, err
@@ -1572,37 +1603,92 @@ func Load(path string) (cfg *Config, exists bool, err error) {
 // Наследование по полям: раздел графа перекрывает только те настройки, которые
 // в нём написаны, остальные берутся из общего [graph]. Поэтому подраздел
 // разбирается ПОВЕРХ копии общих настроек, а не отдельно.
-func namedGraphs(data string, base Graph) (map[string]Graph, error) {
+//
+// Вторым значением идут неизвестные ключи подразделов ("graph.lab.modle"):
+// общий разбор их не видит — для него весь подраздел вне настроек.
+func namedGraphs(data string, base Graph) (map[string]Graph, []string, error) {
 	var raw map[string]any
 	if _, err := toml.Decode(data, &raw); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sec, _ := raw["graph"].(map[string]any)
 	if len(sec) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	out := map[string]Graph{}
+	var unknown []string
 	for name, v := range sec {
 		sub, ok := v.(map[string]any)
 		if !ok {
 			continue // обычная настройка общего раздела, а не подраздел графа
 		}
 		if !graph.ValidName(name) || name == "" {
-			return nil, fmt.Errorf("graph.%s: недопустимое имя графа "+
+			return nil, nil, fmt.Errorf("graph.%s: недопустимое имя графа "+
 				"(строчные латинские буквы, цифры и дефис, до 32 знаков)", name)
 		}
 		var buf bytes.Buffer
 		if err := toml.NewEncoder(&buf).Encode(sub); err != nil {
-			return nil, fmt.Errorf("graph.%s: %w", name, err)
+			return nil, nil, fmt.Errorf("graph.%s: %w", name, err)
 		}
 		eff := base
-		if _, err := toml.Decode(buf.String(), &eff); err != nil {
-			return nil, fmt.Errorf("graph.%s: %w", name, err)
+		md, err := toml.Decode(buf.String(), &eff)
+		if err != nil {
+			return nil, nil, fmt.Errorf("graph.%s: %w", name, err)
+		}
+		for _, k := range md.Undecoded() {
+			unknown = append(unknown, "graph."+name+"."+k.String())
 		}
 		eff.Name = name
 		out[name] = eff
 	}
-	return out, nil
+	return out, unknown, nil
+}
+
+// unknownKeys — предупреждения о ключах файла, которым не нашлось настройки.
+//
+// Опечатка в имени ключа молча оставляла умолчание: `[permissions] deny_list`
+// вместо deny не запрещал ничего, и узнать об этом было не из чего (аудит
+// 07.10.2026; ollmcp свой файл так проверяет давно). Это предупреждение,
+// а не отказ — решение владельца: ключ, убранный из программы, не должен
+// мешать запуску со старым конфигом.
+//
+// Пропускаются подразделы [graph.<имя>] — их ключи сверяет namedGraphs —
+// и свободные словари: options сервера уходит в Ollama как есть, и вложенные
+// таблицы в нём законны. Неизвестный раздел называется один раз, без
+// перечисления всего, что в нём написано.
+func unknownKeys(undecoded []toml.Key, named map[string]Graph, namedUnknown []string) []string {
+	seen := make(map[string]bool, len(undecoded))
+	for _, k := range undecoded {
+		seen[k.String()] = true
+	}
+	var keys []string
+	for _, k := range undecoded {
+		if len(k) >= 2 && k[0] == "graph" {
+			if _, ok := named[k[1]]; ok {
+				continue
+			}
+		}
+		if len(k) >= 2 && k[0] == "servers" && k[1] == "options" {
+			continue
+		}
+		top := true
+		for i := 1; i < len(k); i++ {
+			if seen[k[:i].String()] {
+				top = false // о разделе уже сказано целиком
+				break
+			}
+		}
+		if top {
+			keys = append(keys, k.String())
+		}
+	}
+	keys = append(keys, namedUnknown...)
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf("неизвестный ключ %s не действует — опечатка или устаревшая настройка?", k))
+	}
+	return out
 }
 
 // GraphFor отдаёт настройки для названного графа: раздел графа поверх общего.
@@ -2158,6 +2244,9 @@ func (c *Config) finalize() error {
 	}
 	if c.Sandbox.MaxFileKB <= 0 {
 		c.Sandbox.MaxFileKB = 512
+	}
+	if err := c.Sandbox.validate(); err != nil {
+		return err
 	}
 
 	if len(c.Servers) == 0 {

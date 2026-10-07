@@ -2,7 +2,10 @@
 package session
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
@@ -136,13 +140,20 @@ func NewStore(dir string) *Store { return &Store{dir: dir} }
 // Dir возвращает каталог хранилища.
 func (s *Store) Dir() string { return s.dir }
 
-// Save записывает диалог в файл <id>.json. Идентификатор формируется из времени.
+// Save записывает диалог в файл <id>.json. Идентификатор — время сохранения
+// и случайный хвост, см. newID.
+//
+// Запись атомарная: сохранение, оборванное посреди файла, раньше оставляло
+// обрезанный JSON, который List молча пропускал, — диалог пропадал без следа.
 func (s *Store) Save(c *Conversation, server, model string) (string, error) {
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := privateDir(s.dir); err != nil {
 		return "", err
 	}
 	now := time.Now()
-	id := now.Format("2006-01-02_150405")
+	id, err := s.newID(now)
+	if err != nil {
+		return "", err
+	}
 	rec := Saved{
 		ID:       id,
 		SavedAt:  now,
@@ -156,10 +167,53 @@ func (s *Store) Save(c *Conversation, server, model string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(s.dir, id+".json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := fsx.WriteFileAtomic(path, data, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// newID — идентификатор нового сохранения: время до секунды, как раньше,
+// и случайный хвост.
+//
+// Одного времени мало: два /save за одну секунду — из двух окон tmux или
+// подряд из одного — получали одно имя, и второе молча затирало первое.
+// Хвост случайный, а не счётчик, потому что сохраняют и разные процессы,
+// а проверка «имя свободно» между ними не договорится.
+func (s *Store) newID(now time.Time) (string, error) {
+	stamp := now.Format("2006-01-02_150405")
+	for range 100 {
+		var b [3]byte
+		_, _ = rand.Read(b[:]) // crypto/rand не возвращает ошибок с Go 1.24
+		id := stamp + "-" + hex.EncodeToString(b[:])
+		if _, err := os.Lstat(filepath.Join(s.dir, id+".json")); errors.Is(err, os.ErrNotExist) {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("не нашлось свободного имени сессии в %s", s.dir)
+}
+
+// privateDir создаёт каталог сессий закрытым от чужих (0700) и закрывает
+// уже существующий.
+//
+// В сессии лежит весь диалог: вопросы, ответы, прочитанные моделью файлы,
+// вывод команд. Каталог создавался 0755, и имена сессий видели все; а там,
+// где он не наш, закрыть его не выйдет — и это повод отказаться, а не писать
+// диалог туда, где его может подменить хозяин каталога.
+func privateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("каталог сессий %s открыт другим (%o), а закрыть его не удалось: %w", dir, perm, err)
+		}
+	}
+	return nil
 }
 
 // List возвращает сохранённые сессии, начиная с самых свежих.

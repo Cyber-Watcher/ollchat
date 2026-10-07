@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -98,16 +99,31 @@ func NewServer(registry *tools.Registry, extra ...Tool) *Server {
 	return &Server{registry: registry, extra: extra}
 }
 
+// nullID — id ответа, когда id запроса узнать не из чего. JSON-RPC 2.0
+// требует в таком ответе "id": null: ответ вовсе без id клиент не может
+// сопоставить ни с чем и молча отбрасывает, а ждущий запрос висит до таймаута.
+var nullID = json.RawMessage("null")
+
 // Handle обрабатывает одно сообщение и возвращает ответ.
 //
 // Пустой ответ означает уведомление — на него по протоколу отвечать нельзя.
 func (s *Server) Handle(ctx context.Context, raw []byte) []byte {
+	raw = bytes.TrimSpace(raw)
 	var req rpcRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return must(rpcResponse{JSONRPC: "2.0", Error: &rpcError{codeParse, "не разобрано: " + err.Error()}})
+		switch {
+		case !json.Valid(raw):
+			return must(rpcResponse{JSONRPC: "2.0", ID: nullID,
+				Error: &rpcError{codeParse, "не разобрано: " + err.Error()}})
+		case len(raw) > 0 && raw[0] == '[':
+			return refuseBatch(raw)
+		}
+		// JSON цел, но это не запрос: строка, число или поле не того типа.
+		return must(rpcResponse{JSONRPC: "2.0", ID: idOrNull(req.ID),
+			Error: &rpcError{codeInvalidRequest, "не запрос JSON-RPC: " + err.Error()}})
 	}
 	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
-		return must(rpcResponse{JSONRPC: "2.0", ID: req.ID,
+		return must(rpcResponse{JSONRPC: "2.0", ID: idOrNull(req.ID),
 			Error: &rpcError{codeInvalidRequest, "нужен jsonrpc 2.0"}})
 	}
 	// Уведомление: идентификатора нет, ответа быть не должно.
@@ -120,6 +136,50 @@ func (s *Server) Handle(ctx context.Context, raw []byte) []byte {
 		return must(rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: rerr})
 	}
 	return must(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
+}
+
+// idOrNull — id запроса, а если его нет — null.
+func idOrNull(id json.RawMessage) json.RawMessage {
+	if len(id) == 0 {
+		return nullID
+	}
+	return id
+}
+
+// refuseBatch отвечает на пакет запросов (JSON-массив).
+//
+// Пакетов служба не умеет, а MCP 2025-06-18 их и вовсе убрал. Прежде массив
+// получал «не разобрано» (-32700), хотя разобран он был: клиент искал ошибку
+// в своём JSON. Теперь каждый запрос пакета получает свой отказ -32600 со
+// своим id — клиент сопоставит его с ожидающим вызовом; уведомлениям ответа
+// нет, как и положено; на пустой пакет — один отказ с id null (JSON-RPC 2.0).
+func refuseBatch(raw []byte) []byte {
+	const why = "пакеты запросов не поддерживаются: шлите запросы по одному"
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return must(rpcResponse{JSONRPC: "2.0", ID: nullID,
+			Error: &rpcError{codeInvalidRequest, "пустой пакет запросов"}})
+	}
+	out := make([]rpcResponse, 0, len(items))
+	for _, it := range items {
+		var r struct {
+			ID json.RawMessage `json:"id"`
+		}
+		isObject := json.Unmarshal(it, &r) == nil
+		if isObject && len(r.ID) == 0 {
+			continue // уведомление: ответа нет и в пакете
+		}
+		out = append(out, rpcResponse{JSONRPC: "2.0", ID: idOrNull(r.ID),
+			Error: &rpcError{codeInvalidRequest, why}})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return must(rpcResponse{JSONRPC: "2.0", ID: nullID, Error: &rpcError{codeInvalidRequest, why}})
+	}
+	return b
 }
 
 func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, *rpcError) {
@@ -361,7 +421,7 @@ func callResult(text string, err error) map[string]any {
 func must(v rpcResponse) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":%d,"message":"ответ не собрался"}}`, codeInternal))
+		return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":"ответ не собрался"}}`, codeInternal))
 	}
 	return b
 }

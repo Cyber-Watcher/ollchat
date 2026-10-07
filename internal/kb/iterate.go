@@ -170,11 +170,19 @@ func InFolder(path, folder string) bool {
 }
 
 // book ищет книгу без блокировки — вызывается изнутри уже занятого замка.
+// По указателю, а не перебором: её зовут на каждом куске обхода.
 func (c *Collection) book(id uint32) (BookRec, bool) {
-	for _, d := range c.docs {
-		if d.ID == id {
-			return d, true
+	if c.byID == nil {
+		// Коллекция собрана вручную (тесты), указателя нет — перебор.
+		for _, d := range c.docs {
+			if d.ID == id && id != 0 {
+				return d, true
+			}
 		}
+		return BookRec{}, false
+	}
+	if i, ok := c.byID[id]; ok {
+		return c.docs[i], true
 	}
 	return BookRec{}, false
 }
@@ -297,6 +305,11 @@ func (c *Collection) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 	}
 	if b, found := c.book(rec.Doc); found {
 		info.Book = b
+		// Кусок удалённой книги по ссылке читается — граф хранит ссылки
+		// и на них, — но признак удалённости обязан дойти до вызывающего:
+		// до 07.10.2026 он был ложным всегда, и подтверждения графа выдавали
+		// удалённые книги наравне с живыми.
+		info.Book.Deleted = c.deleted[rec.Doc]
 		if b.UnitWord == "разделов" {
 			info.Unit = "разд."
 		}

@@ -1,6 +1,7 @@
 package kb
 
 import (
+	"container/heap"
 	"context"
 	"runtime"
 	"sort"
@@ -148,7 +149,10 @@ func (c *Collection) searchVectors(query []int8, limit int, allow map[uint32]boo
 		wg.Add(1)
 		go func(w, from, to int) {
 			defer wg.Done()
-			local := make([]Hit, 0, limit)
+			// Верхушка копится кучей на limit мест, а не полным списком
+			// с сортировкой: прежде каждый поток сортировал все свои куски
+			// с косинусом не ниже порога — десятки тысяч — ради двухсот.
+			local := make(worstFirst, 0, limit)
 			for i := from; i < to; i++ {
 				rec := c.store.Rec(i)
 				if allow != nil && !allow[rec.Doc] {
@@ -161,11 +165,14 @@ func (c *Collection) searchVectors(query []int8, limit int, allow map[uint32]boo
 				if cos < minCos {
 					continue // слабое совпадение не должно вытеснять сильное словесное
 				}
-				local = append(local, Hit{Chunk: i, Score: cos})
-			}
-			sort.Slice(local, func(a, b int) bool { return local[a].Score > local[b].Score })
-			if len(local) > limit {
-				local = local[:limit]
+				hit := Hit{Chunk: i, Score: cos}
+				switch {
+				case len(local) < limit:
+					heap.Push(&local, hit)
+				case betterHit(hit, local[0]):
+					local[0] = hit
+					heap.Fix(&local, 0)
+				}
 			}
 			parts[w] = local
 		}(w, from, to)
@@ -186,6 +193,31 @@ func (c *Collection) searchVectors(query []int8, limit int, allow map[uint32]boo
 		all = all[:limit]
 	}
 	return all
+}
+
+// betterHit — порядок выдачи по смыслу: выше косинус, при равном — меньший
+// номер куска. Порядок полный, поэтому верхушка не зависит от того, как куски
+// разошлись по потокам.
+func betterHit(a, b Hit) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	return a.Chunk < b.Chunk
+}
+
+// worstFirst — куча попаданий, на вершине которой худшее: его и вытесняет
+// новое, лучшее.
+type worstFirst []Hit
+
+func (h worstFirst) Len() int           { return len(h) }
+func (h worstFirst) Less(i, j int) bool { return betterHit(h[j], h[i]) }
+func (h worstFirst) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *worstFirst) Push(x any)        { *h = append(*h, x.(Hit)) }
+func (h *worstFirst) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
 }
 
 // fuse складывает списки по рангам с разными весами.

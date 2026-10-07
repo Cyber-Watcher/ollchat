@@ -10,7 +10,6 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
@@ -59,6 +58,10 @@ type graphState struct {
 	dir    string
 	stamp  int64
 	cache  *graph.Cache
+	// lent — графы, отданные подмешиванию в горутину команды, со счётом
+	// выдач. Такой граф closeGraph не закрывает, а только отпускает: закроет
+	// его returnGraph, когда подмешивание вернётся (см. automix.go).
+	lent map[*graph.Graph]int
 }
 
 // Model — состояние TUI.
@@ -123,7 +126,7 @@ type Model struct {
 	models     []ollama.ModelInfo
 
 	// Виджеты.
-	vp   viewport.Model
+	vp   feedView // окно ленты, см. feedview.go
 	ta   textarea.Model
 	spin spinner.Model
 	rend *renderer
@@ -141,6 +144,7 @@ type Model struct {
 	// Лента диалога.
 	blocks   []block
 	rendered []string
+	blockSeq uint64 // последний выданный номер блока, см. block.id
 
 	// Состояние генерации.
 	streaming  bool
@@ -165,9 +169,26 @@ type Model struct {
 	// сослались на один и тот же обмен.
 	turnID string
 
+	// compacting — история сжимается сводкой, а вопрос compactText ждёт
+	// конца сжатия (его отправит onCompactDone). Это занятое состояние, как
+	// ход: второй Enter не принимается, Esc сжатие прерывает, а
+	// compactCancel обрывает запрос к серверу.
+	compacting    bool
+	compactText   string
+	compactCancel context.CancelFunc
+
 	// Подтверждение действия.
 	confirm       *agent.ConfirmRequest
 	confirmScroll int
+	// confirmArmed — окно ещё не слушает клавиши: клавиатура не помолчала
+	// confirmQuiet с confirmQuietAt. Защита от упреждающего набора,
+	// подробности — в confirmguard.go. confirmSeq отличает последний взвод.
+	confirmArmed   bool
+	confirmQuietAt time.Time
+	confirmSeq     int
+
+	// clock — часы интерфейса; nil — настоящие. Подменяются в тестах.
+	clock func() time.Time
 
 	// pending — картинки, вставленные в ещё не отправленный вопрос.
 	// Живут до отправки: в сообщение попадут только те, чьи метки остались
@@ -274,14 +295,24 @@ type Model struct {
 	// job — идущая долгая задача (индексация книг). Она живёт отдельно от хода
 	// генерации: ресурсы разные, поэтому чат во время индексации работает.
 	job *kbJob
+	// jobEscAt — когда первый Esc нацелился на задачу: останавливает её только
+	// второй в пределах jobStopWindow (см. handleKey). quitWarnedJob —
+	// поколение задачи, о которой /quit уже предупредил.
+	jobEscAt      time.Time
+	quitWarnedJob int
 
 	// archive — идущий архив коллекции с графом, см. archive.go.
 	archive *archiveJob
 	// archiveErrShown — какой отказ планового архива уже показан: один и тот
-	// же каждые пять минут приучил бы не читать ленту.
+	// же каждые пять минут приучил бы не читать ленту. archiveErrHeld — отказ,
+	// придержанный до конца ответа и ещё не показанный.
 	archiveErrShown string
+	archiveErrHeld  string
 	// heldNotes — заметки, придержанные до конца ответа модели.
 	heldNotes []block
+	// heldAttach — файлы /add, дочитанные посреди хода: в историю они лягут,
+	// когда ход кончится (см. Update, attachMsg).
+	heldAttach []attachMsg
 }
 
 // New создаёт модель интерфейса.
@@ -687,16 +718,33 @@ func (m *Model) addBlockAndShow(b block) int {
 }
 
 func (m *Model) addBlock(b block) int {
+	m.blockSeq++
+	b.id = m.blockSeq
 	m.blocks = append(m.blocks, b)
 	m.rendered = append(m.rendered, m.rend.Render(b, m.showThinking))
 	m.refreshViewport(true)
 	return len(m.blocks) - 1
 }
 
+// blockIndex находит блок по номеру; -1 — его в ленте больше нет: лента
+// очищена или заменена восстановленной сессией.
+func (m *Model) blockIndex(id uint64) int {
+	if id == 0 {
+		return -1
+	}
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		if m.blocks[i].id == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *Model) updateBlock(i int, b block) {
 	if i < 0 || i >= len(m.blocks) {
 		return
 	}
+	b.id = m.blocks[i].id // перерисованный блок — тот же самый
 	m.blocks[i] = b
 	m.rendered[i] = m.rend.Render(b, m.showThinking)
 	m.refreshViewport(true)
@@ -715,14 +763,9 @@ func (m *Model) refreshViewport(stick bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	parts := make([]string, 0, len(m.rendered))
-	for _, r := range m.rendered {
-		if strings.TrimSpace(r) == "" {
-			continue
-		}
-		parts = append(parts, r)
-	}
-	m.vp.SetContent(strings.Join(parts, "\n\n"))
+	// Окно пересобирает только изменившиеся блоки (feedview.go): кусок потока
+	// стоит одного живого блока, а не всей истории.
+	m.vp.setParts(m.rendered)
 	if stick && atBottom {
 		m.vp.GotoBottom()
 	}
@@ -833,6 +876,7 @@ func (m *Model) send(text string) tea.Cmd {
 		m.mixing = true
 		m.mixOpening = job.needsOpen()
 		m.pendingImages = images
+		m.lendGraph(job.graphOpen)
 		prog := make(chan graph.OpenProgress, 64)
 		m.graphBarStart = time.Now()
 		return tea.Batch(runMixCmd(m.gen.mix, text, job, prog),
@@ -966,6 +1010,7 @@ func (m *Model) stopStreaming() {
 	m.events = nil
 	m.confirm = nil
 	m.confirmScroll = 0
+	m.confirmArmed = false
 
 	// Обмен могли прервать, пока считалось подмешивание: ответ команды придёт,
 	// но относиться будет к брошенному вопросу. Отделяем его поколением, а
@@ -983,22 +1028,12 @@ func (m *Model) stopStreaming() {
 	if m.streaming {
 		m.finishTurn()
 	}
+	m.flushHeldAttach()
 }
 
 // finishTurn завершает обмен: пишет ответ в журнал и сбрасывает состояние.
 func (m *Model) finishTurn() {
 	m.streaming = false
-	// Придержанное сообщение о состоянии графа показываем теперь: в середину
-	// ответа влезать нельзя, а забывать о беде — тем более.
-	if m.healthWaiting {
-		m.healthWaiting = false
-		if text := healthHintText(m.healthAdvice, m.kb.use); text != "" && text != m.healthShown {
-			defer func() {
-				m.addBlock(block{kind: blockHint, text: text})
-				m.healthShown = text
-			}()
-		}
-	}
 	m.events = nil
 	if m.cancel != nil {
 		m.cancel()
@@ -1031,6 +1066,12 @@ func (m *Model) finishTurn() {
 
 	m.liveIdx = -1
 	m.thinkIdx = -1
+	// Файлы, дочитанные посреди хода, — теперь, когда историю никто
+	// не дописывает.
+	m.flushHeldAttach()
+	// Придержанные заметки об архиве и о состоянии графа — теперь: в середину
+	// ответа влезать нельзя, а забывать о беде — тем более.
+	m.flushHeldNotes()
 }
 
 // stampTurn помечает блоки ответа завершившегося хода временем и моделью.
@@ -1110,16 +1151,53 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 	keepAlive, options := m.server.KeepAlive, maps.Clone(m.server.Options)
 	m.gen.compact++
 	gen := m.gen.compact
-	m.statusMsg = "сжимаю историю сводкой…"
+	// Сжатие — занятое состояние, как ход: раньше второй Enter запускал
+	// второе Summarize, а ответ на первое отбрасывался по поколению вместе
+	// с первым вопросом; Esc сжатие не прерывал (аудит 07.10.2026).
+	ctx, cancel := contextWithTimeout(300)
+	m.compacting, m.compactText, m.compactCancel = true, text, cancel
+	m.statusMsg = "сжимаю историю сводкой… Esc — прервать"
 	m.addBlock(block{kind: blockHint, text: fmt.Sprintf(
 		"окно заполнено на %d%% — сжимаю %d сообщений сводкой моделью %s, вопрос уйдёт следом",
 		100*m.meter.Used/m.meter.Capacity, len(older), model)})
 	return tea.Batch(m.spin.Tick, func() tea.Msg {
-		ctx, cancel := contextWithTimeout(300)
 		defer cancel()
 		summary, stats, err := session.Summarize(ctx, client, model, older, keepAlive, options)
 		return compactDoneMsg{gen: gen, text: text, summary: summary, stats: stats, err: err}
 	}), true
+}
+
+// cancelCompaction бросает идущее сжатие: запрос к серверу обрывается, а его
+// ответ, если всё же придёт, отбросится по поколению. Отдаёт вопрос, который
+// ждал сжатия.
+func (m *Model) cancelCompaction() (string, bool) {
+	if !m.compacting {
+		return "", false
+	}
+	if m.compactCancel != nil {
+		m.compactCancel()
+	}
+	m.gen.compact++
+	text := m.compactText
+	m.compacting, m.compactText, m.compactCancel = false, "", nil
+	m.statusMsg = ""
+	return text, true
+}
+
+// abortCompaction прерывает сжатие и возвращает человеку его вопрос: тот ещё
+// не ушёл ни модели, ни в ленту, и молча пропасть не должен.
+func (m *Model) abortCompaction(why string) {
+	text, ok := m.cancelCompaction()
+	if !ok {
+		return
+	}
+	where := "стрелка вверх вернёт его"
+	if strings.TrimSpace(m.ta.Value()) == "" {
+		m.setInput(text)
+		where = "он возвращён в поле ввода"
+	}
+	m.addBlock(block{kind: blockNotice, text: why + ": сжатие истории прервано, вопрос не отправлен — " + where})
+	m.flushHeldAttach()
 }
 
 // onCompactDone кладёт сводку в историю (или обрезает, если сводки нет)
@@ -1128,6 +1206,7 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != m.gen.compact {
 		return m, nil
 	}
+	m.compacting, m.compactText, m.compactCancel = false, "", nil
 	m.statusMsg = ""
 	keep := m.cfg.Agent.CompactKeep
 	var dropped int
@@ -1154,5 +1233,8 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	// врёт, и повторного сжатия на нём не будет.
 	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
 	m.meter.Exact = false
+	// Файлы /add, дочитанные во время сжатия, — до вопроса: их прикладывали
+	// к нему.
+	m.flushHeldAttach()
 	return m, m.send(msg.text)
 }

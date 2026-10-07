@@ -235,6 +235,17 @@ func AbstainNote(s Signals, gap float64) string {
 		"а скажи, что в библиотеке этого не нашлось, если они не по вопросу.", s.Top1Gap, gap)
 }
 
+// clean убирает из зависимостей nil конкретного типа: kbembed.New
+// и kbrerank.New отдают его, когда смысл или вторая ступень не настроены,
+// и в интерфейсе он проходит проверку `!= nil`. Без этого поиск шёл к пустому
+// эмбеддеру и писал «смысловой поиск недоступен (<nil>)», а реранкер считался
+// настроенным (аудит 07.10.2026).
+func (d Deps) clean() Deps {
+	d.Embedder = kb.EmbedderOrNil(d.Embedder)
+	d.Reranker = kb.RerankerOrNil(d.Reranker)
+	return d
+}
+
 // source — где искать по книгам.
 func (d Deps) source() kb.Source {
 	if d.Source != nil {
@@ -304,6 +315,7 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 	if d.source() == nil {
 		return Result{}, fmt.Errorf("коллекция не выбрана")
 	}
+	d = d.clean()
 	o = o.norm()
 	res := Result{Query: query, Collection: o.Collection}
 	started := time.Now()
@@ -412,6 +424,7 @@ func Books(ctx context.Context, d Deps, search, question string, o Opts) ([]kb.R
 	if d.source() == nil {
 		return nil, "", fmt.Errorf("коллекция не выбрана")
 	}
+	d = d.clean()
 	o = o.norm()
 	_, emb, why := QueryVector(ctx, d, question, o)
 	hits, note, err := d.books(ctx, search, question, emb, o)
@@ -505,6 +518,7 @@ func QueryVector(ctx context.Context, d Deps, query string, o Opts) ([]int8, kb.
 	if !o.Semantic {
 		return nil, nil, ""
 	}
+	d = d.clean()
 	if d.Embedder == nil {
 		return nil, nil, "смысловой поиск не настроен (kb.embed_model) — искал по словам"
 	}
@@ -539,11 +553,17 @@ func QueryVector(ctx context.Context, d Deps, query string, o Opts) ([]int8, kb.
 }
 
 // fromGraph превращает подтверждения графа в выдержки.
+//
+// Граф помнит и удалённые книги, и прежние версии перечитанных: его ссылки
+// переживают и то и другое. В выдачу такие куски не идут — поиск по книгам их
+// тоже не показывает, и выдержка из книги, которую человек убрал, читалась бы
+// как ошибка удаления. Кусок без записи в реестре (прежняя версия книги) узнаётся
+// по пустому номеру книги.
 func fromGraph(src *kb.Collection, keys []graph.ChunkKey, o Opts) []Excerpt {
 	out := make([]Excerpt, 0, len(keys))
 	for _, k := range keys {
 		info, ok := src.ChunkByRef(k.Doc, k.Ord)
-		if !ok {
+		if !ok || info.Book.ID == 0 || info.Book.Deleted {
 			continue
 		}
 		out = append(out, Excerpt{

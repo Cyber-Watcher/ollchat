@@ -78,8 +78,7 @@ type reviewPanel struct {
 	g      *graph.Graph
 	kbc    *kb.Collection // для выдержек по сторонам пары; nil — без них
 	items  []reviewItem
-	done   int    // решено за это открытие
-	last   string // последнее решение — для строки заголовка
+	done   int // решено за это открытие
 	rows   int
 	undo   []reviewItem // что убрано из списка последним решением (для u)
 	undoAt []int
@@ -375,6 +374,13 @@ func (m *Model) onReviewReady(msg reviewReadyMsg) {
 	if msg.err != nil {
 		m.addBlock(block{kind: blockError, text: msg.err.Error()})
 		return
+	}
+	// Окно уже открыто: вторую /graph review дали, пока открывался граф
+	// первой, — или ответ первой пришёл позже. Прежнее окно закрывается
+	// вместе со своим графом, иначе тот висел бы в памяти до выхода, с
+	// открытыми журналами (аудит 07.10.2026).
+	if m.review != nil {
+		m.closeReviewPanel()
 	}
 	m.files, m.cmds, m.images = nil, nil, nil
 	m.closeFindPanel()

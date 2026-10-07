@@ -133,7 +133,7 @@ func (g *Graph) EmbedStale(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	}
 	o = o.norm()
 
-	release, err := lockVectors(g.dir)
+	release, err := g.lockVectorsFresh()
 	if err != nil {
 		return 0, err
 	}

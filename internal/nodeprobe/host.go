@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -48,6 +49,7 @@ func (r *Report) collectService(ctx context.Context, o Opts) {
 		r.miss("service", "не удалось спросить systemd о службе %s: %v", o.Service, err)
 		return
 	}
+	envSeen := false
 	for _, line := range strings.Split(out, "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok {
@@ -65,10 +67,12 @@ func (r *Report) collectService(ctx context.Context, o Opts) {
 				r.Service.ActiveSince = val
 			}
 		case "Environment":
-			r.Service.Env = parseEnv(val)
+			env := parseEnv(val)
+			envSeen = len(env) > 0
+			r.Service.Env = publicEnv(env)
 		}
 	}
-	if len(r.Service.Env) == 0 {
+	if !envSeen {
 		// Переменные могут лежать в EnvironmentFile — тогда systemd их здесь
 		// не показывает. Молчать об этом нельзя: пустая карта переменных
 		// неотличима от «ничего не задано», а это разные вещи.
@@ -92,6 +96,56 @@ func parseEnv(s string) map[string]string {
 		return nil
 	}
 	return env
+}
+
+// envPrefixes — какие переменные службы попадают в снимок.
+//
+// Перечисление, а не вычитание опасного: в юнит кладут что угодно — ключи
+// облака, пароли прокси, токены соседних служб, — и раньше всё это уходило
+// по сети каждому, у кого есть токен наблюдателя. Снимку же нужны настройки
+// самой Ollama (слоты, каталог моделей) и видеокарт.
+var envPrefixes = []string{"OLLAMA_", "CUDA_", "NVIDIA_", "HIP_", "ROCR_", "GPU_", "ROCM_", "HSA_"}
+
+// secretName — имя переменной, похожее на секрет. Такие значения скрываются
+// и среди разрешённых: ключ к Ollama за прокси — тоже OLLAMA_*.
+var secretName = regexp.MustCompile(`(?i)(KEY|TOKEN|SECRET|PASS|AUTH|CRED|COOKIE|SESSION|PRIVATE|SIGN)`)
+
+// hiddenValue — что показывается вместо значения, похожего на секрет. Само
+// имя остаётся: «задано» и «не задано» — разные ответы.
+const hiddenValue = "(скрыто)"
+
+// publicEnv оставляет переменные из envPrefixes и скрывает похожие на секрет.
+func publicEnv(env map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range env {
+		if !hasAnyPrefix(k, envPrefixes) {
+			continue
+		}
+		if secretName.MatchString(k) || urlWithPassword(v) {
+			v = hiddenValue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// urlWithPassword — адрес с учётной записью внутри (http://user:pass@host).
+// Разбор нарочно грубый: url.Parse отвергает «неправильный» пароль (с пробелом,
+// кириллицей) и выпустил бы его как есть, а лишний раз скрытый адрес безвреден.
+func urlWithPassword(v string) bool {
+	return strings.Contains(v, "://") && strings.Contains(v, "@")
 }
 
 // splitFields режет по пробелам, не разрывая значения в кавычках.

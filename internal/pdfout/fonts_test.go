@@ -132,7 +132,7 @@ func TestCoverageMatchesGopdf(t *testing.T) {
 	}
 	pdf.AddPage()
 
-	probe := []rune("Ая Zz 0 ₽₴₸€ ✓✗★ →⇒ ─│├╔┏ ░▒█ №℃ ≈≠≤ ⌀⏎ …—«»")
+	probe := "Ая Zz 0 ₽₴₸€ ✓✗★ →⇒ ─│├╔┏ ░▒█ №℃ ≈≠≤ ⌀⏎ …—«»"
 	for key, cover := range covers {
 		if err := pdf.SetFont(key.family, key.style, 10); err != nil {
 			t.Fatalf("шрифт %s%s: %v", key.family, key.style, err)

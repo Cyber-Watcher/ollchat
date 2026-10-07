@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Store — раскладка результатов прогонов на диске.
@@ -59,6 +61,11 @@ func SafeName(model string) string {
 }
 
 // WriteJSON пишет значение в файл каталога попытки.
+//
+// Запись атомарная: по одному лишь наличию metrics.json попытка считается
+// сделанной (Done), и файл, оборванный посреди записи (kill, пропало
+// питание), навсегда засчитывал бы попытку с битыми метриками — заново её
+// ночь уже не прогнала бы. Паспорт ночи так же переписывается целиком.
 func WriteJSON(dir, name string, v any) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -67,15 +74,15 @@ func WriteJSON(dir, name string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, name), append(b, '\n'), 0o644)
+	return fsx.WriteFileAtomic(filepath.Join(dir, name), append(b, '\n'), 0o644)
 }
 
-// WriteText пишет текст в файл каталога попытки.
+// WriteText пишет текст в файл каталога попытки — атомарно, как WriteJSON.
 func WriteText(dir, name, text string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644)
+	return fsx.WriteFileAtomic(filepath.Join(dir, name), []byte(text), 0o644)
 }
 
 // AppendIndex дописывает строку в index.jsonl ночи.
@@ -108,6 +115,57 @@ type Passport struct {
 	Suites        []string    `json:"suites"`
 	Models        []ModelCard `json:"models"`
 	Note          string      `json:"note,omitempty"`
+
+	// Resumes — заходы в ночь после первого, см. resumePassport.
+	Resumes []PassportResume `json:"resumes,omitempty"`
+}
+
+// PassportResume — заход в уже начатую ночь: с чем он шёл и что поменялось.
+type PassportResume struct {
+	At            time.Time `json:"at"`
+	OllamaVersion string    `json:"ollama_version"`
+	NumCtx        int       `json:"num_ctx"`
+	Repeats       int       `json:"repeats"`
+	Deadline      time.Time `json:"deadline"`
+	Suites        []string  `json:"suites"`
+	Note          string    `json:"note,omitempty"`
+	// Changed — модели, которых в паспорте не было, сменившие digest (под тем
+	// же тегом легли другие веса) или участие в прогоне.
+	Changed []ModelCard `json:"changed_models,omitempty"`
+}
+
+// resumePassport — паспорт для нового захода в ночь, где prev — паспорт,
+// уже лежащий на диске (nil — ночь новая).
+//
+// Ночь докатывается многими заходами: тик раз в четверть часа поднимает
+// умерший прогон, недоделанное доезжает следующей ночью. Раньше каждый заход
+// переписывал run.json целиком: пропадали время начала, пометка и карточки
+// моделей, с которыми ночь начиналась, а смена весов под тем же тегом
+// посреди ночи не оставляла следа. Теперь паспорт — запись первого захода,
+// новые модели добавляются в его список, а каждый следующий заход
+// дописывается в Resumes вместе с тем, что изменилось.
+func resumePassport(prev, cur *Passport) *Passport {
+	if prev == nil {
+		return cur
+	}
+	known := make(map[string]ModelCard, len(prev.Models))
+	for _, c := range prev.Models {
+		known[c.Name] = c
+	}
+	r := PassportResume{At: cur.StartedAt, OllamaVersion: cur.OllamaVersion, NumCtx: cur.NumCtx,
+		Repeats: cur.Repeats, Deadline: cur.Deadline, Suites: cur.Suites, Note: cur.Note}
+	for _, c := range cur.Models {
+		old, ok := known[c.Name]
+		if !ok {
+			prev.Models = append(prev.Models, c)
+		}
+		if !ok || old.Digest != c.Digest || old.Skipped != c.Skipped {
+			r.Changed = append(r.Changed, c)
+		}
+	}
+	prev.FinishedAt = time.Time{}
+	prev.Resumes = append(prev.Resumes, r)
+	return prev
 }
 
 // ModelCard — как модель выглядела на момент прогона. Digest важнее тега:

@@ -58,6 +58,21 @@ type Descriptions struct {
 	problem string // почему файл прочитан не до конца; пусто — всё в порядке
 }
 
+// maxEntity — наибольший номер понятия с описанием, не больше limit
+// (см. Mentions.maxEntity).
+func (d *Descriptions) maxEntity(limit uint32) uint32 {
+	if d == nil {
+		return 0
+	}
+	var out uint32
+	for id := range d.byID {
+		if id > out && id <= limit {
+			out = id
+		}
+	}
+	return out
+}
+
 // openDescriptions читает файл описаний. Отсутствие файла — обычное состояние:
 // описания собираются отдельной работой и есть не у каждого графа.
 func openDescriptions(dir string) (*Descriptions, error) {

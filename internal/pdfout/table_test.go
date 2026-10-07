@@ -1,6 +1,7 @@
 package pdfout
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -165,5 +166,53 @@ func TestRowHeightGrowsWithWrappedText(t *testing.T) {
 	if hLong <= hShort {
 		t.Errorf("многострочная ячейка не увеличила высоту строки: %.1f против %.1f",
 			hLong, hShort)
+	}
+}
+
+// tallRow — слова для ячейки, которая выше целой страницы.
+func tallRow() []string {
+	words := make([]string, 3000)
+	for i := range words {
+		words[i] = fmt.Sprintf("w%04d", i)
+	}
+	return words
+}
+
+// TestTallRowStaysOnPage: строка таблицы выше страницы печатается частями на
+// нескольких страницах. Прежде она целиком уходила за нижний край листа, и
+// текст ячейки пропадал со страницы без следа.
+func TestTallRowStaysOnPage(t *testing.T) {
+	p := newTestPainter(t)
+	tbl := makeTable([]string{"Описание", "Код"}, []string{strings.Join(tallRow(), " "), "42"})
+	p.drawTable(tbl, p.th.marginL, p.th.contentWidth())
+	if p.y > p.th.bottom() {
+		t.Errorf("таблица ушла за нижний край: %.1f при крае %.1f", p.y, p.th.bottom())
+	}
+	if p.pages < 3 {
+		t.Errorf("строка в несколько страниц уместилась на %d", p.pages)
+	}
+}
+
+// TestBuildTallRowKeepsAllWords: разрезанная строка не теряет ни слова, и её
+// конец стоит на другой странице, чем начало.
+func TestBuildTallRowKeepsAllWords(t *testing.T) {
+	words := tallRow()
+	src := "| Описание | Код |\n|---|---|\n| " + strings.Join(words, " ") + " | 42 |\n"
+	_, back := build(t, src, Options{})
+	pageOf := func(w string) int {
+		for i, pg := range back.Pages {
+			if strings.Contains(pg.Text, w) {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, w := range words {
+		if pageOf(w) < 0 {
+			t.Fatalf("слово %s потеряно", w)
+		}
+	}
+	if first, last := pageOf(words[0]), pageOf(words[len(words)-1]); first == last {
+		t.Errorf("строка выше страницы напечатана на одной странице %d", first)
 	}
 }

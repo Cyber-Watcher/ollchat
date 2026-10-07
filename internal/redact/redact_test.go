@@ -35,6 +35,7 @@ func detect(words []Word, opt Options) []line {
 	lines := buildLines(words)
 	byLabels(words, lines)
 	byCells(words, lines)
+	byBelow(words, lines)
 	byPatterns(words, lines)
 	byNameDate(words, lines, 2026)
 	byRepeat(words, byHints(words, lines, opt))
@@ -325,6 +326,87 @@ func TestBareLabelsAndAgeBeforeBirth(t *testing.T) {
 // подписи. Обрывки склеиваются и сверяются с найденным именем, дата
 // закрывается повтором найденной по подписи. Обычные слова, похожие
 // на имя, не склеиваются: среди них нет обрывков в одну-две буквы.
+// Русские бланки пишут подпись без двоеточия: «Дата рождения 01.02.1970»,
+// «Паспорт серия 4508 № 123456», «Тел. (4822) 12-34-56», — и до 07.10.2026
+// такие значения оставались в .md. Анализы, нормы, даты исследований и
+// числа после похожих слов («Fax 2 pages», «кетоновых тел 0,5») остаются.
+func TestRussianBareLabels(t *testing.T) {
+	words := doc(0,
+		"Дата рождения 01.02.1970 Д.Р. 03.04.1972 д.р. 05.06.1973",
+		"Date of birth 07/08/1974, Петрова 1968 г.р.",
+		"Паспорт серия 4508 № 123456 выдан ОВД",
+		"паспорт серия 45 09 номер 234567, серия 46 10 № 345678",
+		"Полис ОМС 1234 5678 9012 3456 СНИЛС 123-456-789 01 ИНН 771234567890",
+		"Тел. (4822) 12-34-56, Телефон +7 912 345-67-89",
+		"Гемоглобин 135 г/л 120-160 Глюкоза 5,4 ммоль/л 3,9-6,1",
+		"Дата анализа 05.09.2026, Fax 2 pages, кетоновых тел 0,5",
+		"MRN 98765 No new findings, pH 7.4",
+		"Справка от 12.03.2015 г. р-н Центральный",
+	)
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"01.02.1970": KindBirth, "03.04.1972": KindBirth, "05.06.1973": KindBirth,
+		"07/08/1974,": KindBirth, "1968": KindBirth,
+		"4508": KindID, "№": KindID, "123456": KindID, "234567,": KindID, "345678": KindID,
+		"1234": KindID, "3456": KindID, "123-456-789": KindID, "01": KindID, "771234567890": KindID,
+		"(4822)": KindPhone, "12-34-56,": KindPhone, "+7": KindPhone, "345-67-89": KindPhone, "98765": KindID,
+		"Паспорт": KindNone, "СНИЛС": KindNone, "выдан": KindNone, "ОВД": KindNone,
+		"135": KindNone, "120-160": KindNone, "5,4": KindNone, "3,9-6,1": KindNone,
+		"05.09.2026,": KindNone, "2": KindNone, "0,5": KindNone, "No": KindNone, "7.4": KindNone,
+		"12.03.2015": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
+// Адрес без «д.» — номер дома сразу за улицей: до 07.10.2026 он оставался
+// в .md. «Площадь» в описании очага, «пл.» перед числом и улица без
+// названия — не адрес.
+func TestRussianAddressWithoutHouseWord(t *testing.T) {
+	words := doc(0,
+		"Проживает г. Тверь, ул. Примерная, 5, кв. 12",
+		"Ул. 8 Марта 14/2 корп. 3, пр-т Мира, 21а",
+		"Почтовый 170000, г. Примерск",
+		"Площадь поражения 7 см, пл. 2,5 см2, ул. не указана 9",
+		"Гемоглобин 135 г/л",
+	)
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"Тверь,": KindAddress, "Примерная,": KindAddress, "5,": KindAddress, "12": KindAddress,
+		"Марта": KindAddress, "14/2": KindAddress, "3,": KindAddress, "Мира,": KindAddress, "21а": KindAddress,
+		"170000,": KindAddress, "Примерск": KindAddress,
+		"Площадь": KindNone, "поражения": KindNone, "7": KindNone, "2,5": KindNone, "9": KindNone,
+		"135": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
+// Местный номер без подписи: «123-45-67», «(4822) 12-34-56» — до 07.10.2026
+// он оставался в .md. Даты, нормы и диапазоны в скобках номером не становятся.
+func TestRussianLocalPhones(t *testing.T) {
+	words := doc(0,
+		"звонить (4822) 12-34-56 или 123-45-67, 8 (4832) 98-76-54",
+		"Анализ от 2026-09-05, контроль 05-09-26, норма 120-160, (n=120) 5 10 15",
+		"Тромбоциты (150) 180 320, код 150-12-1",
+	)
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"(4822)": KindPhone, "12-34-56": KindPhone, "123-45-67,": KindPhone,
+		"8": KindPhone, "(4832)": KindPhone, "98-76-54": KindPhone,
+		"2026-09-05,": KindNone, "05-09-26,": KindNone, "120-160,": KindNone, "(n=120)": KindNone,
+		"(150)": KindNone, "180": KindNone, "150-12-1": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
 func TestNameFragmentsAndRepeatedBirth(t *testing.T) {
 	words := doc(0,
 		"Patient: Roe, Annabel DOB: 02/03/1997",
@@ -431,6 +513,60 @@ func TestCellLabels(t *testing.T) {
 // строка съезжала — страница выходила косой мешаниной, а повторное
 // распознавание мешанины «утечек» не находило (синтетический набор
 // 03.10.2026, все серые JPEG-страницы).
+// Бланк в столбик: значение строкой ниже подписи. До 07.10.2026 оно
+// оставалось в .md. Шапка таблицы анализов («Name Value Range»), заголовок
+// над обычным текстом, пустое поле и строка далеко ниже полями не считаются.
+func TestValueBelowLabel(t *testing.T) {
+	var words []Word
+	add := func(block int, x, y float64, text string) { words = append(words, cell(block, x, y, text)...) }
+	add(1, 50, 100, "Дата рождения")
+	add(2, 50, 111, "01.02.1970")
+	add(3, 50, 130, "Фамилия")
+	add(4, 52, 141, "Иванова")
+	add(5, 150, 130, "Имя")
+	add(6, 150, 141, "Мария")
+	add(7, 250, 130, "Отчество")
+	add(8, 250, 141, "Петровна")
+	add(9, 50, 160, "Полис")
+	add(10, 50, 171, "ВС 8135")
+	add(11, 50, 190, "Адрес")
+	add(12, 50, 201, "Тверь, Примерная 5")
+	add(13, 50, 220, "Телефон")
+	add(14, 50, 231, "4822 123456")
+	// шапка таблицы анализов
+	add(20, 50, 300, "Name")
+	add(21, 200, 300, "Value")
+	add(22, 300, 300, "Range")
+	add(23, 50, 311, "Total Cholesterol")
+	add(24, 200, 311, "5.2")
+	add(25, 300, 311, "3.0-5.2")
+	// заголовок над текстом, пустое поле, значение далеко ниже
+	add(30, 50, 340, "Пациент")
+	add(31, 50, 351, "Жалобы на кашель")
+	add(32, 50, 380, "Факс")
+	add(33, 50, 391, "Email")
+	add(34, 50, 402, "нет данных 12345")
+	add(35, 50, 430, "Дата рождения")
+	add(36, 50, 470, "02.03.1971")
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"01.02.1970": KindBirth, "Иванова": KindClient, "Мария": KindClient, "Петровна": KindClient,
+		"ВС": KindID, "8135": KindID, "Тверь,": KindAddress, "Примерная": KindAddress, "5": KindAddress,
+		"4822": KindPhone, "123456": KindPhone,
+		"Total": KindNone, "Cholesterol": KindNone, "5.2": KindNone, "Жалобы": KindNone,
+		"нет": KindNone, "12345": KindNone, "02.03.1971": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+	for _, w := range words {
+		if w.Text == "Полис" && w.LabelOf != KindID {
+			t.Errorf("подпись «Полис» без значения осталась бы в .md: %v", w.LabelOf)
+		}
+	}
+}
+
 func TestPaintKeepsPaddedGray(t *testing.T) {
 	src := image.NewGray(image.Rect(0, 0, 101, 40))
 	for y := 0; y < 40; y++ {
@@ -499,6 +635,24 @@ func TestMarkdownHidesEverything(t *testing.T) {
 		if !strings.Contains(md, good) {
 			t.Errorf("в .md нет %q:\n%s", good, md)
 		}
+	}
+}
+
+// Заголовок обезличенного .md — нейтральный, а не имя файла скана: сканы
+// называют по фамилии пациента. В распознанной копии имя файла остаётся.
+func TestMarkdownTitleNeutral(t *testing.T) {
+	const name = "Иванова Мария Петровна выписка"
+	ru := doc(0, "Патологических изменений в исследованной области не выявлено.")
+	md := buildMD(name, ru, nil, 1, false)
+	if strings.Contains(md, "Иванова") || !strings.HasPrefix(md, "# Обезличенный документ\n") {
+		t.Errorf("заголовок обезличенного .md:\n%s", md)
+	}
+	en := doc(0, "No significant abnormality is seen in the examined region.")
+	if md := buildMD(name, en, nil, 1, false); !strings.HasPrefix(md, "# Redacted document\n") {
+		t.Errorf("заголовок английского документа:\n%s", md)
+	}
+	if plain := buildMD(name, ru, nil, 1, true); !strings.HasPrefix(plain, "# "+name+"\n") {
+		t.Errorf("у распознанной копии заголовок — имя файла:\n%s", plain)
 	}
 }
 

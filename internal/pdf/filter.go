@@ -7,26 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // errImageStream сообщает, что поток — картинка, а не текст.
 var errImageStream = errors.New("поток содержит изображение")
 
-// maxDecoded ограничивает размер распакованного потока: битый или намеренно
-// раздутый файл не должен съесть всю память.
-const maxDecoded = 256 << 20
-
 // Decode применяет к потоку цепочку фильтров из /Filter и возвращает данные.
+//
+// Каждый шаг цепочки ограничен отдельно (см. budget.go): прежде предел
+// стоял только у FlateDecode и LZW, и RunLength после Flate разворачивал
+// его 256 МБ ещё в шестьдесят четыре раза.
 func (d *Document) Decode(s *Stream) ([]byte, error) {
 	if s == nil {
 		return nil, errors.New("пустой поток")
 	}
-	data := s.Raw
-	// Расшифровка идёт до фильтров: в файле поток сначала сжат, потом
-	// зашифрован, и разворачивать надо в обратном порядке.
-	if d.crypt != nil && s.Dict["Type"] != Name("XRef") {
-		data = d.crypt.decrypt(data)
-	}
+	data := d.raw(s)
 	filters := asArray(d.Resolve(s.Dict["Filter"]))
 	parms := asArray(d.Resolve(s.Dict["DecodeParms"]))
 	if len(parms) == 0 {
@@ -51,27 +47,43 @@ func (d *Document) Decode(s *Stream) ([]byte, error) {
 	return data, nil
 }
 
+// raw — данные потока до фильтров, уже расшифрованные.
+//
+// Расшифровка идёт до фильтров: в файле поток сначала сжат, потом
+// зашифрован, и разворачивать надо в обратном порядке. Картинки JPEG и CCITT,
+// которые раскрываются мимо Decode, берут данные отсюда же: прежде они брались
+// прямо из Raw, и у зашифрованной книги модели уходил шифротекст под видом
+// JPEG. Поток xref не шифруется никогда.
+func (d *Document) raw(s *Stream) []byte {
+	if d.crypt != nil && s.Dict["Type"] != Name("XRef") {
+		return d.crypt.decrypt(s.Raw)
+	}
+	return s.Raw
+}
+
 func (d *Document) applyFilter(name Name, data []byte, parm Dict) ([]byte, error) {
+	limit := d.decodeLimit()
+	var out []byte
+	var err error
 	switch name {
 	case "FlateDecode", "Fl":
-		out, err := inflate(data)
+		out, err = inflate(data, limit)
 		if err != nil && len(out) == 0 {
 			return nil, fmt.Errorf("FlateDecode: %w", err)
 		}
-		return d.predict(out, parm)
+		out, err = d.predict(out, parm)
 	case "LZWDecode", "LZW":
 		early := 1
 		if v, ok := toInt(d.Resolve(parm["EarlyChange"])); ok {
 			early = v
 		}
-		out := lzwDecode(data, early == 1)
-		return d.predict(out, parm)
+		out, err = d.predict(lzwDecode(data, early == 1, limit), parm)
 	case "ASCIIHexDecode", "AHx":
-		return asciiHexDecode(data), nil
+		out = asciiHexDecode(data) // вдвое короче входа: предел не нужен
 	case "ASCII85Decode", "A85":
-		return ascii85Decode(data), nil
+		out = ascii85Decode(data, limit)
 	case "RunLengthDecode", "RL":
-		return runLengthDecode(data), nil
+		out = runLengthDecode(data, limit)
 	case "Crypt":
 		return data, nil
 	case "DCTDecode", "JPXDecode", "JBIG2Decode", "CCITTFaxDecode":
@@ -79,11 +91,16 @@ func (d *Document) applyFilter(name Name, data []byte, parm Dict) ([]byte, error
 	default:
 		return data, nil
 	}
+	if !d.spend(len(out)) {
+		return nil, ErrTooHeavy
+	}
+	return out, err
 }
 
 // inflate распаковывает zlib или голый deflate, возвращая всё, что успело
 // распаковаться: обрыв в конце потока — обычное дело в живых файлах.
-func inflate(data []byte) ([]byte, error) {
+// Больше limit байт не выдаёт.
+func inflate(data []byte, limit int) ([]byte, error) {
 	// Некоторые файлы оставляют мусор перед заголовком zlib.
 	for i := 0; i < len(data) && i < 32; i++ {
 		if !isSpace(data[i]) {
@@ -93,11 +110,11 @@ func inflate(data []byte) ([]byte, error) {
 	}
 	r, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return inflateRaw(data)
+		return inflateRaw(data, limit)
 	}
-	out, rerr := readAllLimited(r)
+	out, rerr := readAllLimited(r, limit)
 	if len(out) == 0 && rerr != nil {
-		if raw, rawErr := inflateRaw(data); rawErr == nil || len(raw) > 0 {
+		if raw, rawErr := inflateRaw(data, limit); rawErr == nil || len(raw) > 0 {
 			return raw, nil
 		}
 		return out, rerr
@@ -106,15 +123,15 @@ func inflate(data []byte) ([]byte, error) {
 }
 
 // inflateRaw распаковывает поток без заголовка zlib: попадаются и такие.
-func inflateRaw(data []byte) ([]byte, error) {
+func inflateRaw(data []byte, limit int) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
 	defer r.Close()
-	return readAllLimited(r)
+	return readAllLimited(r, limit)
 }
 
-func readAllLimited(r io.Reader) ([]byte, error) {
+func readAllLimited(r io.Reader, limit int) ([]byte, error) {
 	var buf bytes.Buffer
-	_, err := io.Copy(&buf, io.LimitReader(r, maxDecoded))
+	_, err := io.Copy(&buf, io.LimitReader(r, int64(limit)))
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return buf.Bytes(), err
 	}
@@ -142,8 +159,21 @@ func (d *Document) predict(data []byte, parm Dict) ([]byte, error) {
 	if v, ok := toInt(d.Resolve(parm["Columns"])); ok && v > 0 {
 		columns = v
 	}
+	// Параметры берутся из файла, и верить им нельзя: огромный /Colors
+	// переполнял длину строки до нуля, и цикл по строкам TIFF стоял на месте
+	// вечно, а огромный /Columns просил под одну строку терабайт. Поэтому
+	// составляющих не больше, чем бывает у цветовых моделей (32 — предел
+	// DeviceN), отсчёт — из допустимых спецификацией, а столбцов столько,
+	// чтобы произведение не переполнилось.
+	if colors > maxColors || !validBPC(bpc) || columns > math.MaxInt32 {
+		return nil, fmt.Errorf("предиктор: недопустимые параметры (Colors %d, BitsPerComponent %d, Columns %d)",
+			colors, bpc, columns)
+	}
 	bpp := (colors*bpc + 7) / 8 // байт на пиксель, не меньше одного
 	rowLen := (colors*bpc*columns + 7) / 8
+	if len(data) == 0 {
+		return data, nil
+	}
 
 	if pred == 2 { // предиктор TIFF
 		if bpc != 8 {
@@ -159,6 +189,13 @@ func (d *Document) predict(data []byte, parm Dict) ([]byte, error) {
 	}
 
 	// Предикторы PNG: каждая строка начинается с байта фильтра.
+	//
+	// Строка длиннее самих данных бывает только у обрезанного потока: такая
+	// строка одна, и неполная. Память под неё берётся по данным, а не по
+	// /Columns, — иначе поток в три байта просил гигабайты.
+	if rowLen >= len(data) {
+		rowLen = len(data) - 1
+	}
 	out := make([]byte, 0, len(data))
 	prev := make([]byte, rowLen)
 	for pos := 0; pos+1 <= len(data); pos += rowLen + 1 {
@@ -205,6 +242,18 @@ func (d *Document) predict(data []byte, parm Dict) ([]byte, error) {
 	return out, nil
 }
 
+// maxColors — больше составляющих цвета не бывает: 32 — предел DeviceN.
+const maxColors = 32
+
+// validBPC — разрядность отсчёта из тех, что допускает спецификация.
+func validBPC(bpc int) bool {
+	switch bpc {
+	case 1, 2, 4, 8, 16:
+		return true
+	}
+	return false
+}
+
 func paeth(a, b, c byte) byte {
 	p := int(a) + int(b) - int(c)
 	pa, pb, pc := iabs(p-int(a)), iabs(p-int(b)), iabs(p-int(c))
@@ -227,8 +276,8 @@ func iabs(v int) int {
 
 // lzwDecode распаковывает вариант LZW из PDF. Стандартная библиотека Go не
 // умеет «раннюю смену» ширины кода (EarlyChange), принятую в PDF по умолчанию,
-// поэтому декодер написан здесь.
-func lzwDecode(data []byte, early bool) []byte {
+// поэтому декодер написан здесь. Больше limit байт не выдаёт.
+func lzwDecode(data []byte, early bool, limit int) []byte {
 	const (
 		clearCode = 256
 		eodCode   = 257
@@ -284,8 +333,8 @@ func lzwDecode(data []byte, early bool) []byte {
 			return out
 		}
 		out = append(out, entry...)
-		if len(out) > maxDecoded {
-			return out
+		if len(out) >= limit {
+			return out[:limit]
 		}
 		if prev != nil && len(table) < 4096 {
 			table = append(table, append(append([]byte{}, prev...), entry[0]))
@@ -328,18 +377,23 @@ func asciiHexDecode(data []byte) []byte {
 	return out
 }
 
-func ascii85Decode(data []byte) []byte {
+// ascii85Decode раскрывает ASCII85. «z» — четыре нулевых байта из одного
+// знака, поэтому выход бывает вчетверо больше входа: он ограничен limit.
+func ascii85Decode(data []byte, limit int) []byte {
 	var out []byte
 	var group [5]byte
 	n := 0
 	data = bytes.TrimPrefix(bytes.TrimLeft(data, " \t\r\n"), []byte("<~"))
 	for i := 0; i < len(data); i++ {
+		if len(out) >= limit {
+			return out[:limit]
+		}
 		c := data[i]
 		switch {
 		case isSpace(c):
 			continue
 		case c == '~':
-			i = len(data)
+			// «~>» — конец данных: цикл обрывает break после switch.
 		case c == 'z' && n == 0:
 			out = append(out, 0, 0, 0, 0)
 			continue
@@ -362,7 +416,7 @@ func ascii85Decode(data []byte) []byte {
 		}
 		out = appendBase85(out, group, n)
 	}
-	return out
+	return out[:min(len(out), limit)]
 }
 
 func appendBase85(out []byte, g [5]byte, n int) []byte {
@@ -374,9 +428,11 @@ func appendBase85(out []byte, g [5]byte, n int) []byte {
 	return append(out, buf[:n-1]...)
 }
 
-func runLengthDecode(data []byte) []byte {
+// runLengthDecode раскрывает RunLength. Пара байт разворачивается в 128:
+// без предела limit цепочка Flate → RunLength превращала 256 МБ в 16 ГБ.
+func runLengthDecode(data []byte, limit int) []byte {
 	var out []byte
-	for i := 0; i < len(data); {
+	for i := 0; i < len(data) && len(out) < limit; {
 		l := int(data[i])
 		i++
 		switch {
@@ -399,7 +455,7 @@ func runLengthDecode(data []byte) []byte {
 			i++
 		}
 	}
-	return out
+	return out[:min(len(out), limit)]
 }
 
 // asArray приводит объект к массиву: одиночное значение считается массивом из

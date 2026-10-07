@@ -39,16 +39,18 @@ import (
 //
 // ЗАНИМАЕТ КАРТУ сервера на время ответа модели.
 
-// scanRedactAsk — просьба к модели, как её пишут пользователи.
-const scanRedactAsk = "Обработай скан %s: сделай PDF с замазанными персональными данными, " +
-	".md без персональных данных и распознанные копии — .md и текстовый PDF с таблицами."
+// scanRedactAsk — просьба к модели, как её пишут пользователи. Распознанные
+// копии со всеми данными в ней не просятся: они делаются только по явной
+// просьбе (слово владельца 07.10.2026) — ключом -formats или своей -ask.
+const scanRedactAsk = "Обработай скан %s: сделай PDF с замазанными персональными данными " +
+	"и .md без персональных данных."
 
 func runScanRedactLLM(cfg *config.Config, srv *config.Server, model string, sandbox *permissions.Sandbox,
 	guard *permissions.Guard, path string, args []string) error {
 	fs := flag.NewFlagSet("scan-redact-llm", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	formats := fs.String("formats", "", "какие файлы просить — "+redact.FormatsHelp+
-		"; пусто — модель берёт умолчание инструмента (все четыре)")
+		"; пусто — модель берёт умолчание инструмента ("+redact.DefaultFormats+")")
 	ask := fs.String("ask", "", "своя просьба к модели вместо стандартной; %s в ней заменяется путём к скану")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -114,12 +116,25 @@ func runScanRedactLLM(cfg *config.Config, srv *config.Server, model string, sand
 	if err != nil {
 		return err
 	}
+	return scanRedactVerdict(sum)
+}
+
+// scanRedactVerdict — чем кончается прогон с моделью.
+//
+// Код 3, как у --scan-redact: последний вызов нашёл скрытое в итоге. Код
+// уходит наверх, к единственному os.Exit в main, а не вызывается здесь:
+// os.Exit не ждёт defer, и журнал шагов прогона с базой знаний оставались
+// незакрытыми ровно тогда, когда прогон нашёл утечку и разбирать его нужнее
+// всего.
+func scanRedactVerdict(sum scanRedactSummary) error {
 	if sum.calls == 0 {
 		return fmt.Errorf("модель не вызвала %s ни разу — файлов нет", tools.NameScanRedact)
 	}
 	if sum.leak {
 		// Как у --scan-redact: код 3 — последний прогон нашёл скрытое в итоге.
-		os.Exit(3)
+		// Сообщение объясняет, куда делись файлы: под обычными именами их нет.
+		return &exitCode{code: 3, msg: "проверка повторным распознаванием нашла скрытое в итоге: " +
+			"обезличенные файлы записаны с пометкой UNVERIFIED в имени"}
 	}
 	return nil
 }

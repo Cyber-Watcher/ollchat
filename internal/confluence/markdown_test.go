@@ -29,6 +29,35 @@ func TestCodeMacroKeepsBytes(t *testing.T) {
 	}
 }
 
+// Отступы и пустые строки внутри блока кода доезжают как есть: в Python они
+// задают вложенность, в YAML — структуру. Прежде уборка пробелов шла и по
+// коду, и пример приходил с отступом в один пробел. Текст вне кода
+// по-прежнему убирается.
+func TestCodeMacroKeepsIndentation(t *testing.T) {
+	python := "def f(x):\n    if x:\n        return 1\n\n\n    return  2"
+	yaml := "a:\n  b:\n    c: 1\n  d:   [1, 2]"
+	out := md(t, `<p>до    кода</p>`+
+		`<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">python</ac:parameter>`+
+		`<ac:plain-text-body><![CDATA[`+python+`]]></ac:plain-text-body></ac:structured-macro>`+
+		`<p>между</p><p></p><p></p>`+
+		`<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">yaml</ac:parameter>`+
+		`<ac:plain-text-body><![CDATA[`+yaml+`]]></ac:plain-text-body></ac:structured-macro>`+
+		`<p>после    кода</p>`)
+	for _, want := range []string{"```python\n" + python + "\n```", "```yaml\n" + yaml + "\n```"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("блок кода изменился:\nждали\n%s\nв\n%s", want, out)
+		}
+	}
+	for _, want := range []string{"до кода", "после кода"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("пробелы вне кода не убраны: нет %q в %q", want, out)
+		}
+	}
+	if strings.Contains(out, "между\n\n\n") {
+		t.Errorf("пустые строки вне кода не схлопнуты: %q", out)
+	}
+}
+
 // Свёрнутый блок раскрывается: в нём лежит то, ради чего страницу и читают.
 func TestExpandIsUnfolded(t *testing.T) {
 	out := md(t, `<p>до</p><ac:structured-macro ac:name="expand">`+

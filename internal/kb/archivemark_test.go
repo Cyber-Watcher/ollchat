@@ -1,6 +1,7 @@
 package kb
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,5 +90,97 @@ func TestCollectionLockWaitsForArchive(t *testing.T) {
 	c.unlock()
 	if s := CollectionBusy(c.dir); s != "" {
 		t.Errorf("после снятия замка коллекция занята: %q", s)
+	}
+}
+
+// Пустой или испорченный замок не роняет индексацию.
+//
+// Замок разбирался как strings.Fields(...)[0], и пустой LOCK — обрыв между
+// созданием файла и записью в него — давал панику при каждой следующей
+// индексации, пока файл не уберут руками. Давний испорченный замок
+// снимается как брошенный, свежий пустой — занят: его вот-вот допишут.
+func TestCollectionLockSurvivesGarbage(t *testing.T) {
+	for _, body := range []string{"", "  \n", "мусор вместо номера"} {
+		c := &Collection{dir: t.TempDir(), name: "проба"}
+		path := filepath.Join(c.dir, lockMark)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.lock(); err == nil {
+			t.Errorf("%q: свежий замок без номера процесса снят как брошенный", body)
+			c.unlock()
+		}
+		old := time.Now().Add(-time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.lock(); err != nil {
+			t.Fatalf("%q: давний испорченный замок не снялся: %v", body, err)
+		}
+		if got := markerPID(path); got != os.Getpid() {
+			t.Fatalf("%q: в замке номер %d, а не свой", body, got)
+		}
+		c.unlock()
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%q: свой замок не снят: %v", body, err)
+		}
+	}
+}
+
+// Из двух, пришедших за замком разом, его получает ровно один.
+//
+// Прежний замок ставился «прочитать, нет ли, — записать»: два процесса,
+// прочитавшие «нет» одновременно, оба считали коллекцию своей и писали в одно
+// хранилище. Теперь файл создаётся с O_EXCL.
+func TestCollectionLockIsExclusive(t *testing.T) {
+	dir := t.TempDir()
+	for round := 0; round < 50; round++ {
+		a := &Collection{dir: dir, name: "проба"}
+		b := &Collection{dir: dir, name: "проба"}
+		start := make(chan struct{})
+		got := make(chan *Collection, 2)
+		for _, c := range []*Collection{a, b} {
+			go func(c *Collection) {
+				<-start
+				if c.lock() == nil {
+					got <- c
+				} else {
+					got <- nil
+				}
+			}(c)
+		}
+		close(start)
+		var owners []*Collection
+		for i := 0; i < 2; i++ {
+			if c := <-got; c != nil {
+				owners = append(owners, c)
+			}
+		}
+		if len(owners) != 1 {
+			t.Fatalf("круг %d: замок получили %d претендента из двух", round, len(owners))
+		}
+		owners[0].unlock()
+	}
+}
+
+// Снимается только свой замок: чужой, поставленный живым процессом, остаётся.
+//
+// Уплотнение подменяет каталог коллекции, и в новом каталоге замок мог успеть
+// поставить другой процесс; безусловное удаление в конце уплотнения сняло бы
+// его замок посреди его работы.
+func TestCollectionUnlockKeepsForeignLock(t *testing.T) {
+	c := &Collection{dir: t.TempDir(), name: "проба"}
+	path := filepath.Join(c.dir, lockMark)
+	// Родитель процесса тестов жив всё время теста, и это не мы.
+	foreign := fmt.Sprintf("%d %s\n", os.Getppid(), time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(foreign), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c.unlock()
+	if data, err := os.ReadFile(path); err != nil || string(data) != foreign {
+		t.Fatalf("чужой замок снят или испорчен: %q, %v", data, err)
+	}
+	if err := c.lock(); err == nil {
+		t.Fatal("замок живого чужого процесса не остановил индексацию")
 	}
 }

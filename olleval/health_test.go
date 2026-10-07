@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,7 +63,7 @@ func TestDoctorRestartWaitsForUp(t *testing.T) {
 		Cfg:    HealthCfg{RestartWait: Duration(5 * time.Second)},
 		Log:    func(string, ...any) {},
 		Run: func(ctx context.Context, name string, args ...string) (string, int, error) {
-			restarted = name == "sudo" && len(args) > 2 && args[2] == "ollama"
+			restarted = name == "sudo" && strings.Join(args, " ") == "-n systemctl restart ollama"
 			return "", 0, nil
 		},
 	}
@@ -69,6 +72,49 @@ func TestDoctorRestartWaitsForUp(t *testing.T) {
 	}
 	if !restarted {
 		t.Error("systemctl restart ollama не вызван")
+	}
+}
+
+// Отказ sudo — сбой перезапуска, а не успех: раньше ненулевой код молча
+// глотался, и прогон считал сервер вылеченным, не тронув его.
+func TestDoctorSudoRefusalIsError(t *testing.T) {
+	var healthAsked bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthAsked = true
+		_, _ = w.Write([]byte(`{"version":"0.32.13"}`))
+	}))
+	t.Cleanup(srv.Close)
+	d := &Doctor{
+		Client: ollama.New(srv.URL, 5*time.Second, 5*time.Second, nil),
+		Cfg:    HealthCfg{RestartWait: Duration(5 * time.Second)},
+		Log:    func(string, ...any) {},
+		Run: func(context.Context, string, ...string) (string, int, error) {
+			return "sudo: a password is required\n", 1, nil
+		},
+	}
+	err := d.Restart(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "password is required") {
+		t.Errorf("отказ sudo при перезапуске: %v", err)
+	}
+	if err := d.StartService(context.Background(), "ollama"); err == nil {
+		t.Error("отказ sudo при подъёме службы принят за успех")
+	}
+	if healthAsked {
+		t.Error("после отказа sudo прогон ждал подъёма сервера, которого не будет")
+	}
+}
+
+// Отказ sudo у журнала — «журнал недоступен», а не тихий журнал без запросов.
+func TestSudoFails(t *testing.T) {
+	refuse := func(context.Context, string, ...string) (string, int, error) {
+		return "sudo: a password is required\n", 1, nil
+	}
+	if _, _, err := sudoFails(refuse)(context.Background(), "sudo", "-n", "journalctl"); err == nil {
+		t.Error("отказ sudo прошёл без ошибки")
+	}
+	// Остальным командам код возврата — результат, а не ошибка.
+	if _, code, err := sudoFails(refuse)(context.Background(), "systemctl", "is-active", "ollama"); err != nil || code != 1 {
+		t.Errorf("код systemctl стал ошибкой: %d, %v", code, err)
 	}
 }
 
@@ -94,6 +140,106 @@ func TestHeartbeat(t *testing.T) {
 	}
 	if _, alive := LiveRun(root, time.Minute); alive {
 		t.Error("отметка снята, а прогон считается живым")
+	}
+}
+
+// Файлы попытки и отметка жизни подменяются целиком: открытый прежде файл
+// дочитывается прежним, а не половиной нового. Запись на месте сначала
+// обрезала файл: оборванный metrics.json засчитывал попытку с битыми
+// метриками, а отметка, пойманная между обрезкой и записью, читалась
+// службой возврата как «прогон мёртв».
+func TestRunFilesReplacedWhole(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteJSON(dir, "metrics.json", Metrics{Task: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(dir, "metrics.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := WriteJSON(dir, "metrics.json", Metrics{Task: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	var m Metrics
+	if err := json.NewDecoder(f).Decode(&m); err != nil || m.Task != "old" {
+		t.Errorf("metrics.json переписан на месте: %q, %v", m.Task, err)
+	}
+
+	root := t.TempDir()
+	if err := WriteHeartbeat(root, Heartbeat{Task: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	hf, err := os.Open(HeartbeatPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hf.Close()
+	if err := WriteHeartbeat(root, Heartbeat{Task: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	var hb Heartbeat
+	if err := json.NewDecoder(hf).Decode(&hb); err != nil || hb.Task != "old" {
+		t.Errorf("отметка переписана на месте: %q, %v", hb.Task, err)
+	}
+}
+
+// Отметку обновляет тикер, а не только начало попытки: попытка длится
+// до получаса, и раньше отметка за это время протухала.
+func TestHeartbeatRefreshedDuringAttempt(t *testing.T) {
+	store, err := NewStore(t.TempDir(), "2026-10-07")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &Night{Store: store}
+	n.mark("qwen3.5:122b", "go-u1")
+	tick := make(chan time.Time)
+	stop := n.keepAlive(tick)
+	// Отметку сносят, тикер обязан вернуть её — с той же попыткой.
+	if err := ClearHeartbeat(store.Root); err != nil {
+		t.Fatal(err)
+	}
+	tick <- time.Now()
+	stop()
+	hb, alive := LiveRun(store.Root, time.Minute)
+	if !alive || hb.Model != "qwen3.5:122b" || hb.Task != "go-u1" || hb.Started.IsZero() {
+		t.Errorf("тикер не обновил отметку: %+v, жив %v", hb, alive)
+	}
+	// После остановки тикер отметку не трогает: её снимают в конце прогона.
+	if err := ClearHeartbeat(store.Root); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case tick <- time.Now():
+		t.Error("тикер работает после остановки")
+	default:
+	}
+}
+
+// Порог «прогон мёртв» больше самой долгой попытки: прежние 15 минут были
+// короче одной генерации, и служба возврата открывала сервер посреди неё.
+func TestStaleExceedsLongestAttempt(t *testing.T) {
+	cfg := DefaultConfig()
+	longest := time.Duration(cfg.Run.Timeout) + time.Duration(cfg.Verify.Timeout)
+	if got := staleAfter(cfg); got <= longest {
+		t.Errorf("порог %s не больше попытки %s", got, longest)
+	}
+	cfg.Run.Timeout = Duration(time.Hour)
+	if got := staleAfter(cfg); got <= time.Hour+time.Duration(cfg.Verify.Timeout) {
+		t.Errorf("порог не вырос с run.timeout: %s", got)
+	}
+
+	// Отметка двадцатипятиминутной давности у живого процесса — прогон жив.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(HeartbeatPath(root)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(Heartbeat{PID: os.Getpid(), Night: "n", Updated: time.Now().Add(-25 * time.Minute)})
+	if err := os.WriteFile(HeartbeatPath(root), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, alive := LiveRun(root, staleAfter(DefaultConfig())); !alive {
+		t.Error("прогон посреди долгой генерации признан мёртвым")
 	}
 }
 

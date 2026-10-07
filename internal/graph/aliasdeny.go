@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,35 +43,41 @@ type AliasDeny struct {
 }
 
 // loadAliasDeny читает журнал: номер понятия → нормализованные запрещённые
-// синонимы. Нет файла — нет запретов. Битая строка пропускается, как в реестре.
-func loadAliasDeny(dir string) map[uint32]map[string]bool {
+// синонимы. Нет файла — нет запретов. Битая и слишком длинная строки
+// пропускаются, как в реестре, а ошибка чтения — ошибка: молча усечённый
+// журнал вернул бы ложные синонимы в ключи, и сборка лила бы по ним снова.
+func loadAliasDeny(dir string) (map[uint32]map[string]bool, error) {
 	f, err := os.Open(filepath.Join(dir, aliasDenyFile))
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	defer f.Close()
 	deny := map[uint32]map[string]bool{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
+	_, err = eachLine(f, 1024*1024, func(line []byte) {
 		var r AliasDeny
-		if err := json.Unmarshal(sc.Bytes(), &r); err != nil || r.ID == 0 {
-			continue
+		if err := json.Unmarshal(line, &r); err != nil || r.ID == 0 {
+			return
 		}
 		k := Normalize(r.Alias)
 		if k == "" {
-			continue
+			return
 		}
 		if r.Undo {
 			delete(deny[r.ID], k)
-			continue
+			return
 		}
 		if deny[r.ID] == nil {
 			deny[r.ID] = map[string]bool{}
 		}
 		deny[r.ID][k] = true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", aliasDenyFile, err)
 	}
-	return deny
+	return deny, nil
 }
 
 // allowedAliases убирает из списка запрещённые для этого понятия синонимы.
@@ -103,16 +108,25 @@ type DenyEffect struct {
 }
 
 // DenyAliases дописывает запреты в журнал графа в каталоге dir. dry — только
-// показать последствия. Граф обязан быть закрыт, сборка — не идти.
+// показать последствия. Граф обязан быть закрыт, сборка — не идти; замок
+// сборки запрет занимает сам на всё время работы.
 //
 // Опечатка не проходит молча: понятия с таким номером нет или у него нет
 // такого синонима — ошибка до любой записи.
 func DenyAliases(dir string, recs []AliasDeny, dry bool) ([]DenyEffect, error) {
-	lock := filepath.Join(dir, lockFile)
-	if _, err := os.Stat(lock); err == nil {
-		if owner := readLock(lock); owner.alive() {
-			return nil, &LockedError{Path: lock, PID: owner.PID, Since: owner.Since}
+	if dry {
+		if err := buildRunning(dir); err != nil {
+			return nil, err
 		}
+	} else {
+		// Замок сборки — на всё время работы, а не проверка в начале: сборка,
+		// открывшая реестр между проверкой и записью запрета, не увидела бы
+		// его и лила бы по ложному ключу весь заход (аудит 07.10.2026, №9).
+		release, err := holdBuildLock(dir)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
 	path := filepath.Join(dir, entitiesFile)
 	before, err := readEntitiesFile(path)
@@ -165,28 +179,15 @@ func DenyAliases(dir string, recs []AliasDeny, dry bool) ([]DenyEffect, error) {
 		return effects, nil
 	}
 
-	f, err := os.OpenFile(filepath.Join(dir, aliasDenyFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
+	stamped := make([]AliasDeny, len(recs))
 	now := time.Now().Unix()
-	for _, r := range recs {
+	for i, r := range recs {
 		if r.At == 0 {
 			r.At = now
 		}
-		line, err := json.Marshal(r)
-		if err != nil {
-			return nil, err
-		}
-		w.Write(line)
-		w.WriteByte('\n')
+		stamped[i] = r
 	}
-	if err := w.Flush(); err != nil {
-		return nil, err
-	}
-	if err := f.Sync(); err != nil {
+	if err := appendJSONL(filepath.Join(dir, aliasDenyFile), stamped, true); err != nil {
 		return nil, err
 	}
 	syncDir(dir)

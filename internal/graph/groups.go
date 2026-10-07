@@ -164,20 +164,7 @@ func (g *Groups) Add(r GroupRec) (uint32, error) {
 		r.ID = g.maxID
 	}
 	r.At = time.Now().Unix()
-	f, err := os.OpenFile(g.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	line, err := json.Marshal(r)
-	if err != nil {
-		f.Close()
-		return 0, err
-	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := f.Close(); err != nil {
+	if err := appendJSONL(g.path, []GroupRec{r}, false); err != nil {
 		return 0, err
 	}
 	g.recs = append(g.recs, r)
@@ -312,7 +299,7 @@ func (g *Graph) addGroupSiblings(seeds []FoundEntity, have map[uint32]bool, opt 
 		}
 		seeds = append(seeds, FoundEntity{
 			Entity:      ent,
-			Mentions:    len(g.ment.Of(id)),
+			Mentions:    len(g.mentionsOf(id)),
 			Books:       booksOf(g, id),
 			Matched:     "по группе",
 			Aliases:     g.ents.DisplayAliases(ent),

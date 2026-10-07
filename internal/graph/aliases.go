@@ -52,9 +52,11 @@ type AliasRec struct {
 type Aliases struct {
 	merges *Merges
 
-	mu sync.RWMutex
-	f  *os.File
-	w  *bufio.Writer
+	mu   sync.RWMutex
+	path string
+	f    *os.File
+	w    *bufio.Writer
+	tail journalTail // хвост файла при чтении; срезается перед дозаписью (journal.go)
 
 	list     []AliasRec          // по номеру записи (ID = индекс + 1)
 	byEntity map[uint32][]uint32 // понятие → номера записей
@@ -62,8 +64,8 @@ type Aliases struct {
 }
 
 func openAliases(dir string) (*Aliases, error) {
-	a := &Aliases{byEntity: map[uint32][]uint32{}, byNorm: map[string][]uint32{}}
-	path := filepath.Join(dir, aliasesFile)
+	a := &Aliases{path: filepath.Join(dir, aliasesFile), byEntity: map[uint32][]uint32{}, byNorm: map[string][]uint32{}}
+	path := a.path
 	if err := a.load(path); err != nil {
 		return nil, err
 	}
@@ -89,9 +91,12 @@ func (a *Aliases) load(path string) error {
 	head := make([]byte, aliasHeaderSize)
 	body := make([]byte, aliasMaxNorm)
 	for {
-		if _, err := io.ReadFull(r, head); err != nil {
+		if got, err := io.ReadFull(r, head); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				return nil // оборванная запись: всё до неё годится
+				// Оборванная запись: всё до неё годится, а сам обрывок
+				// срезается перед дозаписью (journal.go).
+				a.tail.torn(got)
+				return nil
 			}
 			return err
 		}
@@ -99,12 +104,14 @@ func (a *Aliases) load(path string) error {
 		if n > aliasMaxNorm {
 			return fmt.Errorf("%s: запись %d длиннее предела (%d байт) — файл повреждён", aliasesFile, len(a.list)+1, n)
 		}
-		if _, err := io.ReadFull(r, body[:n]); err != nil {
+		if got, err := io.ReadFull(r, body[:n]); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				a.tail.torn(aliasHeaderSize + got)
 				return nil
 			}
 			return err
 		}
+		a.tail.record(aliasHeaderSize + n)
 		a.index(AliasRec{
 			Entity: binary.LittleEndian.Uint32(head[0:]),
 			Chunk: ChunkKey{
@@ -149,6 +156,9 @@ func (a *Aliases) Add(entity uint32, chunk ChunkKey, alias string) (uint32, erro
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.tail.prepare(a.f, a.path); err != nil {
+		return 0, err
+	}
 	if _, err := a.w.Write(head[:]); err != nil {
 		return 0, err
 	}
@@ -156,6 +166,34 @@ func (a *Aliases) Add(entity uint32, chunk ChunkKey, alias string) (uint32, erro
 		return 0, err
 	}
 	return a.index(AliasRec{Entity: entity, Chunk: chunk, Norm: norm}), nil
+}
+
+// maxEntity — наибольший номер понятия в журнале, не больше limit
+// (см. Mentions.maxEntity). У графа формата 1 журнала нет — ноль.
+func (a *Aliases) maxEntity(limit uint32) uint32 {
+	if a == nil {
+		return 0
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	var out uint32
+	for id := range a.byEntity {
+		if id > out && id <= limit {
+			out = id
+		}
+	}
+	return out
+}
+
+// prepare приводит хвост журнала в порядок перед дозаписью (journal.go).
+// У графа формата 1 журнала нет — и править нечего.
+func (a *Aliases) prepare() error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tail.prepare(a.f, a.path)
 }
 
 // All — копия всех записей журнала по порядку номеров. Для отчётов; журнал

@@ -28,9 +28,23 @@ type Document struct {
 	loading map[int]bool // защита от циклических ссылок
 	trailer Dict
 
+	// heads — смещения всех заголовков «N G obj» по возрастанию, включая
+	// перекрытые поздними определениями; ends — смещения всех «endstream».
+	// По ним разбор одного объекта не уходит за следующий (parseAt), а конец
+	// потока с неверной длиной ищется двоичным поиском, а не перебором
+	// остатка файла на каждый поток.
+	heads []int
+	ends  []int
+
 	// crypt — расшифровка содержимого. Пусто у обычных документов;
 	// у зашифрованных с пустым паролем пользователя — см. crypt.go.
-	crypt *crypt
+	// encryptNum — номер объекта словаря /Encrypt: его строки не шифруются.
+	crypt      *crypt
+	encryptNum int
+
+	// work — остаток бюджета работы, overspent — бюджет исчерпан (budget.go).
+	work      int64
+	overspent bool
 }
 
 // Open разбирает документ из памяти.
@@ -46,6 +60,7 @@ func Open(data []byte) (doc *Document, err error) {
 		inStm:   map[int][]byte{},
 		cache:   map[int]Object{},
 		loading: map[int]bool{},
+		work:    budgetFor(len(data)),
 	}
 	d.scanObjects()
 	d.readTrailer()
@@ -56,9 +71,24 @@ func Open(data []byte) (doc *Document, err error) {
 		if d.crypt = d.setupCrypt(); d.crypt == nil {
 			return nil, ErrEncrypted
 		}
+		d.encryptNum = -1
+		if ref, ok := d.trailer["Encrypt"].(Ref); ok {
+			d.encryptNum = ref.Num
+		}
+		// Объекты, разобранные до этого (поиск трейлера), хранят строки
+		// шифротекстом: пусть разберутся заново, уже с расшифровкой.
+		d.cache = map[int]Object{}
 	}
 	d.loadObjectStreams()
+	if d.overspent {
+		return nil, ErrTooHeavy
+	}
 	return d, nil
+}
+
+// heavy — ошибка исчерпанного бюджета с местом, где разбор остановился.
+func heavy(page, total int) error {
+	return fmt.Errorf("%w (разбор остановлен на странице %d из %d)", ErrTooHeavy, page, total)
 }
 
 // IsPDF сообщает, похожи ли данные на документ PDF.
@@ -70,9 +100,19 @@ func IsPDF(data []byte) bool {
 	return bytes.Contains(head, []byte("%PDF-"))
 }
 
-// scanObjects проходит по файлу и запоминает смещение каждого «N G obj».
+// scanObjects проходит по файлу и запоминает смещение каждого «N G obj»
+// и каждого «endstream».
 func (d *Document) scanObjects() {
 	b := d.data
+	d.ends = []int{} // не nil: пустой список тоже ответ — «endstream» в файле нет
+	for i := 0; ; {
+		k := bytes.Index(b[i:], []byte("endstream"))
+		if k < 0 {
+			break
+		}
+		d.ends = append(d.ends, i+k)
+		i += k + len("endstream")
+	}
 	for i := 0; i+3 <= len(b); {
 		k := bytes.Index(b[i:], []byte("obj"))
 		if k < 0 {
@@ -119,7 +159,15 @@ func (d *Document) scanObjects() {
 			continue
 		}
 		d.offsets[num] = numStart
+		d.heads = append(d.heads, numStart)
 	}
+}
+
+// fileParser — разборщик всего файла, знающий, где в нём «endstream».
+func (d *Document) fileParser() *parser {
+	p := newParser(d.data, d)
+	p.ends = d.ends
+	return p
 }
 
 func atoi(b []byte) int {
@@ -154,7 +202,7 @@ func (d *Document) readTrailer() {
 			break
 		}
 		pos = k
-		p := newParser(d.data, d)
+		p := d.fileParser()
 		p.pos = k + len("trailer")
 		if obj, err := p.object(); err == nil {
 			if dict, ok := obj.(Dict); ok {
@@ -217,7 +265,13 @@ func (d *Document) expandObjStm(s *Stream) {
 	}
 	head := newParser(data[:first], d)
 	type entry struct{ num, off int }
-	entries := make([]entry, 0, n)
+	// /N берётся из самого файла, и заранее выделять память под него нельзя:
+	// PDF в килобайт с /N 99999999999 просил полтора терабайта, и процесс
+	// падал нехваткой памяти — её recover не ловит. Запись заголовка — два
+	// числа с пробелами, не короче четырёх байт, поэтому больше first/4+1
+	// записей там не поместится; дальше цикл всё равно обрывается на конце
+	// заголовка.
+	entries := make([]entry, 0, min(n, first/4+1))
 	for i := 0; i < n; i++ {
 		numObj, err := head.object()
 		if err != nil {
@@ -287,19 +341,44 @@ func (d *Document) allObjectNumbers() []int {
 }
 
 // object читает объект по номеру, разбирая его при первом обращении.
-func (d *Document) object(num int) Object {
+func (d *Document) object(num int) (result Object) {
 	if obj, ok := d.cache[num]; ok {
 		return obj
 	}
 	if d.loading[num] {
 		return nil // ссылка на самого себя
 	}
+	// Разбор объекта вкладывается в разбор другого только через /Length
+	// потока, ссылающийся на третий объект. У настоящего файла это один
+	// уровень, а цепочка из сотен тысяч потоков, где длина каждого — ссылка
+	// на следующий, исчерпывала стек: такой сбой фатален, recover его
+	// не ловит. Глубже maxNesting объект считается нечитаемым, но в кэш
+	// не попадает — с меньшей глубины он разберётся.
+	if len(d.loading) >= maxNesting {
+		return nil
+	}
 	d.loading[num] = true
 	defer delete(d.loading, num)
 
-	var result Object
+	// Сбой разбора одного объекта — это нечитаемый объект, а не повреждённый
+	// документ: прежде паника из-за одного битого /Length роняла весь разбор,
+	// и книга терялась целиком из-за единственного испорченного потока.
+	defer func() {
+		if r := recover(); r != nil {
+			objectPanic(r)
+			result = nil
+			d.cache[num] = nil
+		}
+	}()
+
 	if off, ok := d.offsets[num]; ok {
 		result = d.parseAt(off)
+		// Строки объекта из тела файла зашифрованы каждая сама по себе
+		// (crypt.strings) — кроме словаря /Encrypt и потока xref.
+		if s, ok := result.(*Stream); d.crypt != nil && num != d.encryptNum &&
+			(!ok || s.Dict["Type"] != Name("XRef")) {
+			result = d.crypt.strings(result, 0)
+		}
 	} else if body, ok := d.inStm[num]; ok {
 		p := newParser(body, d)
 		if obj, err := p.object(); err == nil {
@@ -310,9 +389,25 @@ func (d *Document) object(num int) Object {
 	return result
 }
 
+// maxNesting — сколько объектов может разбираться вложенно (см. object).
+const maxNesting = 32
+
+// objectPanic — чем отметить панику, погашенную при разборе одного объекта.
+// В работе ничего не делает: объект просто считается нечитаемым. Обстрел
+// (fuzz-тесты) подменяет её, чтобы погашенный сбой не прошёл незамеченным.
+var objectPanic = func(any) {}
+
 // parseAt разбирает объект, заголовок которого начинается со смещения off.
+//
+// Разбор не заходит за заголовок следующего объекта: незакрытая строка,
+// массив или словарь иначе читали остаток файла, и каждый из тысяч таких
+// объектов разбирался до конца — квадрат по времени и по памяти. Данные
+// потока за эту границу заходить вправе (см. maybeStream).
 func (d *Document) parseAt(off int) Object {
-	p := newParser(d.data, d)
+	p := d.fileParser()
+	if i := sort.SearchInts(d.heads, off+1); i < len(d.heads) {
+		p.b, p.full = d.data[:d.heads[i]], d.data
+	}
 	p.pos = off
 	// Пропускаем «N G obj».
 	p.skipSpace()
@@ -438,10 +533,18 @@ func (d *Document) pagesByScan() []Dict {
 	return pages
 }
 
-// contentOf собирает содержимое страницы из /Contents.
-func (d *Document) contentOf(page Dict) []byte {
-	var out []byte
+// contentOf собирает содержимое страницы из /Contents. Второе значение —
+// содержимое обрезано по пределу.
+//
+// Сумма потоков ограничена тем же maxDecoded, что и один поток: массив
+// /Contents из сотни ссылок на один поток в 256 МБ склеивался в 25 ГБ
+// на одной странице. У настоящей страницы содержимое — килобайты, редко
+// мегабайты.
+func (d *Document) contentOf(page Dict) (out []byte, cut bool) {
 	for _, item := range asArray(d.Resolve(page["Contents"])) {
+		if len(out) >= maxDecoded {
+			return out, true
+		}
 		s, ok := d.Resolve(item).(*Stream)
 		if !ok {
 			continue
@@ -450,10 +553,13 @@ func (d *Document) contentOf(page Dict) []byte {
 		if err != nil && len(data) == 0 {
 			continue
 		}
+		if rest := maxDecoded - len(out); len(data) > rest {
+			data, cut = data[:rest], true
+		}
 		out = append(out, data...)
 		out = append(out, '\n')
 	}
-	return out
+	return out, cut
 }
 
 // Info возвращает словарь /Info с метаданными документа.

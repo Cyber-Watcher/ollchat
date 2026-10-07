@@ -23,12 +23,17 @@ func scanRegistry(t *testing.T) (*Registry, string) {
 }
 
 // Проверке прав достаётся каждая цель: главная — первая запись (её человек
-// видит в окне подтверждения), чтение исходника и остальные три записи —
-// в Extra. Пропусти хоть одну — запрет на неё в настройках не сработает.
-// По умолчанию файлов четыре (слово владельца 06.10.2026).
+// видит в окне подтверждения), чтение исходника, остальные три записи и два
+// запасных имени *.UNVERIFIED.* (под ними обезличенные файлы лягут, если
+// проверка найдёт скрытое) — в Extra. Пропусти хоть одну — запрет на неё
+// в настройках не сработает. Все четыре файла — по formats=all; по умолчанию
+// копий со всеми данными нет (слово владельца 07.10.2026).
 func TestScanRedactPlanCoversEveryTarget(t *testing.T) {
 	reg, root := scanRegistry(t)
-	plan, err := reg.Plan(NameScanRedact, map[string]any{"path": "docs/скан.pdf"})
+	if plan, err := reg.Plan(NameScanRedact, map[string]any{"path": "a.pdf"}); err != nil || len(plan.Extra) != 4 {
+		t.Errorf("по умолчанию — чтение, .md и два запасных имени сверх главной, а вышло %v, %+v", err, plan)
+	}
+	plan, err := reg.Plan(NameScanRedact, map[string]any{"path": "docs/скан.pdf", "formats": "all"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +50,8 @@ func TestScanRedactPlanCoversEveryTarget(t *testing.T) {
 		write("скан.redacted.md"):                                      false,
 		write("скан.ocr.pdf"):                                          false,
 		write("скан.ocr.md"):                                           false,
+		write("скан.redacted.UNVERIFIED.pdf"):                          false,
+		write("скан.redacted.UNVERIFIED.md"):                           false,
 	}
 	for _, r := range plan.Extra {
 		if _, ok := want[r]; !ok {
@@ -71,8 +78,9 @@ func TestScanRedactOnlyMarkdown(t *testing.T) {
 	if plan.Req.Target != filepath.Join(root, "out", "итог.md") {
 		t.Errorf("главная цель %s", plan.Req.Target)
 	}
-	if len(plan.Extra) != 1 || plan.Extra[0].Kind != permissions.KindRead {
-		t.Errorf("при одном .md лишних записей быть не должно: %+v", plan.Extra)
+	if len(plan.Extra) != 2 || plan.Extra[0].Kind != permissions.KindRead ||
+		plan.Extra[1].Target != filepath.Join(root, "out", "итог.UNVERIFIED.md") {
+		t.Errorf("при одном .md лишних записей, кроме запасного имени, быть не должно: %+v", plan.Extra)
 	}
 }
 
@@ -95,10 +103,10 @@ func TestScanRedactFormatsAreWords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Extra) != 2 {
-		t.Errorf("pdf,md — две записи и чтение, а целей в Extra %d: %+v", len(plan.Extra), plan.Extra)
+	if len(plan.Extra) != 4 {
+		t.Errorf("pdf,md — две записи с запасными именами и чтение, а целей в Extra %d: %+v", len(plan.Extra), plan.Extra)
 	}
-	if _, err := reg.Plan(NameScanRedact, map[string]any{"path": "a.pdf", "out_pdf": "x.pdf", "out_ocr_pdf": "x.pdf"}); err == nil {
+	if _, err := reg.Plan(NameScanRedact, map[string]any{"path": "a.pdf", "formats": "all", "out_pdf": "x.pdf", "out_ocr_pdf": "x.pdf"}); err == nil {
 		t.Error("замазанный и распознанный PDF в один файл — должен быть отказ")
 	}
 }
@@ -107,10 +115,10 @@ func TestScanRedactRefusesBadArgs(t *testing.T) {
 	reg, _ := scanRegistry(t)
 	for name, args := range map[string]map[string]any{
 		"исходник перезаписан":         {"path": "a.pdf", "out_pdf": "a.pdf"},
-		"исходник затёрт распознанным": {"path": "a.pdf", "out_ocr_md": "a.pdf"},
+		"исходник затёрт распознанным": {"path": "a.pdf", "formats": "all", "out_ocr_md": "a.pdf"},
 		"нет форматов":                 {"path": "a.pdf", "formats": "docx"},
 		"выход из песочницы":           {"path": "a.pdf", "out_md": "/etc/x.md"},
-		"распознанный вне песочницы":   {"path": "a.pdf", "out_ocr_pdf": "/etc/x.pdf"},
+		"распознанный вне песочницы":   {"path": "a.pdf", "formats": "ocr", "out_ocr_pdf": "/etc/x.pdf"},
 	} {
 		if _, err := reg.Plan(NameScanRedact, args); err == nil {
 			t.Errorf("%s: план построен", name)

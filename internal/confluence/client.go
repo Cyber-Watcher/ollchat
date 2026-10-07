@@ -3,6 +3,7 @@ package confluence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,13 +25,20 @@ import (
 // Client — доступ к одному серверу Confluence.
 type Client struct {
 	BaseURL string
-	Token   func() string // берётся при каждом запросе: токен могли сменить на лету
-	HTTP    *http.Client
+	// Token добывает токен; ошибка объясняет, почему его нет (Resolver).
+	// Зовётся один раз на клиента и ещё раз на отказ 401 — см. token.
+	Token func() (string, error)
+	HTTP  *http.Client
+
+	mu  sync.Mutex
+	tok string
 }
 
 // New собирает клиента. Токен запрашивается функцией, а не хранится строкой:
 // он может прийти командой посреди сеанса и не должен переживать её отмену.
-func New(base string, token func() string, timeout time.Duration) *Client {
+// Клиент живёт один вызов инструмента, так что смена токена между вызовами
+// подхватывается.
+func New(base string, token func() (string, error), timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
@@ -53,6 +61,10 @@ type Page struct {
 	Children []Child
 	Files    []Attachment
 	URL      string
+
+	// FilesCut и ChildrenCut — список неполон: дальше предела есть ещё или
+	// он не дочитался. Молча обрезанный список выглядел бы полным.
+	FilesCut, ChildrenCut bool
 }
 
 // Child — дочерняя страница: только имя и номер, без содержимого.
@@ -92,19 +104,33 @@ func (p Page) Markdown() (string, error) {
 		"при следующей выгрузке -->\n\n")
 	b.WriteString(body)
 
-	if len(p.Files) > 0 {
+	if len(p.Files) > 0 || p.FilesCut {
 		b.WriteString("\n## Вложения\n\n")
 		for _, f := range p.Files {
 			fmt.Fprintf(&b, "- %s (%s, %d КБ)\n", f.Title, f.Type, f.Size/1024)
 		}
+		cutNote(&b, p.FilesCut, len(p.Files))
 	}
-	if len(p.Children) > 0 {
+	if len(p.Children) > 0 || p.ChildrenCut {
 		b.WriteString("\n## Дочерние страницы\n\n")
 		for _, c := range p.Children {
 			fmt.Fprintf(&b, "- %s (страница %s)\n", c.Title, c.ID)
 		}
+		cutNote(&b, p.ChildrenCut, len(p.Children))
 	}
 	return b.String(), nil
+}
+
+// cutNote помечает неполный список: модель и человек должны видеть, что
+// это не всё.
+func cutNote(b *strings.Builder, cut bool, shown int) {
+	switch {
+	case !cut:
+	case shown == 0:
+		b.WriteString("- _(список не получен)_\n")
+	default:
+		fmt.Fprintf(b, "- _(список неполон: показаны первые %d)_\n", shown)
+	}
 }
 
 var rePageID = regexp.MustCompile(`(?:pageId=|/pages/)(\d+)`)
@@ -173,30 +199,89 @@ func (c *Client) Get(ctx context.Context, page string, withChildren bool) (*Page
 	// нужны, без них страница бессмысленна. Замер 25.08.2026: у страницы
 	// «Инструкция по переходу с JWT на UUID» 713 знаков текста и скриншот,
 	// в котором и лежит вся суть.
-	var files struct {
-		Results []struct {
+	//
+	// Оба списка постраничные. Раньше бралась только первая страница (50
+	// вложений, 100 детей), и остальное пропадало молча — список выглядел
+	// полным. Теперь страницы читаются до предела, а неполный список помечен.
+	p.FilesCut = c.list(ctx, "/rest/api/content/"+id+"/child/attachment", maxFiles, func(raw json.RawMessage) {
+		var f struct {
 			Title    string                     `json:"title"`
 			Metadata struct{ MediaType string } `json:"metadata"`
 			Ext      struct{ FileSize int64 }   `json:"extensions"`
-		} `json:"results"`
-	}
-	if err := c.get(ctx, "/rest/api/content/"+id+"/child/attachment?limit=50", &files); err == nil {
-		for _, f := range files.Results {
-			p.Files = append(p.Files, Attachment{
-				Title: f.Title, Type: f.Metadata.MediaType, Size: f.Ext.FileSize})
 		}
-	}
+		if json.Unmarshal(raw, &f) == nil {
+			p.Files = append(p.Files, Attachment{Title: f.Title, Type: f.Metadata.MediaType, Size: f.Ext.FileSize})
+		}
+	})
 	if withChildren {
-		var kids struct {
-			Results []struct{ ID, Title string } `json:"results"`
-		}
-		if err := c.get(ctx, "/rest/api/content/"+id+"/child/page?limit=100", &kids); err == nil {
-			for _, k := range kids.Results {
+		p.ChildrenCut = c.list(ctx, "/rest/api/content/"+id+"/child/page", maxChildren, func(raw json.RawMessage) {
+			var k struct{ ID, Title string }
+			if json.Unmarshal(raw, &k) == nil {
 				p.Children = append(p.Children, Child{ID: k.ID, Title: k.Title})
 			}
-		}
+		})
 	}
 	return p, nil
+}
+
+// Пределы списков страницы. Страница уходит модели целиком, и тысяча строк
+// вложений съела бы контекст; дальше предела — пометка, а не молчание.
+const (
+	maxFiles    = 200
+	maxChildren = 500
+	listPage    = 50 // элементов за запрос
+)
+
+// list читает постраничный список Confluence (results и _links.next) не дальше
+// max элементов и отдаёт каждый в each. true — список неполон: за пределом
+// есть ещё или очередная страница не прочиталась.
+func (c *Client) list(ctx context.Context, path string, max int, each func(json.RawMessage)) bool {
+	got := 0
+	for start := 0; ; {
+		var page struct {
+			Results []json.RawMessage `json:"results"`
+			Links   struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		if err := c.get(ctx, fmt.Sprintf("%s?limit=%d&start=%d", path, listPage, start), &page); err != nil {
+			return true
+		}
+		for _, r := range page.Results {
+			if got == max {
+				return true
+			}
+			each(r)
+			got++
+		}
+		if page.Links.Next == "" || len(page.Results) == 0 {
+			return false
+		}
+		if got == max {
+			return true
+		}
+		start += len(page.Results)
+	}
+}
+
+// token — токен на время жизни клиента; fresh — спросить источник заново.
+//
+// Раньше добытчик звался на каждый HTTP-запрос, а с token_cmd это `sh -c`
+// с хранилищем паролей — три запуска на страницу (текст, вложения, дети)
+// и больше с перелистыванием списков. Теперь один на клиента и ещё один,
+// если сервер ответил 401: токен мог истечь или смениться у источника.
+func (c *Client) token(fresh bool) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tok != "" && !fresh {
+		return c.tok, nil
+	}
+	if c.Token == nil {
+		return "", nil
+	}
+	t, err := c.Token()
+	c.tok = strings.TrimSpace(t)
+	return c.tok, err
 }
 
 // get выполняет запрос и разбирает ответ.
@@ -205,44 +290,65 @@ func (c *Client) Get(ctx context.Context, page string, withChildren bool) (*Page
 // ни в отладке. Ошибка называет код ответа и путь, но не то, чем мы
 // представились.
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	token, terr := c.token(false)
+	if token == "" {
+		if terr != nil {
+			// Причина — словами источника: «chmod 600» от файла с открытыми
+			// правами прежде терялся, и человек слышал «токен не задан»
+			// при заданном token_file.
+			return fmt.Errorf("токен Confluence не получен: %w", terr)
+		}
+		return fmt.Errorf("токен Confluence не задан: команда /confluencetoken, " +
+			"файл token_file или переменная token_env")
+	}
+	status, body, err := c.fetch(ctx, path, token)
 	if err != nil {
 		return err
 	}
-	token := ""
-	if c.Token != nil {
-		token = strings.TrimSpace(c.Token())
+	if status == http.StatusUnauthorized {
+		// Тот же токен повторять незачем: заново — только если источник
+		// отдал другой.
+		if again, _ := c.token(true); again != "" && again != token {
+			if status, body, err = c.fetch(ctx, path, again); err != nil {
+				return err
+			}
+		}
 	}
-	if token == "" {
-		return fmt.Errorf("токен Confluence не задан: команда /confluencetoken, " +
-			"файл token_file или переменная token_env")
+	switch status {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("Confluence не пустил (%d): проверьте токен и права на пространство",
+			status)
+	case http.StatusNotFound:
+		// Confluence отвечает 404 и на «нет такой страницы», и на «нет прав
+		// её видеть»: существование чужой страницы он не подтверждает.
+		return fmt.Errorf("страница не найдена — её нет либо она не видна этому токену")
+	default:
+		return fmt.Errorf("Confluence ответил %d на %s", status, safePath(path))
+	}
+	return json.Unmarshal(body, out)
+}
+
+// fetch — один запрос с данным токеном: код ответа и тело.
+func (c *Client) fetch(ctx context.Context, path, token string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("Confluence не отвечает: %w", err)
+		return 0, nil, fmt.Errorf("Confluence не отвечает: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("Confluence не пустил (%d): проверьте токен и права на пространство",
-			resp.StatusCode)
-	case http.StatusNotFound:
-		// Confluence отвечает 404 и на «нет такой страницы», и на «нет прав
-		// её видеть»: существование чужой страницы он не подтверждает.
-		return fmt.Errorf("страница не найдена — её нет либо она не видна этому токену")
-	default:
-		return fmt.Errorf("Confluence ответил %d на %s", resp.StatusCode, safePath(path))
-	}
-	return json.Unmarshal(body, out)
+	return resp.StatusCode, body, nil
 }
 
 // safePath убирает из пути возможные параметры запроса: в сообщение об ошибке
@@ -317,32 +423,50 @@ func (s *Session) Has() bool {
 //
 // Порядок задан решением владельца 25.08.2026: команда главнее всего,
 // потому что ею пользуются, когда прочее не сработало или токен сменился.
-func Resolver(sess *Session, tokenFile, tokenCmd, tokenEnv string) func() string {
-	return func() string {
+//
+// Токена нет ни в одном источнике — ошибка объясняет, что не так с файлом
+// и командой. Прежде она глоталась: файл с открытыми правами молча
+// пропускался, и вместо подсказки «chmod 600» человек слышал «токен не задан».
+func Resolver(sess *Session, tokenFile, tokenCmd, tokenEnv string) func() (string, error) {
+	return func() (string, error) {
 		if sess != nil {
 			sess.mu.RLock()
 			t := sess.token
 			sess.mu.RUnlock()
 			if t != "" {
-				return t
+				return t, nil
 			}
 		}
+		var why []error
 		if tokenFile != "" {
-			if t, err := TokenFromFile(tokenFile); err == nil && t != "" {
-				return t
+			t, err := TokenFromFile(tokenFile)
+			switch {
+			case err != nil:
+				why = append(why, fmt.Errorf("token_file: %w", err))
+			case t != "":
+				return t, nil
+			default:
+				why = append(why, fmt.Errorf("token_file: файл %s пуст", tokenFile))
 			}
 		}
 		if tokenCmd != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			t, err := TokenFromCmd(ctx, tokenCmd)
 			cancel()
-			if err == nil && t != "" {
-				return t
+			switch {
+			case err != nil:
+				why = append(why, fmt.Errorf("token_cmd: %w", err))
+			case t != "":
+				return t, nil
+			default:
+				why = append(why, errors.New("token_cmd: команда ничего не вывела"))
 			}
 		}
 		if tokenEnv != "" {
-			return strings.TrimSpace(os.Getenv(tokenEnv))
+			if t := strings.TrimSpace(os.Getenv(tokenEnv)); t != "" {
+				return t, nil
+			}
 		}
-		return ""
+		return "", errors.Join(why...)
 	}
 }

@@ -17,7 +17,6 @@ import (
 	"math"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -53,7 +52,8 @@ func vecNorms(stdout io.Writer, cfg *config.Config, collName string) error {
 	printVecNormStats(stdout, "куски", c.VecMeta().Dim, computeVecNormStats(chunkVecs))
 
 	fmt.Fprintln(stdout, "\n== векторы понятий графа ==")
-	gdir := filepath.Join(c.Dir(), "graph")
+	// Каталог графа — по настройке: у именованного графа (graph-lab) он свой.
+	gdir := cfg.Graph.Rules().Dir(c.Dir())
 	gv, gerr := vecstand.Load(gdir)
 	var entVecs [][]int8
 	if gerr != nil {

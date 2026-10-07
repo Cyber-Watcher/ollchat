@@ -63,3 +63,22 @@ var graphTools = map[string]bool{
 	NameGraphOverview: true,
 	NameGraphTopic:    true,
 }
+
+// IsGraphTool сообщает, что имя — один из инструментов графа, которые клиент
+// общей библиотеки отправляет на службу.
+//
+// **Служба сверяется с этим же набором.** Вход `/api/v1/graph/tool` обязан
+// исполнять ровно то, что клиент вправе туда послать, и ничего сверх. Раньше
+// служба проверяла лишь «есть ли такой инструмент в реестре», а реестр был
+// диалоговым — с `bash` и `write_file`: запрос с именем `bash` исполнялся
+// без правил и без подтверждения, от имени службы.
+func IsGraphTool(name string) bool { return graphTools[name] }
+
+// GraphToolNames — те же имена списком, в постоянном порядке.
+//
+// Порядок нужен сборке урезанного реестра службы: из карты он выходил бы
+// случайным, и описания инструментов менялись бы местами от запуска к запуску.
+func GraphToolNames() []string {
+	return []string{NameGraphSearch, NameGraphEntity, NameGraphPath,
+		NameGraphOverview, NameGraphTopic}
+}

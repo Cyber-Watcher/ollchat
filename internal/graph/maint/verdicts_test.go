@@ -3,6 +3,7 @@ package maint
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -56,5 +57,36 @@ func TestReadVerdicts(t *testing.T) {
 	_ = os.WriteFile(bad, []byte("cos\tid_a\n0.9\t1\n"), 0o644)
 	if _, err := readVerdicts(bad, "strict", 0); err == nil {
 		t.Fatal("файл без обязательных столбцов должен отклоняться")
+	}
+}
+
+// Пороги близости в справке по уровням совпадают с тем, что делает код:
+// у mutual справка обещала cos≥0.80, а уровень с 02.09.2026 пропускает
+// от 0.70 (аудит 07.10.2026). Проверяется граница: на пороге из справки
+// пара проходит, чуть ниже — нет; остальные признаки при этом выполнены.
+func TestMergeLevelHelpMatchesCode(t *testing.T) {
+	help := mergeLevelNames()
+	for name, pick := range mergeLevels {
+		at := strings.Index(help, name+" (")
+		if at < 0 {
+			t.Errorf("уровня %s нет в справке: %s", name, help)
+			continue
+		}
+		desc := help[at+len(name)+2:]
+		desc = desc[:strings.Index(desc, ")")]
+		i := strings.Index(desc, "cos≥")
+		if i < 0 {
+			continue // уровень без порога близости
+		}
+		limit, err := strconv.ParseFloat(desc[i+len("cos≥"):], 64)
+		if err != nil {
+			t.Fatalf("порог уровня %s в справке не читается: %q", name, desc)
+		}
+		if !pick(verdictFacts{cos: limit, alias: true, mutual: true}) {
+			t.Errorf("уровень %s: на пороге из справки (%.2f) пара не проходит", name, limit)
+		}
+		if pick(verdictFacts{cos: limit - 0.005, alias: true, mutual: true}) {
+			t.Errorf("уровень %s: пара проходит ниже порога из справки (%.2f) — справка врёт", name, limit)
+		}
 	}
 }

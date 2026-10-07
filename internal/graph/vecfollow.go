@@ -58,8 +58,9 @@ func (g *Graph) EmbedNewEntities(ctx context.Context, emb kb.Embedder, o EmbedOp
 	o = o.norm()
 
 	// Один счёт векторов на граф: догонщик рядом с --graph-embed или второй
-	// догонщик — отказ, а не два писателя в одном файле.
-	release, err := lockVectors(g.dir)
+	// догонщик — отказ, а не два писателя в одном файле. Векторы под замком
+	// перечитываются: граф открыт задолго до него (lockVectorsFresh).
+	release, err := g.lockVectorsFresh()
 	if err != nil {
 		return EmbedNewResult{}, err
 	}
@@ -102,7 +103,10 @@ func (g *Graph) EmbedNewEntities(ctx context.Context, emb kb.Embedder, o EmbedOp
 		tail = tail[:limit]
 	}
 
-	dim, data, err := embedBatches(ctx, emb, tail, o, onProgress)
+	// Копия: embedBatches подменяет пустые имена пробелом, а отпечатки
+	// считаются от настоящих текстов.
+	seg := append([]string(nil), tail...)
+	dim, data, err := embedBatches(ctx, emb, seg, o, onProgress)
 	if err != nil {
 		return res, err
 	}
@@ -113,5 +117,17 @@ func (g *Graph) EmbedNewEntities(ctx context.Context, emb kb.Embedder, o EmbedOp
 		return res, err
 	}
 	res.Added, res.Dim = len(tail), dim
+
+	// Отпечатки текстов — у посчитанных сейчас, как у досчёта в EmbedEntities.
+	// До 07.10.2026 догонщик их не писал, и его векторы навсегда оставались
+	// «неизвестными»: --graph-embed-stale не обновлял их, сколько бы синонимов
+	// ни пришло к понятию потом (аудит, 4.5). Ошибка записи отпечатков счёта
+	// не отменяет — как и там.
+	to := res.Before + len(tail)
+	fresh := make([]uint32, 0, len(tail))
+	for id := res.Before + 1; id <= to; id++ {
+		fresh = append(fresh, uint32(id))
+	}
+	_ = saveStamps(g.dir, mergeStamps(loadStamps(g.dir), texts[:to], fresh))
 	return res, nil
 }

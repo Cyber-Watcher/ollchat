@@ -161,12 +161,57 @@ func TestUnknownMethod(t *testing.T) {
 	}
 }
 
-// Битое сообщение.
+// Битое сообщение: ошибка разбора и "id": null — ответ без id клиент
+// сопоставить не может и отбрасывает (JSON-RPC 2.0).
 func TestBrokenMessage(t *testing.T) {
 	d := call(t, server(), `{это не json`)
 	e := d["error"].(map[string]any)
 	if int(e["code"].(float64)) != codeParse {
 		t.Errorf("код ошибки разбора = %v", e["code"])
+	}
+	if id, ok := d["id"]; !ok || id != nil {
+		t.Errorf("в ответе на неразобранное нужен \"id\": null, а там %v (есть: %v)", id, ok)
+	}
+}
+
+// Цельный JSON, который не запрос, — не ошибка разбора, а -32600 с id null.
+func TestNotARequest(t *testing.T) {
+	for _, body := range []string{`"строка"`, `42`, `[]`} {
+		d := call(t, server(), body)
+		e, _ := d["error"].(map[string]any)
+		if e == nil || int(e["code"].(float64)) != codeInvalidRequest {
+			t.Errorf("%s: ожидался -32600, пришло %v", body, d)
+		}
+		if id, ok := d["id"]; !ok || id != nil {
+			t.Errorf("%s: нужен \"id\": null, а там %v", body, id)
+		}
+	}
+}
+
+// Пакет запросов: каждому запросу — свой отказ -32600 с его id, уведомлению
+// — ничего. Прежде весь массив получал «не разобрано» (-32700), хотя
+// разобран был, и клиент искал ошибку в своём JSON.
+func TestBatchIsRefusedPerRequest(t *testing.T) {
+	resp := server().Handle(context.Background(), []byte(`[
+		{"jsonrpc":"2.0","id":1,"method":"ping"},
+		{"jsonrpc":"2.0","method":"notifications/initialized"},
+		{"jsonrpc":"2.0","id":"б","method":"tools/list"}]`))
+	var list []map[string]any
+	if err := json.Unmarshal(resp, &list); err != nil {
+		t.Fatalf("на пакет ждали массив ответов: %v (%s)", err, resp)
+	}
+	if len(list) != 2 {
+		t.Fatalf("ответов %d, ожидалось 2 (уведомлению ответа нет): %s", len(list), resp)
+	}
+	for i, want := range []any{float64(1), "б"} {
+		e, _ := list[i]["error"].(map[string]any)
+		if list[i]["id"] != want || e == nil || int(e["code"].(float64)) != codeInvalidRequest {
+			t.Errorf("ответ %d: %v, ожидался отказ -32600 с id %v", i, list[i], want)
+		}
+	}
+	if resp := server().Handle(context.Background(),
+		[]byte(`[{"jsonrpc":"2.0","method":"notifications/initialized"}]`)); resp != nil {
+		t.Errorf("на пакет из одних уведомлений ответа быть не должно: %s", resp)
 	}
 }
 

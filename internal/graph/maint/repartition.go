@@ -3,6 +3,7 @@ package maint
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
@@ -57,7 +58,15 @@ func Repartition(stdout io.Writer, cfg *config.Config, name string) error {
 
 	st := g.Stats(chunks)
 	comms, cerr := g.LoadCommunities()
-	if cerr != nil || comms == nil || len(comms.List) == 0 {
+	if cerr != nil {
+		// Битый файл — не «темы не размечены». До 07.10.2026 он молча давал
+		// REPARTITION=yes, и докатка пересчитывала разметку поверх него: описания
+		// тем (часы карты) не переносились, а битый файл уходил в копию
+		// communities.prev.json поверх прежней, ещё целой. Ошибка без метки —
+		// и докатка разметку не тронет, и человек увидит причину.
+		return brokenCommunities(g, cerr)
+	}
+	if comms == nil || len(comms.List) == 0 {
 		fmt.Fprintln(stdout, "темы не размечены — обзор тем работать не будет")
 		fmt.Fprintln(stdout, repartitionYes)
 		return nil
@@ -93,4 +102,12 @@ func Repartition(stdout io.Writer, cfg *config.Config, name string) error {
 		fmt.Fprintln(stdout, repartitionNo)
 	}
 	return nil
+}
+
+// brokenCommunities — отказ по нечитаемой разметке тем с тем, что с ней
+// делать. Общий у доктора и --graph-repartition-due.
+func brokenCommunities(g *graph.Graph, cerr error) error {
+	return fmt.Errorf("%w\nфайл: %s\nпересчитывать поверх него вслепую нельзя: --graph-communities не перенесёт описаний тем "+
+		"и отложит битый файл в %s поверх прежней копии.\nСначала сохраните оба файла и попробуйте восстановить разметку",
+		cerr, filepath.Join(g.Dir(), graph.CommunityFile), graph.PrevCommunityFile)
 }

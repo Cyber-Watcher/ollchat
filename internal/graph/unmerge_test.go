@@ -151,3 +151,59 @@ func TestUndoMergesRefusesUnderBuild(t *testing.T) {
 		t.Fatal("склейка снята вопреки отказу")
 	}
 }
+
+// Склейка, дописанная другим процессом после открытия графа, снятием
+// соседней не стирается: журнал перечитывается под замком, а не подменяется
+// снимком с открытия (аудит 07.10.2026, №9).
+func TestUndoMergesKeepsMergeAddedAfterOpen(t *testing.T) {
+	g, a, b, _, _ := graphWithChain(t)
+	defer g.Close()
+	e, _, _ := g.Entities().Add("heap allocation", TypeConcept)
+	f, _, _ := g.Entities().Add("куча", TypeConcept)
+	must(t, g.Entities().Flush())
+
+	// Другой «процесс» (разбор очереди, --graph-merge) дописывает склейку.
+	other, err := Open(filepath.Dir(g.Dir()), 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := other.Merges().Add([]MergeRec{{From: e, To: f, Verdict: "ДА", Why: "перевод"}}); err != nil || n != 1 {
+		t.Fatalf("склейка другого процесса: %d, %v", n, err)
+	}
+	must(t, other.Close())
+
+	if _, err := g.UndoMerges([][2]uint32{{a, b}}, "проверка", false); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(filepath.Dir(g.Dir()), 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if again.Merges().Resolve(e) != f {
+		t.Fatal("склейка, дописанная после открытия графа, стёрта снятием соседней")
+	}
+	if again.Merges().Resolve(a) != a {
+		t.Fatal("названная склейка не снята")
+	}
+}
+
+// След снятого пишется после подмены журнала: сорвись подмена — в следе не
+// окажется склеек, которые в журнале остались. Сорвался сам след — снятие
+// уже сделано, о чём и говорит ошибка, а снятое цело в копии журнала.
+func TestUndoMergesTraceAfterSwap(t *testing.T) {
+	g, a, b, _, _ := graphWithChain(t)
+	defer g.Close()
+	// След писать некуда: на месте его файла — каталог.
+	must(t, os.MkdirAll(filepath.Join(g.Dir(), undoneMergesFile), 0o755))
+	res, err := g.UndoMerges([][2]uint32{{a, b}}, "проверка", false)
+	if err == nil || !strings.Contains(err.Error(), "склейки сняты") {
+		t.Fatalf("сорванный след: %v", err)
+	}
+	if g.Merges().Resolve(a) != a {
+		t.Fatal("склейка не снята, хотя подмена журнала прошла")
+	}
+	if _, err := os.Stat(res.Backup); err != nil {
+		t.Fatalf("копии прежнего журнала нет: %v", err)
+	}
+}

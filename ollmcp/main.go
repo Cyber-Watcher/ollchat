@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"net"
 	"net/http"
 	"os/signal"
 	"strings"
@@ -66,33 +67,41 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 	if !exists {
 		return fmt.Errorf("файл настроек %s не найден.\nСоздайте его командой: ollchat --init-config", path)
 	}
-
-	// Служба — это режим --http без --tools: только ей нужен прогретый граф.
-	srv, data, err := build(cfg, addr != "" && !list)
-	if err != nil {
-		return err
+	// Тот же файл настроек, что у ollchat, — те же замечания к нему. Служба
+	// живёт под systemd, и опечатка в ключе иначе так и осталась бы
+	// невидимой: stderr уходит в журнал службы, где её и найдут.
+	for _, msg := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "ollmcp: предупреждение: %s: %s\n", cfg.Path, msg)
 	}
+
+	// Порт службы открывается до сборки: отказ «без ключа — только петля»
+	// и занятый порт видны сразу, а не после прогрева графа.
+	var ln net.Listener
+	var loopback bool
+	if addr != "" && !list {
+		if ln, loopback, err = kbserve.Listen(addr, kbserve.Token()); err != nil {
+			return err
+		}
+		defer ln.Close()
+	}
+
 	stepsPattern, err := cfg.Log.StepsPattern()
 	if err != nil {
 		return fmt.Errorf("log.steps_file_pattern: %w", err)
 	}
-	srv.Steps = steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollmcp", cfg.Log.Enabled)
-	defer srv.Steps.Close()
+	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollmcp", cfg.Log.Enabled)
+	defer steps.Close()
 
 	// Настройки службы: пределы, потолок ответа, срок вызова (этап 109).
 	if mcpConf == "" {
-		mcpConf = SettingsPath(path)
+		mcpConf = mcp.SettingsPath(path)
 	}
-	settings, err := LoadSettings(mcpConf)
+	// Служба — это режим --http без --tools: только ей нужен прогретый граф.
+	srv, data, err := build(cfg, addr != "" && !list, mcp.ServiceOptions{
+		Settings: mcpConf, OutputKB: cfg.Agent.MaxOutputKB, Steps: steps,
+	})
 	if err != nil {
 		return err
-	}
-	if srv.Policy, err = settings.Policy(cfg.Agent.MaxOutputKB); err != nil {
-		return fmt.Errorf("%s: %w", mcpConf, err)
-	}
-	if settings.Watch() {
-		srv.WatchFiles = []string{mcpConf}
-		srv.Validate = func() error { _, err := LoadSettings(mcpConf); return err }
 	}
 
 	if list {
@@ -118,7 +127,7 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(mcp.Info(srv))
 	})
-	err = serveOn(mux, addr, data.Token, srv)
+	err = serveOn(mux, ln, loopback, data.Token, srv)
 	if errors.Is(err, errReplaced) {
 		// Тот же номер процесса и тот же порт после exec: сторож службы
 		// подмены не замечает, а клиенты узнают о возможной смене набора
@@ -133,18 +142,21 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 // или правлены её настройки.
 var errReplaced = errors.New("бинарь или настройки сменились")
 
-// serveOn поднимает службу и ждёт сигнала останова.
-func serveOn(mux *http.ServeMux, addr, token string, msrv *mcp.Server) error {
+// serveOn поднимает службу на открытом порту и ждёт сигнала останова.
+// loopback — порт открыт только петле (kbserve.Listen).
+func serveOn(mux *http.ServeMux, ln net.Listener, loopback bool, token string, msrv *mcp.Server) error {
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "ollmcp: ключ доступа НЕ ЗАДАН (OLLMCP_TOKEN)")
+		fmt.Fprintln(os.Stderr, "ollmcp: ключ доступа не задан (OLLMCP_TOKEN) — служба только для этой машины")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// Сервер общий с ollchat --serve: проверки от чужих веб-страниц и сроки
+	// в одном месте.
+	srv := kbserve.NewHTTPServer(mux, loopback)
 	errc := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errc <- err
 		}
 	}()

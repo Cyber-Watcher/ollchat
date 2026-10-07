@@ -188,14 +188,9 @@ func (g *Graph) Findings(ctx context.Context, ex Extractor, c *Communities,
 		wg.Add(1)
 		go worker()
 	}
-	for _, i := range work {
-		select {
-		case jobs <- i:
-		case <-ctx.Done():
-		}
-	}
-	close(jobs)
-	wg.Wait()
+	// Раздача — общая с Summarize: рабочие, ушедшие после неудачной записи,
+	// иначе оставляли бы раздатчика висеть на канале без читателя (summary.go).
+	dispatch(ctx, jobs, work, &wg)
 
 	if report != nil {
 		mu.Lock()

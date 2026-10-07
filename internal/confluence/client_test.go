@@ -2,10 +2,13 @@ package confluence
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +40,7 @@ func pageServer(t *testing.T, status int) (*httptest.Server, *string) {
 
 func TestGetPageWithChildrenAndFiles(t *testing.T) {
 	srv, auth := pageServer(t, http.StatusOK)
-	c := New(srv.URL, func() string { return "секрет" }, 5*time.Second)
+	c := New(srv.URL, fixedToken("секрет"), 5*time.Second)
 	p, err := c.Get(context.Background(), "https://wiki.example/pages/viewpage.action?pageId=123", true)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +74,7 @@ func TestGetErrorsNeverLeakToken(t *testing.T) {
 		{http.StatusInternalServerError, "ответил 500"},
 	} {
 		srv, _ := pageServer(t, tc.status)
-		c := New(srv.URL, func() string { return "секрет-токен" }, 5*time.Second)
+		c := New(srv.URL, fixedToken("секрет-токен"), 5*time.Second)
 		_, err := c.Get(context.Background(), "123", false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("код %d: ошибка %v, ожидалось %q", tc.status, err, tc.want)
@@ -89,7 +92,7 @@ func TestGetWithoutTokenDoesNotCallServer(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true }))
 	t.Cleanup(srv.Close)
-	c := New(srv.URL, func() string { return "  " }, time.Second)
+	c := New(srv.URL, fixedToken("  "), time.Second)
 	if _, err := c.Get(context.Background(), "123", false); err == nil || !strings.Contains(err.Error(), "токен") {
 		t.Fatalf("без токена ожидался понятный отказ: %v", err)
 	}
@@ -143,21 +146,171 @@ func TestResolverOrder(t *testing.T) {
 
 	sess := &Session{}
 	get := Resolver(sess, file, "printf из-команды", "OLLCHAT_TEST_CONF_TOKEN")
-	if got := get(); got != "из-файла" {
+	if got, _ := get(); got != "из-файла" {
 		t.Fatalf("файл главнее команды и окружения: %q", got)
 	}
 	sess.Set("из-сеанса")
-	if got := get(); got != "из-сеанса" {
+	if got, _ := get(); got != "из-сеанса" {
 		t.Fatalf("сеанс главнее всего: %q", got)
 	}
 	sess.Clear()
-	if got := Resolver(nil, "", "printf из-команды", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-команды" {
+	if got, _ := Resolver(nil, "", "printf из-команды", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-команды" {
 		t.Fatalf("команда главнее окружения: %q", got)
 	}
-	if got := Resolver(nil, "", "", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-окружения" {
+	if got, _ := Resolver(nil, "", "", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-окружения" {
 		t.Fatalf("окружение — последнее: %q", got)
 	}
-	if got := Resolver(nil, "", "", "")(); got != "" {
-		t.Fatalf("без источников — пусто: %q", got)
+	if got, err := Resolver(nil, "", "", "")(); got != "" || err != nil {
+		t.Fatalf("без источников — пусто и без ошибки: %q, %v", got, err)
+	}
+}
+
+// listServer отдаёт страницу с files вложениями и kids детьми — постранично,
+// как Confluence: results по limit штук, начиная со start, и _links.next,
+// пока есть ещё.
+func listServer(t *testing.T, files, kids int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		total, kind := 0, ""
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/child/attachment"):
+			total, kind = files, "файл"
+		case strings.HasSuffix(r.URL.Path, "/child/page"):
+			total, kind = kids, "ребёнок"
+		default:
+			_, _ = w.Write([]byte(`{"id":"123","title":"Т","body":{"storage":{"value":"<p>ок</p>"}}}`))
+			return
+		}
+		start, _ := strconv.Atoi(r.URL.Query().Get("start"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		var results []map[string]any
+		for i := start; i < total && i < start+limit; i++ {
+			results = append(results, map[string]any{"id": strconv.Itoa(1000 + i),
+				"title": fmt.Sprintf("%s %d", kind, i)})
+		}
+		resp := map[string]any{"results": results, "size": len(results), "_links": map[string]any{}}
+		if start+limit < total {
+			resp["_links"] = map[string]any{"next": fmt.Sprintf("%s?limit=%d&start=%d", r.URL.Path, limit, start+limit)}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Вложения и дети читаются постранично, а не первой страницей: прежде всё
+// после 50 вложений и 100 детей пропадало молча, и список выглядел полным.
+// Сверх предела список помечен неполным.
+func TestListsArePaginated(t *testing.T) {
+	srv := listServer(t, 120, maxChildren+30)
+	p, err := New(srv.URL, fixedToken("т"), 5*time.Second).Get(context.Background(), "123", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Files) != 120 || p.FilesCut {
+		t.Errorf("вложений %d (неполон %v), ожидалось все 120", len(p.Files), p.FilesCut)
+	} else if p.Files[119].Title != "файл 119" {
+		t.Errorf("последнее вложение %q", p.Files[119].Title)
+	}
+	if len(p.Children) != maxChildren || !p.ChildrenCut {
+		t.Errorf("детей %d (неполон %v), ожидалось %d и пометка", len(p.Children), p.ChildrenCut, maxChildren)
+	}
+	md, err := p.Markdown()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, fmt.Sprintf("список неполон: показаны первые %d", maxChildren)) {
+		t.Errorf("неполный список детей не помечен")
+	}
+	if strings.Count(md, "список неполон") != 1 {
+		t.Errorf("полный список вложений помечен неполным")
+	}
+}
+
+func fixedToken(tok string) func() (string, error) {
+	return func() (string, error) { return tok, nil }
+}
+
+// Файл с токеном, открытый всем, не пропускается молча: подсказка
+// «chmod 600» доходит до человека через ошибку инструмента. Прежде
+// добытчик глотал её, и человек слышал «токен не задан» при заданном файле.
+func TestResolverSurfacesFileError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(file, []byte("секрет-из-файла"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolver(nil, file, "", "")(); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("ошибка прав файла потеряна: %v", err)
+	}
+	srv, _ := pageServer(t, http.StatusOK)
+	_, err := New(srv.URL, Resolver(nil, file, "", ""), time.Second).Get(context.Background(), "123", false)
+	if err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("инструмент не объяснил, что не так с файлом: %v", err)
+	}
+	if strings.Contains(err.Error(), "секрет-из-файла") {
+		t.Fatalf("токен попал в текст ошибки: %v", err)
+	}
+	// Есть другой источник — работаем им, как прежде.
+	t.Setenv("OLLCHAT_TEST_CONF_TOKEN", "из-окружения")
+	if got, err := Resolver(nil, file, "", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-окружения" || err != nil {
+		t.Fatalf("запасной источник не сработал: %q, %v", got, err)
+	}
+}
+
+// token_cmd запускается один раз на клиента, а не на каждый HTTP-запрос:
+// страница с вложениями и детьми — три запроса, и прежде три запуска `sh -c`.
+func TestTokenCmdRunsOncePerClient(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "запуски")
+	cmd := "echo x >> '" + counter + "'; printf секрет"
+	srv, _ := pageServer(t, http.StatusOK)
+	c := New(srv.URL, Resolver(nil, "", cmd, ""), 5*time.Second)
+	if _, err := c.Get(context.Background(), "123", true); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "x"); n != 1 {
+		t.Errorf("команда за токеном запущена %d раз на одну страницу", n)
+	}
+}
+
+// На 401 токен спрашивается у источника заново, один раз: он мог истечь
+// или смениться. Тот же токен повторно не шлётся.
+func TestTokenRefreshedOnUnauthorized(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Header.Get("Authorization") != "Bearer новый" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"123","title":"Т","body":{"storage":{"value":"<p>ок</p>"}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	asked := 0
+	rotating := func() (string, error) {
+		asked++
+		if asked == 1 {
+			return "старый", nil
+		}
+		return "новый", nil
+	}
+	if _, err := New(srv.URL, rotating, time.Second).Get(context.Background(), "123", false); err != nil {
+		t.Fatalf("сменившийся токен не подхвачен: %v", err)
+	}
+	if asked != 2 {
+		t.Errorf("источник спрошен %d раз, ожидалось 2", asked)
+	}
+
+	hits = 0
+	_, err := New(srv.URL, fixedToken("старый"), time.Second).Get(context.Background(), "123", false)
+	if err == nil || !strings.Contains(err.Error(), "не пустил") {
+		t.Fatalf("неверный токен должен давать отказ: %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("тот же токен отправлен повторно: запросов %d", hits)
 	}
 }

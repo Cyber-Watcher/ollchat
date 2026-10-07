@@ -41,8 +41,6 @@ func (t *table) row(cells ...string) {
 	t.rows = append(t.rows, out)
 }
 
-func (t *table) empty() bool { return len(t.rows) == 0 }
-
 // widths — ширина каждой колонки по самому длинному значению, включая заголовок.
 func (t *table) widths() []int {
 	w := make([]int, len(t.cols))

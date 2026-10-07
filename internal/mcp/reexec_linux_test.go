@@ -87,6 +87,141 @@ func TestServeWatchedReexecOnReplace(t *testing.T) {
 	}
 }
 
+// Подмена ждёт конца начатого вызова: вызовы идут в своих горутинах
+// (session.go), и пустого буфера входа для exec уже мало — ответ вызова,
+// не записанный до exec, пропал бы вместе с процессом.
+func TestServeWatchedReexecWaitsForCall(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ollmcp")
+	if err := os.WriteFile(bin, []byte("старый"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(bin, &st); err != nil {
+		t.Fatal(err)
+	}
+	w := &binaryWatch{path: bin, dev: uint64(st.Dev), ino: uint64(st.Ino)}
+
+	release, started, cancelled := make(chan struct{}), make(chan struct{}, 1), make(chan struct{}, 1)
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outR, outW := io.Pipe()
+	execs := make(chan struct{}, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveWatched(context.Background(), server(slowTool(release, started, cancelled)),
+			inR, outW, false, w, func() error {
+				execs <- struct{}{}
+				return errors.New("exec в тесте не делается")
+			})
+		outW.Close()
+	}()
+	replies := bufio.NewReader(outR)
+	if _, err := inW.WriteString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"долгий","arguments":{}}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	fresh := bin + ".new"
+	if err := os.WriteFile(fresh, []byte("новый"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(fresh, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(fresh, bin); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-execs:
+		t.Fatal("exec посреди вызова: его ответ пропал бы")
+	case <-time.After(2500 * time.Millisecond):
+	}
+
+	close(release)
+	line, err := replies.ReadString('\n')
+	if err != nil || !strings.Contains(line, `"id":1`) {
+		t.Fatalf("ответ на вызов: %q, %v", line, err)
+	}
+	select {
+	case <-execs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("после конца вызова подмены не было")
+	}
+	inW.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("цикл вернул ошибку: %v", err)
+	}
+}
+
+// Подменённый бинарь запускается вместо себя, только если он свой (или root-а)
+// и писать в него может лишь владелец: иначе это мог быть чужой код, которому
+// exec отдал бы наши права и окружение с OLLMCP_TOKEN.
+func TestBinaryReplacedRefusesUntrusted(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ollmcp")
+	if err := os.WriteFile(bin, []byte("старый"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(bin, &st); err != nil {
+		t.Fatal(err)
+	}
+	// Прежний файл держим открытым, как держит его работающий процесс:
+	// иначе его номер узла освободится и достанется одной из подмен.
+	held, err := os.Open(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	w := &binaryWatch{path: bin, dev: uint64(st.Dev), ino: uint64(st.Ino)}
+	replace := func(mode os.FileMode, chown bool) {
+		t.Helper()
+		fresh := bin + ".new"
+		if err := os.WriteFile(fresh, []byte("новый"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(fresh, mode); err != nil {
+			t.Fatal(err)
+		}
+		if chown {
+			if err := os.Chown(fresh, 12345, 12345); err != nil {
+				t.Fatal(err)
+			}
+		}
+		old := time.Now().Add(-time.Minute)
+		if err := os.Chtimes(fresh, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(fresh, bin); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	replace(0o775, false)
+	if w.binaryReplaced() {
+		t.Error("принят бинарь, в который может писать группа")
+	}
+	replace(0o757, false)
+	if w.binaryReplaced() {
+		t.Error("принят бинарь, в который могут писать все")
+	}
+	// Чужого владельца файлу может дать только root.
+	if os.Geteuid() == 0 {
+		replace(0o755, true)
+		if w.binaryReplaced() {
+			t.Error("принят бинарь чужого владельца")
+		}
+	}
+	replace(0o755, false)
+	if !w.binaryReplaced() {
+		t.Error("свой бинарь с правами 0755 не принят")
+	}
+}
+
 // Правка файла настроек перезапускает службу так же, как подмена бинаря,
 // а негодная правка — нет: служба остаётся на прежних настройках.
 func TestSettingsChangeTriggersReexec(t *testing.T) {

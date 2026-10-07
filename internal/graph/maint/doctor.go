@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -87,20 +88,20 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 
 	st := g.Stats(chunks)
 	cst := coll.Stats()
-	// Отметки считаем ПО ВИДАМ и отдельно по книгам, которых в коллекции
-	// больше нет: прежнее одно число «пропущено» складывало потерю (модель
-	// не дала разбираемого ответа) с нормой работы (служебный кусок), да ещё
-	// и со следами удалённых книг — и раздувалось вдвое (этап 110, А0).
-	// LiveBooks, а НЕ Books: второй отдаёт реестр как есть, вместе
-	// с помеченными удалёнными (его докстринг прямо про это), и удалённая
-	// книга считалась бы живой. Поймано 27.09.2026 сверкой с разбором
-	// progress.log: доктор печатал «не разобрала модель 1362» при настоящих
-	// 47, потому что 11 802 отметки удалённых книг попадали в счёт живых.
-	aliveBooks := map[uint32]bool{}
-	for _, b := range coll.LiveBooks() {
-		aliveBooks[b.ID] = true
+	ms := deadMarkStats(coll, g)
+	// Разбор считается по кускам ЖИВЫХ книг, а не по числу отметок в журнале:
+	// там лежат и отметки удалённых книг. До 07.10.2026 заголовок брал
+	// st.Covered — все отметки — и делил их на все куски хранилища вместе
+	// с удалёнными. На проверочной коллекции (у живой книги разобраны 3 куска
+	// из 10, у удалённых книг 64 отметки) выходило «разобрано кусков 67 из 34
+	// (197%), осталось 0» — и ни одного совета разобрать остаток.
+	// Каталоги считаются тем же проходом.
+	stage.say("считаю разбор по кускам коллекции")
+	cov, err := liveCoverage(coll, g, cfg.KB.Roots, stage)
+	if err != nil {
+		stage.done()
+		return err
 	}
-	ms := g.Progress().Stats(func(doc uint32) bool { return aliveBooks[doc] })
 
 	stage.done()
 	fmt.Fprintf(stdout, "коллекция %s · граф\n", name)
@@ -117,14 +118,18 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 
 	// 1. Разбор кусков.
 	pct := 0
-	if chunks > 0 {
-		pct = 100 * st.Covered / chunks
+	if cov.total > 0 {
+		pct = 100 * cov.marked() / cov.total
 	}
-	fmt.Fprintf(stdout, "  разобрано кусков %d из %d (%d%%), осталось %d\n", st.Covered, chunks, pct, st.Pending)
-	if ms.Skipped > 0 || ms.Empty > 0 || ms.Service > 0 {
+	fmt.Fprintf(stdout, "  разобрано кусков %d из %d (%d%%), осталось %d\n", cov.marked(), cov.total, pct, cov.pending)
+	if cov.skipped > 0 || cov.empty > 0 || cov.service > 0 {
 		fmt.Fprintf(stdout, "    с понятиями %d, пустых %d, не разобрала модель %d, служебных %d\n",
-			ms.Done, ms.Empty, ms.Skipped, ms.Service)
+			cov.done, cov.empty, cov.skipped, cov.service)
 		fmt.Fprintf(stdout, "      «служебных» — оглавления и списки литературы, модели не показывались\n")
+	}
+	if cov.again > 0 {
+		fmt.Fprintf(stdout, "    из разобранных сборка возьмёт снова %d — «служебные» без признака: "+
+			"забыты чисткой графа или признак снят; они же в «осталось»\n", cov.again)
 	}
 	if ms.Gone > 0 {
 		fmt.Fprintf(stdout, "    отметок книг, которых в коллекции НЕТ: %d (в %d книгах) — "+
@@ -292,8 +297,15 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		}
 	}
 
+	// Битая разметка — не «темы не размечены»: совет пересчитать поверх неё
+	// выбросил бы описания тем, а битый файл ушёл бы в копию поверх прежней,
+	// ещё целой (см. brokenCommunities). До 07.10.2026 доктор их не различал.
+	var brokenTopics error
 	switch {
-	case cerr != nil || comms == nil || len(comms.List) == 0:
+	case cerr != nil:
+		brokenTopics = brokenCommunities(g, cerr)
+		fmt.Fprintf(stdout, "  темы: разметка НЕ ЧИТАЕТСЯ — %v\n", cerr)
+	case comms == nil || len(comms.List) == 0:
 		needCommunities = true
 		fmt.Fprintln(stdout, "  темы: не размечены — обзор тем работать не будет")
 	default:
@@ -366,15 +378,19 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	if g.Locked() {
 		fmt.Fprintln(stdout, "  сейчас идёт сборка — советы ниже выполняйте после её остановки")
 	}
-	if st.Pending > 0 {
+	if cov.pending > 0 {
 		// Называем настоящие каталоги, а не «<каталог>»: ключ --graph-folder
 		// отбирает книги по куску пути **внутри библиотеки**, и человеку
 		// неоткуда узнать, какие пути там есть, кроме как заглянув на диск.
-		stage.say("считаю покрытие по каталогам")
-		all := pendingByFolder(coll, g, cfg.KB.Roots, chunks, stage)
-		stage.done()
-		printCoverage(stdout, all)
-		left := all
+		printCoverage(stdout, cov.folders)
+		// В советах — только каталоги с остатком: закрытые видны в таблице,
+		// и «… и ещё N каталогов» не должно считать их работой.
+		var left []folderPending
+		for _, f := range cov.folders {
+			if f.pending > 0 {
+				left = append(left, f)
+			}
+		}
 		var more int
 		// В советах список обрезаем: за одну ночь берут один каталог, а вся
 		// картина уже показана таблицей выше.
@@ -388,11 +404,7 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 			n++
 			fmt.Fprintf(stdout, "\n  %d. разобрать оставшееся — по каталогу за раз:\n", n)
 			for _, f := range left {
-				if f.pending == 0 {
-					continue
-				}
-				fmt.Fprintf(stdout, "     ollchat --graph-build %s --graph-folder %s   (%d кусков)\n",
-					name, f.folder, f.pending)
+				fmt.Fprintf(stdout, "     %s\n", buildAdvice(name, f))
 			}
 			if more > 0 {
 				fmt.Fprintf(stdout, "     … и ещё %s, все видны в таблице выше\n",
@@ -401,7 +413,14 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 			fmt.Fprintln(stdout, "     разбор — единственный шаг, который нельзя доделать задним числом дёшево")
 		} else {
 			step(fmt.Sprintf("ollchat --graph-build %s", name),
-				fmt.Sprintf("разобрать оставшиеся %d кусков", st.Pending))
+				fmt.Sprintf("разобрать оставшиеся %d кусков", cov.pending))
+		}
+	}
+	if brokenTopics != nil {
+		n++
+		fmt.Fprintf(stdout, "  %d. разобраться с файлом разметки тем, прежде чем что-либо пересчитывать:\n", n)
+		for _, l := range strings.Split(brokenTopics.Error(), "\n")[1:] {
+			fmt.Fprintf(stdout, "     %s\n", l)
 		}
 	}
 	if needCommunities {
@@ -445,11 +464,12 @@ func repartitionDue(uncovered, entities int) bool {
 	return 100*uncovered/entities >= repartitionThreshold
 }
 
-// folderPending — сколько кусков каталога библиотеки ещё не разобрано.
+// folderPending — разбор кусков одного каталога библиотеки.
 type folderPending struct {
 	folder  string
-	done    int
-	pending int
+	done    int // с отметкой любого вида
+	pending int // сборка ещё возьмёт (graph.WillTake)
+	total   int // всего кусков живых книг каталога
 }
 
 // printCoverage печатает покрытие графом по каталогам библиотеки.
@@ -467,10 +487,9 @@ func printCoverage(stdout io.Writer, rows []folderPending) {
 	}
 	fmt.Fprintln(stdout, "\n  покрытие по каталогам библиотеки:")
 	fmt.Fprintf(stdout, "    %-26s %10s %10s %10s  %s\n", "каталог", "разобрано", "осталось", "всего", "покрытие")
-	var td, tl int
+	var td, tl, tt int
 	for _, r := range rows {
-		total := r.done + r.pending
-		if total == 0 {
+		if r.total == 0 {
 			continue
 		}
 		mark := ""
@@ -478,75 +497,162 @@ func printCoverage(stdout io.Writer, rows []folderPending) {
 			mark = "  ЗАКРЫТ"
 		}
 		fmt.Fprintf(stdout, "    %-26s %10d %10d %10d   %5.1f%%%s\n",
-			r.folder, r.done, r.pending, total, float64(r.done)/float64(total)*100, mark)
+			r.folder, r.done, r.pending, r.total, float64(r.done)/float64(r.total)*100, mark)
 		td += r.done
 		tl += r.pending
+		tt += r.total
 	}
-	if td+tl > 0 {
+	if tt > 0 {
 		fmt.Fprintf(stdout, "    %-26s %10d %10d %10d   %5.1f%%\n", "итого по каталогам",
-			td, tl, td+tl, float64(td)/float64(td+tl)*100)
+			td, tl, tt, float64(td)/float64(tt)*100)
 	}
 }
 
-// pendingByFolder разносит неразобранные куски по каталогам верхнего уровня.
+// chunkCoverage — разбор кусков живых книг коллекции: сколько всего, сколько
+// с отметкой (по видам), сколько сборка ещё возьмёт, и то же по каталогам.
+type chunkCoverage struct {
+	total   int // кусков живых книг
+	pending int // сборка ещё возьмёт (graph.WillTake)
+	// Отметки по видам — у кусков живых книг; отметки удалённых книг сюда
+	// не попадают, их считает deadMarkStats.
+	done, empty, skipped, service int
+	// again — с отметкой, но сборка возьмёт их снова: «служебный» без
+	// признака оглавления (кусок забыт --graph-forget-chunks или признак
+	// снят). Они и в «разобрано», и в «осталось» — так считают и
+	// --graph-status, и --graph-pending.
+	again   int
+	folders []folderPending
+}
+
+// marked — сколько кусков с отметкой любого вида: «разобрано».
+func (c chunkCoverage) marked() int { return c.done + c.empty + c.skipped + c.service }
+
+// liveCoverage считает разбор кусков коллекции одним проходом — по тем же
+// правилам, что graph.BooksProgress (`--graph-status --graph-folder`)
+// и graph.PendingChunks (`--graph-pending`): «разобрано» — отметка любого
+// вида, «осталось» — что сборка возьмёт (graph.WillTake); неотмеченный
+// служебный кусок не считается ни туда, ни сюда — сборка его пометит без
+// модели. Обход идёт по кускам живых книг, поэтому отметки удалённых книг
+// в счёт не попадают. Совпадение трёх приборов проверяет тест
+// TestDoctorCountsAgreeWithStatusAndPending.
 //
 // Каталог здесь — **не место на диске, где лежит граф**, а верхняя папка
 // библиотеки: `/AI`, `/Infosec`, `/DevOps`. Ключ `--graph-folder` отбирает книги
-// по куску пути, и это единственный способ собирать граф по частям, а не всю
-// библиотеку разом.
-//
-// Один проход по кускам; каталоги с полностью разобранным содержимым молчат.
-func pendingByFolder(coll *kb.Collection, g *graph.Graph, roots []string,
-	total int, stage *doctorStage) []folderPending {
-
-	done := map[string]int{}
-	left := map[string]int{}
+// по каталогу, и это единственный способ собирать граф по частям, а не всю
+// библиотеку разом. roots пусты — каталогов не различаем.
+func liveCoverage(coll *kb.Collection, g *graph.Graph, roots []string, stage *doctorStage) (chunkCoverage, error) {
+	var cov chunkCoverage
+	by := map[string]*folderPending{}
+	total := coll.ChunkCount()
 	var seen int
-	_ = coll.EachChunkRef(kb.ChunkFilter{}, func(r kb.ChunkRef) error {
+	err := coll.EachChunkRef(kb.ChunkFilter{}, func(r kb.ChunkRef) error {
 		seen++
 		// Полоса обновляется не на каждом куске: их полмиллиона, и вывод
 		// стоил бы дороже самой работы.
 		if stage != nil && seen%20000 == 0 {
-			stage.progress("остаток по каталогам", seen, total)
+			stage.progress("разбор по кускам", seen, total)
 		}
-		f := topFolder(r.Book.Path, roots)
+		f := TopFolder(r.Book.Path, roots)
 		if f == "" {
-			f = "(корень библиотеки)"
+			f = rootFolderLabel
 		}
-		// Одно правило с --graph-pending и --graph-books: разобран — любая
-		// отметка; остаток — то, что сборка возьмёт (graph.WillTake).
-		// Неотмеченный служебный кусок не считается ни туда, ни сюда:
-		// сборка его пометит без модели.
+		fp := by[f]
+		if fp == nil {
+			fp = &folderPending{folder: f}
+			by[f] = fp
+		}
+		fp.total++
+		cov.total++
+		mark, ok := g.Progress().MarkOf(graph.ChunkKey{Doc: r.Doc, Ord: r.Ord})
+		known := true
 		switch {
-		case g.Progress().Done(graph.ChunkKey{Doc: r.Doc, Ord: r.Ord}):
-			done[f]++
-		case g.WillTake(r):
-			left[f]++
+		case !ok:
+			known = false
+		case mark == graph.MarkDone:
+			cov.done++
+		case mark == graph.MarkEmpty:
+			cov.empty++
+		case mark == graph.MarkSkipped:
+			cov.skipped++
+		case mark == graph.MarkService:
+			cov.service++
+		default:
+			known = false // признака неизвестного вида BooksProgress тоже не считает
+		}
+		if known {
+			fp.done++
+		}
+		if g.WillTake(r) {
+			fp.pending++
+			cov.pending++
+			if known {
+				cov.again++
+			}
 		}
 		return nil
 	})
-	out := make([]folderPending, 0, len(left)+len(done))
-	for f, n := range left {
-		out = append(out, folderPending{folder: f, done: done[f], pending: n})
+	if err != nil {
+		return cov, err
 	}
-	// Каталоги без остатка — закрытые. В советах им места нет, а в таблице
-	// покрытия они и есть главное: закрытый каталог — это сделанная работа.
-	for f, n := range done {
-		if _, hasLeft := left[f]; !hasLeft {
-			out = append(out, folderPending{folder: f, done: n})
-		}
+	cov.folders = make([]folderPending, 0, len(by))
+	for _, fp := range by {
+		cov.folders = append(cov.folders, *fp)
 	}
 	// От большего к меньшему: сперва то, что займёт карту надолго.
 	// При равном остатке — по имени каталога: список собран обходом карт,
 	// и закрытые каталоги (остаток 0) менялись местами от запуска к запуску
 	// (поймано 03.10.2026 сравнением вывода двух прогонов на одном снимке).
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].pending != out[j].pending {
-			return out[i].pending > out[j].pending
+	// Закрытые каталоги в советах не нужны, а в таблице покрытия они и есть
+	// главное: закрытый каталог — это сделанная работа.
+	sort.Slice(cov.folders, func(i, j int) bool {
+		a, b := cov.folders[i], cov.folders[j]
+		if a.pending != b.pending {
+			return a.pending > b.pending
 		}
-		return out[i].folder < out[j].folder
+		return a.folder < b.folder
 	})
-	return out
+	return cov, nil
+}
+
+// rootFolderLabel — строка таблицы для книг, лежащих прямо в корне
+// библиотеки (или вне известных корней): каталога, по которому их отобрать,
+// у них нет.
+const rootFolderLabel = "(корень библиотеки)"
+
+// buildAdvice — команда разбора остатка одного каталога, готовая к вставке
+// в терминал.
+//
+// До 07.10.2026 для книг в корне библиотеки печаталось
+// `--graph-folder (корень библиотеки)` — синтаксическая ошибка bash, а имя
+// каталога с пробелом разваливалось на два довода. Отобрать книги корня
+// ключом каталога нельзя, поэтому для них совет — сборка без отбора, и это
+// сказано прямо: она возьмёт и остаток остальных каталогов.
+func buildAdvice(name string, f folderPending) string {
+	if f.folder == rootFolderLabel {
+		return fmt.Sprintf("ollchat --graph-build %s   (%d кусков книг прямо в корне библиотеки; "+
+			"отбора по каталогу у них нет — сборка без отбора возьмёт и остальной остаток)", name, f.pending)
+	}
+	return fmt.Sprintf("ollchat --graph-build %s --graph-folder %s   (%d кусков)",
+		name, shellQuote(f.folder), f.pending)
+}
+
+// deadMarkStats — отметки разбора ПО ВИДАМ, отдельно по книгам, которых
+// в коллекции больше нет.
+//
+// Прежнее одно число «пропущено» складывало потерю (модель не дала
+// разбираемого ответа) с нормой работы (служебный кусок), да ещё и со следами
+// удалённых книг — и раздувалось вдвое (этап 110, А0). LiveBooks, а НЕ Books:
+// второй отдаёт реестр как есть, вместе с помеченными удалёнными (его
+// докстринг прямо про это), и удалённая книга считалась бы живой. Поймано
+// 27.09.2026 сверкой с разбором progress.log: доктор печатал «не разобрала
+// модель 1362» при настоящих 47, потому что 11 802 отметки удалённых книг
+// попадали в счёт живых.
+func deadMarkStats(coll *kb.Collection, g *graph.Graph) graph.MarkStats {
+	aliveBooks := map[uint32]bool{}
+	for _, b := range coll.LiveBooks() {
+		aliveBooks[b.ID] = true
+	}
+	return g.Progress().Stats(func(doc uint32) bool { return aliveBooks[doc] })
 }
 
 // plural склоняет существительное по числу — по-русски, без «каталог(а)».
@@ -565,17 +671,41 @@ func plural(n int, one, few, many string) string {
 	return fmt.Sprintf("%d %s", n, word)
 }
 
-// topFolder — верхняя папка книги относительно корня библиотеки.
-func topFolder(path string, roots []string) string {
+// TopFolder — верхняя папка книги относительно корня библиотеки: «/AI»,
+// «/DevOps». Пусто — книга лежит прямо в корне (отбирать по каталогу нечего)
+// или вне всех корней. Одно правило на доктора графа и замеры
+// (internal/graph/stats): до 07.10.2026 у них было по своей копии, и правка
+// 20.09 попала только в одну.
+//
+// **Корень сравнивается по границе каталога.** Прежние копии сравнивали
+// подстрокой, и корень /data/lib находил книги из /data/library — каталогом
+// такой книги становился «/rary», которого нет.
+//
+// **Из подходящих корней берётся самый короткий.** У коллекции lab корень —
+// сам <корень библиотеки>/Раздел, и по нему каталог книги вырождался
+// в корень (20.09.2026: 100 % «чужих» у lab); корни библиотеки короче корней
+// коллекции — их и надо резать.
+func TopFolder(path string, roots []string) string {
+	best := ""
 	for _, root := range roots {
-		if root == "" || !strings.HasPrefix(path, root) {
+		if root == "" {
 			continue
 		}
-		rest := strings.TrimPrefix(strings.TrimPrefix(path, root), "/")
-		if i := strings.Index(rest, "/"); i > 0 {
-			return "/" + rest[:i]
+		root = filepath.Clean(root)
+		inside := path == root || strings.HasPrefix(path, root+"/")
+		if root == "/" {
+			inside = strings.HasPrefix(path, "/")
 		}
-		return "" // книга лежит в самом корне, отбирать по каталогу нечего
+		if inside && (best == "" || len(root) < len(best)) {
+			best = root
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(path, best), "/")
+	if i := strings.Index(rest, "/"); i > 0 {
+		return "/" + rest[:i]
 	}
 	return ""
 }

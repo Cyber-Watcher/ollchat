@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"errors"
 	"fmt"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -344,10 +345,10 @@ func TestFilters(t *testing.T) {
 	if got := string(asciiHexDecode([]byte("48656C6C6F>"))); got != "Hello" {
 		t.Fatalf("ASCIIHex: %q", got)
 	}
-	if got := string(ascii85Decode([]byte("87cURD_*#TDfTZ)~>"))); got != "Hello, world" {
+	if got := string(ascii85Decode([]byte("87cURD_*#TDfTZ)~>"), maxDecoded)); got != "Hello, world" {
 		t.Fatalf("ASCII85: %q", got)
 	}
-	if got := string(runLengthDecode([]byte{2, 'a', 'b', 'c', 254, 'z', 128})); got != "abczzz" {
+	if got := string(runLengthDecode([]byte{2, 'a', 'b', 'c', 254, 'z', 128}, maxDecoded)); got != "abczzz" {
 		t.Fatalf("RunLength: %q", got)
 	}
 }
@@ -425,6 +426,34 @@ func TestExtractImagesPNG(t *testing.T) {
 	}
 	if len(im.Data) < 8 || string(im.Data[1:4]) != "PNG" {
 		t.Fatal("данные не похожи на PNG")
+	}
+}
+
+// TestExtractImages16Bit: отсчёт в 16 бит — два байта, старший первым.
+// Прежде брался один старший байт и делился на 65535, и любая такая картинка
+// выходила почти чёрной.
+func TestExtractImages16Bit(t *testing.T) {
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+		stream("", "q 200 0 0 100 50 600 cm /Im0 Do Q"),
+		stream("<< /Type /XObject /Subtype /Image /Width 3 /Height 1 "+
+			"/ColorSpace /DeviceGray /BitsPerComponent 16 >>", string([]byte{0xFF, 0xFF, 0x80, 0x00, 0, 0})),
+	}
+	imgs, err := ExtractImages(build(objs...), ImageOptions{})
+	if err != nil || len(imgs) != 1 {
+		t.Fatalf("извлечение: %v, картинок %d", err, len(imgs))
+	}
+	img, err := png.Decode(bytes.NewReader(imgs[0].Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for x, want := range []int{255, 127, 0} {
+		r, _, _, _ := img.At(x, 0).RGBA()
+		if got := int(r >> 8); got < want-1 || got > want+1 {
+			t.Errorf("точка %d: яркость %d, ожидалось %d", x, got, want)
+		}
 	}
 }
 

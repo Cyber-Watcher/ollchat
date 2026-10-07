@@ -218,6 +218,7 @@ func (m *Model) mixShowCmd(question string) tea.Cmd {
 	}
 	prog := make(chan graph.OpenProgress, 8)
 	m.addBlock(block{kind: blockNotice, text: "считаю подмес…"})
+	m.lendGraph(job.graphOpen)
 	return tea.Batch(waitGraphProgress(genWarm, prog), runMixShowCmd(question, job, m.tuneReport(), prog))
 }
 

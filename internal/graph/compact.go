@@ -68,7 +68,9 @@ func Compact(collDir, name string, check, force bool) (CompactStats, error) {
 // Какие понятия мёртвые, решает вызывающий (Graph.DeadEntities: ни упоминаний,
 // ни связей, ни склеек); здесь они лишь не переписываются в новый файл.
 // Номера не перенумеровываются — вектор понятия лежит по номеру, и место
-// остаётся пустым. Прежний файл сохраняется, так что шаг обратим.
+// остаётся пустым; наибольший номер записывается до подмены (entMaxIDFile),
+// чтобы выброшенные номера не выдавались снова. Прежний файл сохраняется,
+// так что шаг обратим.
 //
 // Словари сличаются на реестре БЕЗ выбрасывания: уплотнение дубликатов должно
 // быть тождественным, а пропажа ключей мёртвых понятий — ожидаемое действие,
@@ -143,12 +145,22 @@ func CompactDrop(collDir, name string, check, force bool, drop map[uint32]bool) 
 	if len(drop) > 0 {
 		// Итоговый файл — без мёртвых понятий; сличение выше их не касалось.
 		kept := order[:0:0]
+		var maxID uint32
 		for _, id := range order {
+			maxID = max(maxID, id)
 			if drop[id] {
 				st.Dropped++
 				continue
 			}
 			kept = append(kept, id)
+		}
+		// Наибольший номер — на диск ДО подмены реестра: выброшенные с хвоста
+		// номера иначе выдались бы новым понятиям вместе с чужими векторами,
+		// синонимами и запретами (аудит 07.10.2026, №12; Entities.nextID).
+		if st.Dropped > 0 {
+			if err := saveMaxID(dir, maxID); err != nil {
+				return st, err
+			}
 		}
 		if err := writeRecords(tmp, last, kept); err != nil {
 			return st, err
@@ -159,16 +171,14 @@ func CompactDrop(collDir, name string, check, force bool, drop map[uint32]bool) 
 		}
 	}
 
-	st.Backup = path + ".bak-" + time.Now().Format("20060102-150405")
-	if err := os.Rename(path, st.Backup); err != nil {
+	// Остаться без реестра нельзя ни при каких обстоятельствах — это и есть
+	// сам граф: подмена ссылкой и одним переименованием, без окна, в котором
+	// реестра нет вовсе (swap.go).
+	backup, err := swapIn(path, tmp, path+".bak-"+time.Now().Format("20060102-150405"))
+	if err != nil {
 		return st, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		// Возврат прежнего файла: остаться без реестра нельзя ни при каких
-		// обстоятельствах — это и есть сам граф.
-		_ = os.Rename(st.Backup, path)
-		return st, err
-	}
+	st.Backup = backup
 	syncDir(dir)
 	st.Applied = true
 	return st, nil
@@ -192,7 +202,7 @@ func countDrop(order []uint32, drop map[uint32]bool) int {
 func (g *Graph) DeadEntities() []uint32 {
 	var dead []uint32
 	for _, e := range g.ents.Live() {
-		if g.merges.Gone(e.ID) || len(g.merges.Absorbed(e.ID)) > 0 {
+		if g.merges.inJournal(e.ID) {
 			continue
 		}
 		alive := false
@@ -210,31 +220,31 @@ func (g *Graph) DeadEntities() []uint32 {
 	return dead
 }
 
+// buildRunning — LockedError, если сборка графа идёт прямо сейчас (её признак
+// стоит и процесс жив); nil — не идёт. Для работ, которые ничего не пишут,
+// но считают по журналам: замка они не берут.
+func buildRunning(dir string) error {
+	path := filepath.Join(dir, lockFile)
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	if owner := readLock(path); owner.alive() {
+		return &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
+	}
+	return nil
+}
+
 // holdBuildLock занимает признак сборки графа на время работы, которая
 // подменяет файлы реестра. Формат и правила — те же, что у Graph.Lock:
 // живой хозяин — отказ, признак от мёртвого процесса снимается.
 func holdBuildLock(dir string) (release func(), err error) {
-	path := filepath.Join(dir, lockFile)
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
-			f.Close()
-			return func() { os.Remove(path) }, nil
-		}
-		if !os.IsExist(err) {
-			return nil, err
-		}
-		owner := readLock(path)
-		if owner.alive() {
-			return nil, &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
-		}
-		if rmErr := os.Remove(path); rmErr != nil {
-			return nil, fmt.Errorf("остался признак сборки от неживого процесса, "+
-				"и его не удалось убрать: %w", rmErr)
-		}
+	f, _, err := takeLock(dir)
+	if err != nil {
+		return nil, err
 	}
-	return nil, &LockedError{Path: path}
+	f.Close()
+	path := filepath.Join(dir, lockFile)
+	return func() { os.Remove(path) }, nil
 }
 
 // lastPerID читает реестр и оставляет последнюю запись на каждый номер.

@@ -111,6 +111,18 @@ func parseTrueTypeCmap(data []byte) map[uint32]rune {
 	return out
 }
 
+// Пределы разбора cmap. Таблица приходит из файла шрифта, вложенного в чужой
+// PDF, и её счётчики ничем не ограничены: формат 12 в PDF на 2 КБ давал
+// 26 миллионов записей, а группа у верхней границы uint32 зацикливала счёт.
+// У настоящего шрифта глифов не больше 65535 (номер глифа — 16 бит), а кодов
+// не больше, чем символов в Unicode: даже шрифт, отображающий на свои глифы
+// весь Unicode, укладывается в maxCmapCodes витков.
+const (
+	maxGlyphID   = 0xFFFF
+	maxCodePoint = 0x10FFFF
+	maxCmapCodes = maxCodePoint + 1 // витков на всю таблицу
+)
+
 // parseCmapFormat4 разбирает самый распространённый формат — сегменты BMP.
 func parseCmapFormat4(sub []byte, out map[uint32]rune) {
 	if len(sub) < 14 {
@@ -135,13 +147,18 @@ func parseCmapFormat4(sub []byte, out map[uint32]rune) {
 		}
 		return binary.BigEndian.Uint16(sub[p:])
 	}
-	for i := 0; i < seg; i++ {
+	// Сегменты настоящей таблицы не пересекаются, и кодов в них не больше
+	// 65536. Пересекающиеся сегменты во всю ширину BMP давали до 2³¹ витков —
+	// десятки секунд на шрифт в несколько килобайт.
+	left := maxCmapCodes
+	for i := 0; i < seg && left > 0; i++ {
 		start, end := u16(startAt, i), u16(endAt, i)
 		if start > end || end == 0xFFFF && start == 0xFFFF {
 			continue
 		}
 		delta, ro := u16(deltaAt, i), u16(rangeAt, i)
-		for c := uint32(start); c <= uint32(end); c++ {
+		for c := uint32(start); c <= uint32(end) && left > 0; c++ {
+			left--
 			var gid uint16
 			if ro == 0 {
 				gid = uint16(c) + delta
@@ -166,7 +183,8 @@ func parseCmapFormat12(sub []byte, out map[uint32]rune) {
 		return
 	}
 	groups := int(binary.BigEndian.Uint32(sub[12:]))
-	for i := 0; i < groups; i++ {
+	left := maxCmapCodes
+	for i := 0; i < groups && left > 0; i++ {
 		p := 16 + i*12
 		if p+12 > len(sub) {
 			return
@@ -174,11 +192,17 @@ func parseCmapFormat12(sub []byte, out map[uint32]rune) {
 		start := binary.BigEndian.Uint32(sub[p:])
 		end := binary.BigEndian.Uint32(sub[p+4:])
 		gid := binary.BigEndian.Uint32(sub[p+8:])
-		if end < start || end-start > 65536 {
+		// Коды за пределами Unicode — не символы; на них же счётчик ниже
+		// переполнялся бы у верхней границы uint32.
+		if end < start || start > maxCodePoint || gid > maxGlyphID {
 			continue
 		}
-		for c := start; c <= end; c++ {
-			addGlyph(out, gid+(c-start), rune(c))
+		end = min(end, maxCodePoint)
+		// Счёт по сдвигу от начала группы: и код, и номер глифа растут вместе,
+		// а номер глифа больше 16 бит уже не настоящий.
+		for k := uint32(0); k <= end-start && gid+k <= maxGlyphID && left > 0; k++ {
+			left--
+			addGlyph(out, gid+k, rune(start+k))
 		}
 	}
 }

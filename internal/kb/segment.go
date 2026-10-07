@@ -237,40 +237,72 @@ func OpenSegment(dir string) (*Segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	terms := make(map[string]termRef, meta.Terms)
-	var prev string
-	for pos := 0; pos < len(raw); {
-		common, n := binary.Uvarint(raw[pos:])
-		if n <= 0 {
-			return nil, fmt.Errorf("словарь повреждён на смещении %d", pos)
-		}
-		pos += n
-		suffixLen, n := binary.Uvarint(raw[pos:])
-		if n <= 0 {
-			return nil, fmt.Errorf("словарь повреждён на смещении %d", pos)
-		}
-		pos += n
-		if int(common) > len(prev) || pos+int(suffixLen) > len(raw) {
-			return nil, fmt.Errorf("словарь повреждён: терм на смещении %d", pos)
-		}
-		term := prev[:common] + string(raw[pos:pos+int(suffixLen)])
-		pos += int(suffixLen)
-
-		df, n := binary.Uvarint(raw[pos:])
-		pos += n
-		off, n := binary.Uvarint(raw[pos:])
-		pos += n
-		length, n := binary.Uvarint(raw[pos:])
-		pos += n
-
-		terms[term] = termRef{df: uint32(df), off: int64(off), length: int64(length)}
-		prev = term
-	}
 	post, err := os.Open(filepath.Join(dir, "post.dat"))
 	if err != nil {
 		return nil, err
 	}
+	info, err := post.Stat()
+	if err != nil {
+		post.Close()
+		return nil, err
+	}
+	terms, err := parseTerms(raw, meta.Terms, uint64(info.Size()))
+	if err != nil {
+		post.Close()
+		return nil, err
+	}
 	return &Segment{dir: dir, meta: meta, terms: terms, post: post}, nil
+}
+
+// parseTerms разбирает словарь сегмента. postSize — длина post.dat: ссылка
+// на постинги за его концом — порча, а не терм.
+//
+// **Каждое число проверяется.** До 07.10.2026 три последних поля записи
+// (частота, смещение, длина) читались без проверки: обрезанный словарь давал
+// мусорные ссылки, а переполненное число — отрицательный сдвиг и панику на
+// срезе посреди открытия коллекции, то есть падение службы.
+func parseTerms(raw []byte, hint int, postSize uint64) (map[string]termRef, error) {
+	terms := make(map[string]termRef, hint)
+	var prev string
+	next := func(pos int) (uint64, int, error) {
+		v, n := binary.Uvarint(raw[pos:])
+		if n <= 0 {
+			return 0, pos, fmt.Errorf("словарь повреждён на смещении %d", pos)
+		}
+		return v, pos + n, nil
+	}
+	for pos := 0; pos < len(raw); {
+		common, p, err := next(pos)
+		if err != nil {
+			return nil, err
+		}
+		suffixLen, p, err := next(p)
+		if err != nil {
+			return nil, err
+		}
+		if common > uint64(len(prev)) || suffixLen > uint64(len(raw)-p) {
+			return nil, fmt.Errorf("словарь повреждён: терм на смещении %d", p)
+		}
+		term := prev[:common] + string(raw[p:p+int(suffixLen)])
+		p += int(suffixLen)
+		var vals [3]uint64 // частота, смещение, длина постингов
+		for i := range vals {
+			if p >= len(raw) {
+				return nil, fmt.Errorf("словарь повреждён: обрыв записи терма %q", term)
+			}
+			if vals[i], p, err = next(p); err != nil {
+				return nil, err
+			}
+		}
+		df, off, length := vals[0], vals[1], vals[2]
+		if off > postSize || length > postSize-off || df > uint64(^uint32(0)) {
+			return nil, fmt.Errorf("словарь повреждён: постинги терма %q за концом post.dat", term)
+		}
+		terms[term] = termRef{df: uint32(df), off: int64(off), length: int64(length)}
+		prev = term
+		pos = p
+	}
+	return terms, nil
 }
 
 func (s *Segment) Meta() SegMeta { return s.meta }

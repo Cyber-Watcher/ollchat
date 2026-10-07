@@ -126,7 +126,7 @@ const labelVocab = `(?:patient|name|client|insured|subscriber|mrn|dob|date|of|bi
 	`member|id|policy|group|ssn|account|chart|claim|npi|sex|gender|age|location|reported|` +
 	`born|residence|resident|` +
 	`пациент|пациентка|фио|ф\.\s?и\.\s?о\.?|имя|фамилия|отчество|клиент|застрахованный|` +
-	`дата|рождения|полис|омс|дмс|снилс|паспорт|номер|карта|карты|телефон|тел\.?|факс|` +
+	`дата|рождения|полис|омс|дмс|снилс|инн|паспорт|номер|карта|карты|телефон|тел\.?|факс|` +
 	`адрес|почта|эл\.?|врач|лечащий|направивший|доктор|подпись|` +
 	`родился|родилась|прописан|прописана|проживает|зарегистрирован|зарегистрирована)`
 
@@ -143,13 +143,13 @@ var pdLabels = []struct {
 	kind Kind
 }{
 	{full(`patient( name)?|(full )?name|client( name)?|insured( name)?|subscriber|пациент(ка)?|` +
-		`фио|ф\. ?и\. ?о\.?|имя|фамилия( имя отчество)?|клиент|застрахованный`), KindClient},
+		`фио|ф\. ?и\. ?о\.?|имя|фамилия( имя отчество)?|отчество|клиент|застрахованный`), KindClient},
 	{full(`((referring|ordering|attending|primary|treating) )?(provider|physician|doctor)|radiologist|` +
 		`copies to|(electronically )?signed by|dictated by|read by|((лечащий|направивший) )?врач|доктор|подпись`), KindDoctor},
 	{full(`mrn|acc(ession)?( (no|number))?|member id|policy( (no|number))?|insurance( (id|no|number))?|` +
 		`group( (no|number))?|ssn|account( (no|number))?|chart( (no|number))?|claim( (no|number))?|` +
-		`npi|workstation|id|полис( омс| дмс)?|снилс|паспорт|номер( карты)?|карта`), KindID},
-	{full(`dob|d\.o\.b|date of birth|birth ?date|born|дата рождения|родил(ся|ась)`), KindBirth},
+		`npi|workstation|id|полис( омс| дмс)?|снилс|инн|паспорт( рф| гражданина рф)?( серия)?|номер( карты)?|карта`), KindID},
+	{full(`dob|d\.o\.b|date of birth|birth ?date|born|дата рождения|д\. ?р|родил(ся|ась)`), KindBirth},
 	{full(`((referring|home|postal|mailing) )?address|addr|residence|resident|адрес|прописана?|проживает|зарегистрирована?`), KindAddress},
 	{full(`phone|telephone|tel|fax|mobile|cell|телефон|тел\.?|факс`), KindPhone},
 	{full(`e-?mail|почта|эл\.? почта`), KindEmail},
@@ -177,9 +177,18 @@ func labelKind(label string) Kind {
 // с датами рождения уходили в .md. Только явные подписи номера и даты
 // рождения и только перед цифрой: «No» или «ID» в тексте подписью не
 // считаются, а «ID» без «#» — только перед четырьмя цифрами и больше.
+//
+// Русские бланки пишут так же: «Дата рождения 01.02.1970», «Паспорт серия
+// 4508 № 123456», «Полис ОМС 1234 5678 9012 3456», «ИНН 7712…», «Тел.
+// (4822) 12-34-56» (значения выдуманы), — и до 07.10.2026 всё это оставалось
+// в .md: подпись без двоеточия не узнавалась. Подписи телефона — только
+// явные: «ph» и «cell» в анализах — это pH и клетки.
 var labelBareRe = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])((?:dob|d\.o\.b\.?|mrn|ssn|npi|` +
-	`acc(?:ession)?\s*(?:no\.?|#|number)|account\s*(?:no\.?|#)|member\s*id|id(?:\s*#)?|снилс|полис)` +
-	`\s*[#№]?)\s*(\d+)`)
+	`acc(?:ession)?\s*(?:no\.?|#|number)|account\s*(?:no\.?|#)|member\s*id|id(?:\s*#)?|снилс|` +
+	`полис(?:\s+(?:омс|дмс))?|инн|паспорт(?:\s+(?:рф|гражданина\s+рф))?(?:\s+серия)?|` +
+	`date\s+of\s+birth|birth\s*date|дата\s+рождения|д\.\s?р\.?|` +
+	`телефон|тел\.?|phone|tel\.?|fax|факс)` +
+	`\s*[#№]?)\s*(\(?\+?\d+)`)
 
 // labelMatches — подписи строки по порядку: с двоеточием и без него.
 func labelMatches(text string) [][]int {
@@ -187,6 +196,11 @@ func labelMatches(text string) [][]int {
 	for _, m := range labelBareRe.FindAllStringSubmatchIndex(text, -1) {
 		label := strings.ToLower(text[m[2]:m[3]])
 		if strings.TrimSpace(label) == "id" && m[5]-m[4] < 4 {
+			continue
+		}
+		// Номер телефона — от пяти цифр: в «Fax 2 pages» и «кетоновых тел
+		// 0,5» за словом стоит не номер.
+		if labelKind(label) == KindPhone && phoneDigits(text[m[4]:]) < 5 {
 			continue
 		}
 		inside := false
@@ -202,6 +216,21 @@ func labelMatches(text string) [][]int {
 	}
 	sort.Slice(ms, func(a, b int) bool { return ms[a][2] < ms[b][2] })
 	return ms
+}
+
+// phoneDigits — сколько цифр в начале s, пока идут цифры, пробелы, скобки,
+// дефисы, точки и плюс.
+func phoneDigits(s string) int {
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			n++
+		case !strings.ContainsRune(" ()-+.", r):
+			return n
+		}
+	}
+	return n
 }
 
 func byLabels(words []Word, lines []line) {
@@ -237,15 +266,18 @@ func byLabels(words []Word, lines []line) {
 // «21 June 1988» под подписью «Date of birth» осталось в .md).
 const cellGapMax = 250.0 // pt; дальше справа — уже не соседняя клетка
 
-func byCells(words []Word, lines []line) {
-	box := func(l line) Rect {
-		r := words[l.idx[0]].Box
-		for _, i := range l.idx[1:] {
-			b := words[i].Box
-			r = Rect{min(r.X0, b.X0), min(r.Y0, b.Y0), max(r.X1, b.X1), max(r.Y1, b.Y1)}
-		}
-		return r
+// lineBox — рамка строки распознавания.
+func lineBox(words []Word, l line) Rect {
+	r := words[l.idx[0]].Box
+	for _, i := range l.idx[1:] {
+		b := words[i].Box
+		r = Rect{min(r.X0, b.X0), min(r.Y0, b.Y0), max(r.X1, b.X1), max(r.Y1, b.Y1)}
 	}
+	return r
+}
+
+func byCells(words []Word, lines []line) {
+	box := func(l line) Rect { return lineBox(words, l) }
 	for i := range lines {
 		k := labelKind(lines[i].text)
 		if k == KindNone {
@@ -287,6 +319,122 @@ func byCells(words []Word, lines []line) {
 	}
 }
 
+// byBelow — бланк в столбик: подпись поля стоит своей строкой, а значение —
+// строкой ниже («Дата рождения», под ней дата). byLabels и byCells ищут
+// значение в той же строке и справа, и до 07.10.2026 такие значения
+// оставались в .md. В ряду подписи должны стоять одни подписи («Фамилия Имя
+// Отчество» над клетками): ряд «Name Value Range» — шапка таблицы, и под ним
+// не поля, а анализы. Значение — ближайшая строка ниже, не дальше полутора
+// высот подписи и начинающаяся под ней, и оно должно походить на своё поле
+// (belowEnd).
+func byBelow(words []Word, lines []line) {
+	boxes := make([]Rect, len(lines))
+	for i := range lines {
+		boxes[i] = lineBox(words, lines[i])
+	}
+	isLabel := func(text string) bool { return labelKind(text) != KindNone || vocabLineRe.MatchString(text) }
+	for i := range lines {
+		k := labelKind(lines[i].text)
+		if k == KindNone {
+			continue
+		}
+		lb := boxes[i]
+		h := lb.Y1 - lb.Y0
+		header, best := false, -1
+		for j := range lines {
+			if j == i || lines[j].key[0] != lines[i].key[0] {
+				continue
+			}
+			b := boxes[j]
+			if cy := (b.Y0 + b.Y1) / 2; cy >= lb.Y0 && cy <= lb.Y1 {
+				if max(b.X0-lb.X1, lb.X0-b.X1) < cellGapMax && !isLabel(lines[j].text) {
+					header = true
+					break
+				}
+				continue
+			}
+			if b.Y0 < (lb.Y0+lb.Y1)/2 || b.Y0-lb.Y1 > 1.5*h || b.X0 < lb.X0-2*h || b.X0 > lb.X1 {
+				continue
+			}
+			if best < 0 || b.Y0 < boxes[best].Y0 {
+				best = j
+			}
+		}
+		if header || best < 0 || isLabel(lines[best].text) {
+			continue
+		}
+		v := &lines[best]
+		// Строка ниже начинается своей подписью — это своё поле, а не значение.
+		if ms := labelMatches(v.text); len(ms) > 0 && ms[0][2] <= 1 {
+			continue
+		}
+		end := belowEnd(words, v, k, lines[i].text)
+		if end == 0 {
+			continue
+		}
+		if n := v.mark(words, 0, end, k, "подпись над значением"); n > 0 && k.removed() {
+			for _, wi := range lines[i].idx {
+				words[wi].LabelOf = k
+			}
+		}
+	}
+}
+
+// vocabLineRe — строка из одних слов подписей («Sex», «Age», «Дата»): в ряду
+// подписей бланка она своя, а не столбец таблицы.
+var vocabLineRe = regexp.MustCompile(`(?i)^\s*` + labelVocab + `(?:[\s#.]+` + labelVocab + `)*\s*[#.№:;]?\s*$`)
+
+// nameWordRe — слово имени: с заглавной, из букв, инициалы с точками.
+var nameWordRe = regexp.MustCompile(`^\p{Lu}[\p{L}'’.-]*[,;]?$`)
+
+// oneWordNameRe — подписи, под которыми имя — одно слово.
+var oneWordNameRe = regexp.MustCompile(`(?i)^\s*(?:фамилия|имя|отчество)\s*[:.]?\s*$`)
+
+// belowEnd — где в строке под подписью вида k кончается значение, или 0,
+// если строка на значение не похожа: имя — слова с заглавной с начала строки
+// (одно — только под «Фамилия», «Имя», «Отчество»: под «Name» одно слово —
+// скорее название анализа), номер и дата — с цифрами, телефон — от пяти
+// цифр, адрес — с номером дома, почта — с «@».
+func belowEnd(words []Word, v *line, k Kind, label string) int {
+	switch {
+	case k.person():
+		need := 2
+		if oneWordNameRe.MatchString(label) {
+			need = 1
+		}
+		n, end := 0, 0
+		for _, sp := range v.spans {
+			if n == nameMaxWords || !nameWordRe.MatchString(words[sp.word].Text) {
+				break
+			}
+			n, end = n+1, sp.end
+		}
+		if n < need {
+			return 0
+		}
+		return end
+	case k == KindID || k == KindPhone || k == KindBirth:
+		end := v.valueEnd(words, 0, len(v.text), k)
+		digits := 0
+		for _, r := range v.text[:end] {
+			if r >= '0' && r <= '9' {
+				digits++
+			}
+		}
+		if k == KindPhone && digits < 5 {
+			return 0
+		}
+		if digits == 0 && !(k == KindBirth && dateWordRe.MatchString(strings.Fields(v.text[:end] + " .")[0])) {
+			return 0
+		}
+		return end
+	case k == KindAddress && !strings.ContainsAny(v.text, "0123456789"),
+		k == KindEmail && !strings.Contains(v.text, "@"):
+		return 0
+	}
+	return len(v.text)
+}
+
 // valueEnd — где кончается значение поля с номером, телефоном или датой
 // рождения: на первом слове без цифр после уже взятого. Без этого значение
 // тянулось до конца строки, и в «Полис ДМС: ВС-8135007. Услуги оказал
@@ -298,18 +446,25 @@ func (l *line) valueEnd(words []Word, s, e int, k Kind) int {
 		return e
 	}
 	n := 0
-	for _, sp := range l.spans {
+	for i, sp := range l.spans {
 		if sp.start >= e || sp.end <= s {
 			continue
 		}
 		t := words[sp.word].Text
-		if n > 0 && !strings.ContainsAny(t, "0123456789") && !(k == KindBirth && dateWordRe.MatchString(t)) {
+		if n > 0 && !strings.ContainsAny(t, "0123456789") && !(k == KindBirth && dateWordRe.MatchString(t)) &&
+			!(k == KindID && idJoinRe.MatchString(t) && i+1 < len(l.spans) && l.spans[i+1].start < e &&
+				strings.ContainsAny(words[l.spans[i+1].word].Text, "0123456789")) {
 			return sp.start
 		}
 		n++
 	}
 	return e
 }
+
+// idJoinRe — слово внутри номера: «серия 4508 № 123456». Без него значение
+// паспорта кончалось на «№», и сам номер оставался в .md. Слово берётся,
+// только если за ним снова цифры: «No» в «12345 No new findings» — уже текст.
+var idJoinRe = regexp.MustCompile(`(?i)^(?:№|n|no\.?|#|номер|серия)$`)
 
 // dateWordRe — слово внутри даты: месяц (полностью или сокращением) либо
 // «г.», «года». Слово сверяется ЦЕЛИКОМ: по одному началу «mar», «dec», «мар»
@@ -338,6 +493,19 @@ const ruAddressPat = `(?:(?:г\.|город)\s*[А-ЯЁ][\p{L}-]+,?\s*)?(?:[А-�
 	`(?:д\.|дом[аеу]?)\s*\d+\p{L}?(?:\s*/\s*\d+)?(?:,?\s*(?:корп\.|корпус|к\.|стр\.|строение)\s*\d+)?` +
 	`(?:,?\s*(?:кв\.|квартир\p{L}*|оф\.|офис)\s*\d+)?`
 
+// ruAddressBarePat — адрес без «д.»: «г. Тверь, ул. Примерная, 5, кв. 12»
+// (выдуман), номер дома сразу за названием улицы. Шаблон выше требует «д.»
+// или «дом», и до 07.10.2026 такой адрес оставался в .md. Чтобы не задеть
+// текст, название здесь стоит после типа улицы и начинается с заглавной
+// (перед ней может быть число: «8 Марта»), а «площадь» полным словом не
+// берётся: «Площадь поражения 5 см» и «пл. 2,5 см» — не адрес.
+const ruAddressBarePat = `(?:(?:\d{6},?\s*)?(?:г\.|город)\s*[А-ЯЁ][\p{L}-]+,?\s*)?` +
+	`(?i:ул\.|улиц[аеуы]|пр-т|просп\.|проспект[аеу]?|пер\.|переул(?:ок|ка|ке)|ш\.|шоссе|б-р|бульвар[аеу]?|` +
+	`наб\.|набережн\p{L}*|пл\.|мкр\.?|микрорайон[аеу]?)\s*` +
+	`(?:\d+(?:-\p{L}+)?\s+)?[А-ЯЁ][\p{L}.-]*(?:\s+[А-ЯЁ][\p{L}.-]*){0,2},?\s*` +
+	`\d+\p{L}?(?:\s*/\s*\d+)?(?:,?\s*(?:корп\.|корпус|к\.|стр\.|строение)\s*\d+)?` +
+	`(?:,?\s*(?:кв\.|квартир\p{L}*|оф\.|офис)\s*\d+)?`
+
 // rule — шаблон; group — какая скобка и есть данные (0 — всё совпадение).
 // Скобка нужна там, где граница слова задана руками: \b в RE2 знает только
 // латиницу, и для кириллицы граница пишется как [^\p{L}].
@@ -360,6 +528,12 @@ var patterns = []rule{
 	{regexp.MustCompile(`\b\d{3}-\d{4}\b`), KindPhone, 0},              // местный номер без кода: 555-0147
 	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), KindID, 0},           // SSN
 	{regexp.MustCompile(`\b\d{3}-\d{3}-\d{3}[\s-]\d{2}\b`), KindID, 0}, // СНИЛС
+	// Русский местный номер: «123-45-67» и с кодом города в скобках —
+	// «(4822) 12-34-56», «8 (4832) 98-76-54» (номера выдуманы). До 07.10.2026
+	// без подписи «тел.» они оставались в .md. Даты «2026-09-05» и
+	// «05-09-26» и нормы «120-160» под эти виды не подходят.
+	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{2}\b`), KindPhone, 0},
+	{regexp.MustCompile(`(?:\b8\s?)?\(\d{3,5}\)\s?(?:\d{1,3}[\s-]\d{2}[\s-]\d{2}|\d{5,7})\b`), KindPhone, 0},
 	{regexp.MustCompile(`\b[A-Z]{1,6}-?\d{5,}\b`), KindID, 0},
 	{regexp.MustCompile(`\b\d{7,}\b`), KindID, 0},
 	// Улица: суффикс и заглавными — «12 MAPLE STREET», как в шапке аптеки
@@ -387,11 +561,20 @@ var patterns = []rule{
 	{regexp.MustCompile(`(?:^|[^\p{L}])(?:[Вв]рач|[Дд]октор|ВРАЧ|ДОКТОР)(?:а|у|ом|е|А|У|ОМ|Е)?\s+([А-ЯЁ](?:[а-яё]+|[А-ЯЁ]+)(?:\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.)?)`), KindDoctor, 1},
 	{regexp.MustCompile(`(?:^|[^\p{L}])(` + patronymicPat + `)(?:[^\p{L}]|$)`), KindPerson, 1},
 	{regexp.MustCompile(`(?:^|[^\p{L}])(` + ruAddressPat + `)`), KindAddress, 1},
+	{regexp.MustCompile(`(?:^|[^\p{L}])(` + ruAddressBarePat + `)`), KindAddress, 1},
+	// Индекс и город: «170000, г. Тверь» — начало адреса и без улицы.
+	{regexp.MustCompile(`(?:^|[^\p{L}\p{N}])(\d{6},?\s*(?:г\.|город)\s*[А-ЯЁ][\p{L}-]+)`), KindAddress, 1},
 	{regexp.MustCompile(`(?i)\bborn(?:\s+on)?\s+(` + datePat + `)`), KindBirth, 1},
 	{regexp.MustCompile(`(?i)(?:^|[^\p{L}])(?:родил(?:ся|ась)|д\.\s?р\.)\s*[:.]?\s*(` + datePat + `)`), KindBirth, 1},
 	// Скрывается только год: «года рождения» — обычные слова, и проверка
 	// повторным распознаванием находила бы их в шапке .md как утечку.
 	{regexp.MustCompile(`(?:^|[^\p{L}])(\d{4})\s+(?:года|г\.)\s+рождения`), KindBirth, 1},
+	// «1970 г.р.» — год стоит перед сокращением, подписи перед ним нет.
+	// После «р» — точка или конец слова: «2015 г. р-н» — уже район.
+	{regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])(\d{4})\s*г\.\s?р(?:\.|[\s,;)]|$)`), KindBirth, 1},
+	// Серия и номер паспорта без слова «паспорт» — оно часто стоит строкой
+	// выше: «серия 45 08 № 123456» (значения выдуманы).
+	{regexp.MustCompile(`(?i)(?:^|[^\p{L}])серия\s*(\d{2}\s?\d{2}\s*(?:№|n|номер)\s*\d{6})(?:\D|$)`), KindID, 1},
 	{regexp.MustCompile(`(?:^|[^\p{L}])([А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.)`), KindPerson, 1},
 	{regexp.MustCompile(`(?:^|[^\p{L}])([А-ЯЁ]\.\s?[А-ЯЁ]\.\s?[А-ЯЁ][а-яё]+)`), KindPerson, 1},
 }

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os/signal"
 	"sync"
@@ -62,34 +61,14 @@ func ServeStdio(srv *Server, verbose bool) error {
 // значение — отпечаток набора прежнего: совпал — клиенту перечитывать нечего.
 const reexecEnv = "OLLMCP_REEXEC"
 
-// handleLine отвечает на одну строку протокола и сразу отправляет ответ.
-func handleLine(ctx context.Context, srv *Server, line []byte, out *bufio.Writer, verbose bool) error {
-	if len(strings.TrimSpace(string(line))) == 0 {
-		return nil
-	}
-	if verbose {
-		fmt.Fprintf(os.Stderr, "→ %s\n", trim(string(line), 200))
-	}
-	resp := srv.Handle(ctx, line)
-	if resp == nil {
-		return nil // уведомление: ответа быть не должно
-	}
-	if verbose {
-		fmt.Fprintf(os.Stderr, "← %s\n", trim(string(resp), 200))
-	}
-	if _, err := out.Write(append(resp, '\n')); err != nil {
-		return err
-	}
-	return out.Flush()
-}
-
 // Serve ведёт разговор по строкам через произвольные потоки: то же, что
 // ServeStdio, но без привязки к процессу — так режим stdio проверяется тестом
-// (этап 91, R5.8). Возвращается по EOF на входе или по отмене контекста.
+// (этап 91, R5.8). Возвращается по EOF на входе (дождавшись начатых вызовов)
+// или по отмене контекста.
 func Serve(ctx context.Context, srv *Server, r io.Reader, w io.Writer, verbose bool) error {
 	in := bufio.NewReaderSize(r, 1<<20)
-	out := bufio.NewWriter(w)
-	defer out.Flush()
+	sess := newSession(srv, bufio.NewWriter(w), verbose)
+	defer sess.close()
 
 	// Чтение вынесено в отдельную горутину, и это не украшение.
 	//
@@ -127,12 +106,18 @@ func Serve(ctx context.Context, srv *Server, r io.Reader, w io.Writer, verbose b
 		}
 		line, err := msg.line, msg.err
 		if err == io.EOF {
-			return nil
+			// Клиент всё сказал, но ответы ещё читает: начатые вызовы
+			// доводятся до конца, как прежде, когда шли по одному.
+			sess.wait()
+			return sess.err()
 		}
 		if err != nil {
 			return err
 		}
-		if err := handleLine(ctx, srv, line, out, verbose); err != nil {
+		if err := sess.handle(ctx, line); err != nil {
+			return err
+		}
+		if err := sess.err(); err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
@@ -291,14 +276,6 @@ func Info(srv *Server) map[string]any {
 		"name": serverName, "version": serverVersion,
 		"protocol": protocolVersion, "tools": len(srv.list()),
 	}
-}
-
-func loopback(host string) bool {
-	if host == "" || host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func trim(s string, n int) string {

@@ -57,3 +57,20 @@ func TestFolderFilterIsNotSubstring(t *testing.T) {
 		t.Error("docFilter по каталогу разошёлся с MatchingDocs")
 	}
 }
+
+// Разбивка по каталогам относит книгу к первому уровню под корнем по границе
+// каталога: «..заметки» — каталог внутри корня, а не выход из него.
+func TestTopFolderBoundary(t *testing.T) {
+	roots := []string{"/data/lib"}
+	cases := []struct{ path, want string }{
+		{"/data/lib/Go/book.pdf", "Go"},
+		{"/data/lib/book.pdf", "."},
+		{"/data/lib/..заметки/sub/book.pdf", "..заметки"},
+		{"/data/library/Go/book.pdf", "Go"}, // вне корня: имя своего каталога
+	}
+	for _, c := range cases {
+		if got := topFolder(c.path, roots); got != c.want {
+			t.Errorf("topFolder(%q) = %q, ожидалось %q", c.path, got, c.want)
+		}
+	}
+}

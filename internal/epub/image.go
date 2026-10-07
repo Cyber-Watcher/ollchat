@@ -2,12 +2,15 @@ package epub
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/png"
 	"path"
 
 	_ "image/gif"  // распознавание размеров и чтение GIF
 	_ "image/jpeg" // и JPEG
+
+	"github.com/Cyber-Watcher/ollchat/internal/pdf"
 )
 
 // Картинки книги.
@@ -67,6 +70,9 @@ func ExtractImages(data []byte, opt ImageOptions) (out []Image, err error) {
 	for i := first - 1; i < last && i < len(pkg.spine); i++ {
 		href := pkg.spine[i]
 		raw, err := b.read(href)
+		if errors.Is(err, ErrTooLarge) {
+			return nil, err
+		}
 		if err != nil {
 			continue
 		}
@@ -79,6 +85,9 @@ func ExtractImages(data []byte, opt ImageOptions) (out []Image, err error) {
 			}
 			seen[name] = true
 			blob, err := b.read(name)
+			if errors.Is(err, ErrTooLarge) {
+				return nil, err
+			}
 			if err != nil {
 				continue
 			}
@@ -105,9 +114,13 @@ func ExtractImages(data []byte, opt ImageOptions) (out []Image, err error) {
 }
 
 // imageInfo определяет формат и размер, не распаковывая картинку целиком.
+//
+// Картинка больше разумного пропускается (pdf.CheckImageConfig): GIF
+// раскрывается здесь же, в toPNG, а JPEG и PNG — тем, кому их отдадут, и
+// файл в десятки байт с заголовком 65535×65535 просил гигабайты.
 func imageInfo(data []byte) (format string, w, h int, ok bool) {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
+	if err != nil || pdf.CheckImageConfig(cfg) != nil {
 		return "", 0, 0, false
 	}
 	switch format {

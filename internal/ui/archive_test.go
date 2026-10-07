@@ -1,11 +1,14 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/agent"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
@@ -99,5 +102,58 @@ func TestArchiveStatusSegment(t *testing.T) {
 	got := m.archiveStatus(start.Add(12 * time.Second))
 	if got != archiveIcon+" архив books 12s" {
 		t.Errorf("сегмент: %q", got)
+	}
+}
+
+// countBlocks — сколько блоков ленты содержат строку.
+func countBlocks(m *Model, sub string) int {
+	n := 0
+	for _, b := range m.blocks {
+		if strings.Contains(b.text, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// Итог архива, пришедший посреди ответа, придерживается до конца хода —
+// и обязан показаться, когда ход кончится. Раньше его выкладывал только
+// streamClosedMsg, которого после TurnDone не бывает (аудит 07.10.2026).
+func TestHeldArchiveNoteShownAfterTurn(t *testing.T) {
+	m := newTestModel(t)
+	stuckTurn(m)
+	m.Update(archiveDoneMsg{coll: "books", res: graph.ArchiveResult{Path: "/архивы/books.tar.gz"}})
+	if countBlocks(m, "заархивирована") != 0 {
+		t.Fatal("итог архива влез в середину ответа")
+	}
+
+	m.Update(agentEventMsg{gen: m.gen.run, ev: agent.Event{Kind: agent.EventTurnDone}})
+	if countBlocks(m, "коллекция books заархивирована") != 1 {
+		t.Fatal("придержанный итог архива не показан после хода")
+	}
+}
+
+// Отказ планового архива помечается показанным, только когда заметка легла
+// в ленту. Помеченный заранее и не показанный, он гасил все следующие такие
+// же отказы — архив падал молча.
+func TestArchiveErrorMarkedShownOnlyWhenShown(t *testing.T) {
+	m := newTestModel(t)
+	fail := archiveDoneMsg{coll: "books", err: errors.New("нет места на диске")}
+
+	stuckTurn(m)
+	m.Update(fail)
+	if m.archiveErrShown != "" {
+		t.Fatal("отказ помечен показанным, хотя в ленту не лёг")
+	}
+	m.Update(fail) // следующая проверка через пять минут, ход всё идёт
+	m.Update(agentEventMsg{gen: m.gen.run, ev: agent.Event{Kind: agent.EventTurnDone}})
+	if got := countBlocks(m, "нет места на диске"); got != 1 {
+		t.Fatalf("отказ показан %d раз, ожидался один", got)
+	}
+
+	// Тот же отказ после хода — уже показан, повторять незачем.
+	m.Update(fail)
+	if got := countBlocks(m, "нет места на диске"); got != 1 {
+		t.Fatalf("показанный отказ повторён: %d раз", got)
 	}
 }

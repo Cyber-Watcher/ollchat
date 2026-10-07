@@ -90,7 +90,8 @@ type shown struct {
 	unmapped int     // сколько кодов не удалось сопоставить
 	width    float64 // ширина в тысячных долях кегля
 	glyphs   int
-	spaces   int // однобайтовые пробелы, к ним применяется словный интервал
+	spaces   int  // однобайтовые пробелы, к ним применяется словный интервал
+	cut      bool // текст обрезан по пределу limit (см. decode)
 }
 
 // width возвращает ширину глифа в тысячных долях кегля.
@@ -113,12 +114,23 @@ func (f *font) widthOf(code uint32) float64 {
 // decode переводит строку из содержимого страницы в текст и считает, насколько
 // сдвинется перо: без ширины глифов не отличить конец слова от простого сдвига,
 // и текст рассыпается на буквы через пробел.
-func (f *font) decode(b []byte) shown {
+//
+// Текста выходит не больше limit байт: код глифа по /ToUnicode разворачивается
+// в строку до 256 знаков, и одна строка содержимого в мегабайт давала бы
+// сотни мегабайт текста раньше, чем их успели бы проверить снаружи.
+func (f *font) decode(b []byte, limit int) shown {
 	var sb strings.Builder
 	var out shown
+	full := func() bool {
+		out.cut = sb.Len() >= limit
+		return out.cut
+	}
 	if f == nil {
 		// Шрифт не объявлен: считаем однобайтовой латиницей.
 		for _, c := range b {
+			if full() {
+				break
+			}
 			sb.WriteRune(winAnsi[c])
 			out.width += 500
 			out.glyphs++
@@ -127,7 +139,7 @@ func (f *font) decode(b []byte) shown {
 		return out
 	}
 	if f.twoByte {
-		for i := 0; i+1 < len(b); i += 2 {
+		for i := 0; i+1 < len(b) && !full(); i += 2 {
 			code := uint32(b[i])<<8 | uint32(b[i+1])
 			out.width += f.widthOf(code)
 			out.glyphs++
@@ -141,6 +153,9 @@ func (f *font) decode(b []byte) shown {
 		return out
 	}
 	for _, c := range b {
+		if full() {
+			break
+		}
 		code := uint32(c)
 		out.width += f.widthOf(code)
 		out.glyphs++
@@ -288,7 +303,7 @@ func (d *Document) loadCIDWidths(dict Dict, f *font) {
 		switch next := d.Resolve(w[i+1]).(type) {
 		case Array:
 			for j, item := range next {
-				if v, ok := toFloat(d.Resolve(item)); ok {
+				if v, ok := toFloat(d.Resolve(item)); ok && start >= 0 {
 					f.widths[uint32(start+j)] = v
 				}
 			}
@@ -300,7 +315,11 @@ func (d *Document) loadCIDWidths(dict Dict, f *font) {
 				continue
 			}
 			v, ok2 := toFloat(d.Resolve(w[i+2]))
-			if ok2 && end >= start && end-start < 65536 {
+			// Номера глифов составного шрифта — от 0 до 65535, и границы
+			// сверяются с этим до вычитания: при start = −2⁶³ разность
+			// end−start переполнялась в отрицательную, проходила проверку
+			// длины, и цикл ниже шёл около 2⁶³ витков.
+			if ok2 && start >= 0 && end >= start && end <= maxCID {
 				if end-start >= maxExpand {
 					f.widthRanges = append(f.widthRanges, widthRange{uint32(start), uint32(end), v})
 				} else {
@@ -312,6 +331,23 @@ func (d *Document) loadCIDWidths(dict Dict, f *font) {
 			i += 3
 		}
 	}
+}
+
+// maxCID — наибольший номер глифа составного шрифта: коды двухбайтовые.
+const maxCID = 0xFFFF
+
+// maxUniDst — предел длины строки назначения в /ToUnicode, байт UTF-16:
+// столько разрешает спецификация CMap. Без предела один код из содержимого
+// страницы разворачивался в строку любой длины, и страница в килобайт
+// давала гигабайты текста.
+const maxUniDst = 512
+
+// uniDst обрезает строку назначения /ToUnicode до допустимой длины.
+func uniDst(s String) String {
+	if len(s) > maxUniDst {
+		return s[:maxUniDst]
+	}
+	return s
 }
 
 func (f *font) applyBaseEncoding(name Name) {
@@ -360,7 +396,7 @@ func (d *Document) parseCMap(data []byte, f *font) {
 				if !ok1 || !ok2 {
 					continue
 				}
-				f.toUni[codeOf(src)] = utf16BE(dst)
+				f.toUni[codeOf(src)] = utf16BE(uniDst(dst))
 			}
 		case "endbfrange":
 			for i := 0; i+2 < len(operands); i += 3 {
@@ -376,7 +412,7 @@ func (d *Document) parseCMap(data []byte, f *font) {
 				switch dst := operands[i+2].(type) {
 				case String:
 					// Диапазон отображается подряд, наращивается последний код.
-					base := utf16Runes(dst)
+					base := utf16Runes(uniDst(dst))
 					if len(base) == 0 {
 						continue
 					}
@@ -384,19 +420,23 @@ func (d *Document) parseCMap(data []byte, f *font) {
 						f.uniRanges = append(f.uniRanges, uniRange{start, end, base})
 						continue
 					}
-					for c := start; c <= end; c++ {
+					// Счёт идёт по сдвигу от начала, а не по самому коду:
+					// диапазон, кончающийся на <FFFFFFFF>, переполнял uint32,
+					// счётчик возвращался к нулю, и цикл не кончался никогда,
+					// набивая таблицу до нехватки памяти.
+					for k := uint32(0); k <= end-start; k++ {
 						r := make([]rune, len(base))
 						copy(r, base)
-						r[len(r)-1] += rune(c - start)
-						f.toUni[c] = string(r)
+						r[len(r)-1] += rune(k)
+						f.toUni[start+k] = string(r)
 					}
 				case Array:
 					for j, item := range dst {
 						s, ok := item.(String)
-						if !ok || start+uint32(j) > end {
+						if !ok || uint32(j) > end-start {
 							continue
 						}
-						f.toUni[start+uint32(j)] = utf16BE(s)
+						f.toUni[start+uint32(j)] = utf16BE(uniDst(s))
 					}
 				}
 			}
@@ -478,18 +518,16 @@ var afiiCyrillic = func() map[int]rune {
 		10145: 'Џ', 10193: 'џ',
 	}
 	// Прописные А…Я идут подряд, кроме выпавшей Ё.
-	upper := []rune("АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
 	code := 10017
-	for _, r := range upper {
+	for _, r := range "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ" {
 		m[code] = r
 		code++
 		if code == 10023 { // здесь в нумерации стоит Ё
 			code++
 		}
 	}
-	lower := []rune("абвгдежзийклмнопрстуфхцчшщъыьэюя")
 	code = 10065
-	for _, r := range lower {
+	for _, r := range "абвгдежзийклмнопрстуфхцчшщъыьэюя" {
 		m[code] = r
 		code++
 		if code == 10071 { // ё

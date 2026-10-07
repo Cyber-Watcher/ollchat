@@ -410,3 +410,21 @@ func TestFixedTargetNeedsNoConfirmation(t *testing.T) {
 		t.Fatalf("запрет обойдён целью из настроек: %+v", res)
 	}
 }
+
+// Каталог с именем на «..» внутри корня показывается относительным путём:
+// выход из корня — это «..» целым элементом пути, а не любое такое имя.
+func TestSandboxRelKeepsDotDotNames(t *testing.T) {
+	root := t.TempDir()
+	sb, err := NewSandbox(root, false, false, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(sb.Root(), "..x", "f.txt")
+	if got := sb.Rel(inside); got != filepath.Join("..x", "f.txt") {
+		t.Errorf("Rel(%q) = %q, ожидался относительный путь", inside, got)
+	}
+	outside := filepath.Join(filepath.Dir(sb.Root()), "other.txt")
+	if got := sb.Rel(outside); got != outside {
+		t.Errorf("путь вне корня показан относительным: %q", got)
+	}
+}
