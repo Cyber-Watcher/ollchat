@@ -82,6 +82,14 @@ func exitStatus(err error) (int, string) {
 	if errors.As(err, &ec) {
 		return ec.code, ec.msg
 	}
+	// Свой код у --scan-redact: 3 — проверка нашла скрытое в итоге, 130 —
+	// прервано Ctrl+C. Библиотека возвращает его ошибкой, а не зовёт os.Exit
+	// сама: иначе временные снимки страниц с персональными данными
+	// не убирались бы отложенной уборкой.
+	var re *redact.ExitError
+	if errors.As(err, &re) {
+		return re.Code, err.Error()
+	}
 	return 1, err.Error()
 }
 
