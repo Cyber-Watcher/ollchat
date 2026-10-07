@@ -39,14 +39,16 @@ const (
 // Progress — отметки о разобранных кусках.
 type Progress struct {
 	mu   sync.RWMutex
+	path string
 	f    *os.File
 	w    *bufio.Writer
+	tail journalTail // хвост файла при чтении; срезается перед дозаписью (journal.go)
 	mark map[uint64]uint32
 }
 
 func openProgress(dir string) (*Progress, error) {
-	p := &Progress{mark: map[uint64]uint32{}}
-	path := filepath.Join(dir, progressFile)
+	p := &Progress{path: filepath.Join(dir, progressFile), mark: map[uint64]uint32{}}
+	path := p.path
 	if err := p.load(path); err != nil {
 		return nil, err
 	}
@@ -71,12 +73,14 @@ func (p *Progress) load(path string) error {
 	r := bufio.NewReaderSize(f, 128*1024)
 	buf := make([]byte, progressSize)
 	for {
-		if _, err := io.ReadFull(r, buf); err != nil {
+		if n, err := io.ReadFull(r, buf); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				p.tail.torn(n) // обрывок срезается перед дозаписью (journal.go)
 				return nil
 			}
 			return err
 		}
+		p.tail.record(progressSize)
 		key := ChunkKey{
 			Doc: binary.LittleEndian.Uint32(buf[0:]),
 			Ord: binary.LittleEndian.Uint32(buf[4:]),
@@ -94,11 +98,21 @@ func (p *Progress) Mark(chunk ChunkKey, mark uint32) error {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.tail.prepare(p.f, p.path); err != nil {
+		return err
+	}
 	if _, err := p.w.Write(buf[:]); err != nil {
 		return err
 	}
 	p.mark[chunk.Pack()] = mark
 	return nil
+}
+
+// prepare приводит хвост журнала в порядок перед дозаписью (journal.go).
+func (p *Progress) prepare() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tail.prepare(p.f, p.path)
 }
 
 // Done сообщает, разобран ли кусок. Пропущенный считается разобранным:

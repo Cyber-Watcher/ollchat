@@ -96,6 +96,7 @@ type Entities struct {
 	path string
 	f    *os.File
 	w    *bufio.Writer
+	tail journalTail // хвост файла при чтении; правится перед дозаписью (journal.go)
 
 	// merges — склейки, надеваемые при чтении. Поиск обязан вести к выжившему.
 	merges *Merges
@@ -219,6 +220,23 @@ func (e *Entities) load(cb func(OpenProgress)) error {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	// Точный учёт байт ради хвоста (journal.go): сколько прочитано всего
+	// и сколько из этого — строки, закончившиеся переводом строки. Последняя
+	// строка без перевода — оборванная запись либо целая, которой недостало
+	// одного перевода строки; что из двух, решает её разбор.
+	unterminated, tailOK := false, false
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		adv, tok, err := bufio.ScanLines(data, atEOF)
+		if adv > 0 {
+			if data[adv-1] == '\n' {
+				e.tail.record(adv)
+			} else {
+				e.tail.torn(adv)
+				unterminated = true
+			}
+		}
+		return adv, tok, err
+	})
 	for sc.Scan() {
 		line := sc.Bytes()
 		if cb != nil {
@@ -237,8 +255,10 @@ func (e *Entities) load(cb func(OpenProgress)) error {
 		if err := json.Unmarshal(line, &ent); err != nil || ent.ID == 0 {
 			continue
 		}
+		tailOK = unterminated
 		e.put(ent)
 	}
+	e.tail.newline = unterminated && tailOK
 	return sc.Err()
 }
 
@@ -880,6 +900,9 @@ func (e *Entities) SaveCounters() error {
 }
 
 func (e *Entities) append(ent Entity) error {
+	if err := e.tail.prepare(e.f, e.path); err != nil {
+		return err
+	}
 	b, err := json.Marshal(ent)
 	if err != nil {
 		return err
@@ -888,6 +911,13 @@ func (e *Entities) append(ent Entity) error {
 		return err
 	}
 	return nil
+}
+
+// prepare приводит хвост реестра в порядок перед дозаписью (journal.go).
+func (e *Entities) prepare() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tail.prepare(e.f, e.path)
 }
 
 // Sync сбрасывает буфер и просит диск записать его: Flush отдаёт данные

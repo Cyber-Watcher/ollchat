@@ -15,7 +15,8 @@ import (
 //
 // Оба журнала — двоичные, запись постоянной длины, только дозапись. Такой файл
 // переживает обрыв: хвост короче записи просто отбрасывается при чтении,
-// а всё, что записано до него, остаётся годным. Это то же решение, что
+// а всё, что записано до него, остаётся годным; перед дозаписью обрывок
+// срезается, иначе новые записи легли бы со сдвигом (journal.go). Это то же решение, что
 // в хранилище кусков (internal/kb/store.go), и по той же причине: сборка идёт
 // часами, и обрыв посреди неё — обычное дело, а не исключительный случай.
 //
@@ -107,9 +108,11 @@ type Mentions struct {
 	// merges — склейки, надеваемые при чтении.
 	merges *Merges
 
-	mu sync.RWMutex
-	f  *os.File
-	w  *bufio.Writer
+	mu   sync.RWMutex
+	path string
+	f    *os.File
+	w    *bufio.Writer
+	tail journalTail // хвост файла при чтении; срезается перед дозаписью (journal.go)
 
 	byEntity map[uint32][]uint64 // сущность → упакованные номера кусков
 	byChunk  map[uint64][]uint32 // кусок → сущности
@@ -118,10 +121,11 @@ type Mentions struct {
 
 func openMentions(dir string) (*Mentions, error) {
 	m := &Mentions{
+		path:     filepath.Join(dir, mentionsFile),
 		byEntity: map[uint32][]uint64{},
 		byChunk:  map[uint64][]uint32{},
 	}
-	path := filepath.Join(dir, mentionsFile)
+	path := m.path
 	if err := m.load(path); err != nil {
 		return nil, err
 	}
@@ -146,14 +150,17 @@ func (m *Mentions) load(path string) error {
 	r := bufio.NewReaderSize(f, 256*1024)
 	buf := make([]byte, mentionSize)
 	for {
-		if _, err := io.ReadFull(r, buf); err != nil {
+		if n, err := io.ReadFull(r, buf); err != nil {
 			// Хвост короче записи — это оборванная запись. Всё, что до неё,
-			// годится; на этом и держится возобновление после обрыва.
+			// годится; на этом и держится возобновление после обрыва. Сам
+			// обрывок срезается перед дозаписью (journal.go).
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				m.tail.torn(n)
 				return nil
 			}
 			return err
 		}
+		m.tail.record(mentionSize)
 		ent := binary.LittleEndian.Uint32(buf[0:])
 		key := ChunkKey{
 			Doc: binary.LittleEndian.Uint32(buf[4:]),
@@ -184,11 +191,21 @@ func (m *Mentions) Add(entity uint32, chunk ChunkKey) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.tail.prepare(m.f, m.path); err != nil {
+		return err
+	}
 	if _, err := m.w.Write(buf[:]); err != nil {
 		return err
 	}
 	m.index(entity, chunk.Pack())
 	return nil
+}
+
+// prepare приводит хвост журнала в порядок перед дозаписью (journal.go).
+func (m *Mentions) prepare() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tail.prepare(m.f, m.path)
 }
 
 // Of возвращает куски, где встречается сущность, по возрастанию и без повторов.
@@ -319,9 +336,11 @@ type Edges struct {
 	// merges — склейки, надеваемые при чтении.
 	merges *Merges
 
-	mu sync.RWMutex
-	f  *os.File
-	w  *bufio.Writer
+	mu   sync.RWMutex
+	path string
+	f    *os.File
+	w    *bufio.Writer
+	tail journalTail // хвост файла при чтении; срезается перед дозаписью (journal.go)
 
 	bySrc map[uint32][]Edge
 	// byDst — тот же список, но по второму концу связи.
@@ -335,8 +354,8 @@ type Edges struct {
 }
 
 func openEdges(dir string) (*Edges, error) {
-	e := &Edges{bySrc: map[uint32][]Edge{}, byDst: map[uint32][]Edge{}}
-	path := filepath.Join(dir, edgesFile)
+	e := &Edges{path: filepath.Join(dir, edgesFile), bySrc: map[uint32][]Edge{}, byDst: map[uint32][]Edge{}}
+	path := e.path
 	if err := e.load(path); err != nil {
 		return nil, err
 	}
@@ -361,12 +380,14 @@ func (e *Edges) load(path string) error {
 	r := bufio.NewReaderSize(f, 256*1024)
 	buf := make([]byte, edgeSize)
 	for {
-		if _, err := io.ReadFull(r, buf); err != nil {
+		if n, err := io.ReadFull(r, buf); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				e.tail.torn(n) // обрывок срезается перед дозаписью (journal.go)
 				return nil
 			}
 			return err
 		}
+		e.tail.record(edgeSize)
 		e.index(decodeEdge(buf))
 	}
 }
@@ -416,11 +437,21 @@ func (e *Edges) Add(ed Edge) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if err := e.tail.prepare(e.f, e.path); err != nil {
+		return err
+	}
 	if _, err := e.w.Write(buf[:]); err != nil {
 		return err
 	}
 	e.index(ed)
 	return nil
+}
+
+// prepare приводит хвост журнала в порядок перед дозаписью (journal.go).
+func (e *Edges) prepare() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tail.prepare(e.f, e.path)
 }
 
 // useMerges надевает журнал склеек на связи.

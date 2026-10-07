@@ -1,0 +1,223 @@
+package graph
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// appendBytes дописывает в файл журнала сырые байты — так выглядит обрывок
+// записи, оставленный kill -9 посреди сброса буфера.
+func appendBytes(t *testing.T, path string, b []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Обрывок в хвосте каждого журнала срезается перед дозаписью: после обрыва,
+// переоткрытия и новых записей журналы читаются ровно тем, что записано.
+//
+// До 07.10.2026 новые записи ложились после обрывка: двоичные журналы
+// читались со сдвигом (мусорные номера понятий и кусков), а первая новая
+// строка реестра склеивалась с обрывком и пропадала (аудит, №3).
+func TestTornTailsCutBeforeAppend(t *testing.T) {
+	coll := collection(t)
+	rules := Rules{Name: "lab", Format: FormatV2}
+	g, err := CreateKind(coll, "books", 1000, rules, CreateOpts{Kind: KindExperimental})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := g.Dir()
+	a, _, _ := g.Entities().Add("Альфа", TypeConcept)
+	b, _, _ := g.Entities().Add("Бета", TypeConcept)
+	first := ChunkKey{Doc: 1, Ord: 1}
+	must(t, g.Mentions().Add(a, first))
+	must(t, g.Edges().Add(Edge{Src: a, Dst: b, Type: RelUses, Evidence: first}))
+	must(t, g.Progress().Mark(first, MarkDone))
+	if _, err := g.Aliases().Add(a, first, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	must(t, g.Close())
+
+	// Обрывки: короче записи у каждого двоичного журнала, недописанная
+	// строка — у реестра.
+	appendBytes(t, filepath.Join(dir, mentionsFile), []byte{9, 0, 0, 0, 7})
+	appendBytes(t, filepath.Join(dir, edgesFile), []byte{1, 2, 3, 4, 5, 6, 7})
+	appendBytes(t, filepath.Join(dir, progressFile), []byte{1, 0, 0, 0})
+	appendBytes(t, filepath.Join(dir, aliasesFile), []byte{2, 0, 0, 0, 1, 0, 5, 0, 0})
+	appendBytes(t, filepath.Join(dir, entitiesFile), []byte(`{"id":3,"name":"обры`))
+
+	g, err = Open(coll, 1000, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Сборка берёт замок — под ним хвосты и приводятся в порядок.
+	must(t, g.Lock())
+	if notes := g.TornTails(); len(notes) != 5 {
+		t.Errorf("исправлений хвостов %d, ожидалось 5 — по одному на журнал: %q", len(notes), notes)
+	}
+	c, isNew, err := g.Entities().Add("Гамма", TypeConcept)
+	if err != nil || !isNew || c != 3 {
+		t.Fatalf("новое понятие: %d, %v, %v — ожидался №3", c, isNew, err)
+	}
+	second := ChunkKey{Doc: 2, Ord: 1}
+	must(t, g.Mentions().Add(c, second))
+	must(t, g.Edges().Add(Edge{Src: c, Dst: a, Type: RelPart, Evidence: second}))
+	must(t, g.Progress().Mark(second, MarkEmpty))
+	if _, err := g.Aliases().Add(c, second, "gamma"); err != nil {
+		t.Fatal(err)
+	}
+	must(t, g.Unlock())
+	must(t, g.Close())
+
+	g, err = Open(coll, 1000, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	var names []string
+	for _, e := range g.Entities().All() {
+		names = append(names, e.Name)
+	}
+	if strings.Join(names, ",") != "Альфа,Бета,Гамма" {
+		t.Errorf("реестр после дозаписи: %q", names)
+	}
+	if n := g.Mentions().Count(); n != 2 {
+		t.Errorf("упоминаний %d, ожидалось 2", n)
+	}
+	if got := g.Mentions().Of(c); len(got) != 1 || got[0] != second {
+		t.Errorf("упоминания нового понятия: %v", got)
+	}
+	if got := g.Mentions().In(first); len(got) != 1 || got[0] != a {
+		t.Errorf("прежнее упоминание: %v", got)
+	}
+	if n := g.Edges().Count(); n != 2 {
+		t.Errorf("связей %d, ожидалось 2", n)
+	}
+	if got := g.Edges().ofRaw(c); len(got) != 1 || got[0].Dst != a || got[0].Evidence != second {
+		t.Errorf("новая связь прочитана не так: %+v", got)
+	}
+	if n := g.Progress().Count(); n != 2 {
+		t.Errorf("отметок %d, ожидалось 2", n)
+	}
+	if m, ok := g.Progress().MarkOf(second); !ok || m != MarkEmpty {
+		t.Errorf("новая отметка: %d, %v", m, ok)
+	}
+	al := g.Aliases().All()
+	if len(al) != 2 || al[1].Entity != c || al[1].Chunk != second || al[1].Norm != "gamma" {
+		t.Errorf("синонимы после дозаписи: %+v", al)
+	}
+}
+
+// Без замка хвост правит первая запись: дозапись после обрывка невозможна
+// ни при каком порядке вызовов.
+func TestTornTailCutOnFirstWrite(t *testing.T) {
+	g, coll := graph(t)
+	dir := g.Dir()
+	a, _, _ := g.Entities().Add("Альфа", TypeConcept)
+	must(t, g.Mentions().Add(a, ChunkKey{Doc: 1, Ord: 1}))
+	must(t, g.Close())
+	appendBytes(t, filepath.Join(dir, mentionsFile), []byte{0xff, 0xff, 0xff})
+
+	g, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, g.Mentions().Add(a, ChunkKey{Doc: 1, Ord: 2}))
+	must(t, g.Close())
+
+	fi, err := os.Stat(filepath.Join(dir, mentionsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() != 2*mentionSize {
+		t.Fatalf("журнал упоминаний %d байт, ожидалось %d — обрывок остался", fi.Size(), 2*mentionSize)
+	}
+	g, err = Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if got := g.Mentions().Of(a); len(got) != 2 {
+		t.Errorf("упоминания после дозаписи: %v", got)
+	}
+}
+
+// Целая запись реестра, которой недостало лишь перевода строки, не срезается:
+// она читается — значит, она часть графа. Ей дописывается перевод строки,
+// и следующая запись ложится отдельной строкой.
+func TestRegistryLineWithoutNewlineKept(t *testing.T) {
+	g, coll := graph(t)
+	dir := g.Dir()
+	a, _, _ := g.Entities().Add("Альфа", TypeConcept)
+	must(t, g.Close())
+	appendBytes(t, filepath.Join(dir, entitiesFile), []byte(`{"id":2,"name":"Бета","norm":"бета","type":"понятие","at":1}`))
+
+	g, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := g.Entities().Lookup("Бета"); !ok {
+		t.Fatal("целая запись без перевода строки не прочиталась")
+	}
+	c, _, err := g.Entities().Add("Гамма", TypeConcept)
+	if err != nil || c != 3 {
+		t.Fatalf("новое понятие: %d, %v", c, err)
+	}
+	must(t, g.Close())
+
+	g, err = Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	for _, name := range []string{"Альфа", "Бета", "Гамма"} {
+		if _, ok := g.Entities().Lookup(name); !ok {
+			t.Errorf("после дозаписи потеряно понятие %q", name)
+		}
+	}
+	if g.Entities().Count() != 3 || a != 1 {
+		t.Errorf("понятий %d, ожидалось 3", g.Entities().Count())
+	}
+}
+
+// Журнал дописал другой процесс после того, как граф был открыт: замок
+// сборки не берётся, иначе дозапись по устаревшему состоянию в памяти выдала
+// бы уже занятые номера понятий, а срез хвоста снёс бы чужие записи.
+func TestLockRefusesJournalGrownSinceOpen(t *testing.T) {
+	g, coll := graph(t)
+	a, _, _ := g.Entities().Add("Альфа", TypeConcept)
+	must(t, g.Close())
+
+	stale, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Close()
+
+	other, err := Open(coll, 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, other.Mentions().Add(a, ChunkKey{Doc: 1, Ord: 1}))
+	must(t, other.Close())
+
+	err = stale.Lock()
+	if !errors.Is(err, ErrStale) {
+		t.Fatalf("ожидался ErrStale, получено %v", err)
+	}
+	if stale.Locked() {
+		t.Error("после отказа признак сборки остался висеть")
+	}
+}

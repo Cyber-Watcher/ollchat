@@ -803,7 +803,51 @@ func (g *Graph) Lock() error {
 
 	fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
 	g.lock = f
+	// Под замком писать больше некому — самое время привести в порядок
+	// хвосты журналов, оставленные оборванным прошлым заходом (journal.go).
+	// Не вышло — замок снимается: дописывать в такой граф нельзя.
+	if err := g.prepareJournals(); err != nil {
+		_ = g.Unlock()
+		return err
+	}
 	return nil
+}
+
+// prepareJournals приводит в порядок хвосты всех журналов перед дозаписью:
+// срезает оборванную запись и сверяет, что файлы те же, что читались при
+// открытии (journal.go). Зовётся под замком сборки.
+func (g *Graph) prepareJournals() error {
+	for _, prepare := range []func() error{
+		g.ents.prepare, g.ment.prepare, g.edge.prepare, g.prog.prepare, g.alias.prepare,
+	} {
+		if err := prepare(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TornTails — что исправлено в хвостах журналов перед дозаписью: срезанные
+// обрывки записей от оборванного прошлого захода. Пусто — править было нечего.
+// Нужно затем же, зачем StaleLock: срез байт из журнала, стоившего недель
+// карты, молча делаться не должен.
+func (g *Graph) TornTails() []string {
+	var out []string
+	add := func(mu *sync.RWMutex, t *journalTail) {
+		mu.RLock()
+		defer mu.RUnlock()
+		if t.note != "" {
+			out = append(out, t.note)
+		}
+	}
+	add(&g.ents.mu, &g.ents.tail)
+	add(&g.ment.mu, &g.ment.tail)
+	add(&g.edge.mu, &g.edge.tail)
+	add(&g.prog.mu, &g.prog.tail)
+	if g.alias != nil {
+		add(&g.alias.mu, &g.alias.tail)
+	}
+	return out
 }
 
 // StaleLock — описание снятого признака от неживого процесса, если он был.
