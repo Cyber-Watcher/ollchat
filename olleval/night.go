@@ -108,7 +108,7 @@ func pendingCounter(ctx context.Context, root string, client *ollama.Client,
 		if cards == nil {
 			tags, err := client.Tags(ctx)
 			if err != nil {
-				return 0, err
+				return 0, &serverDownError{err}
 			}
 			cards = keepOnly(SelectModels(tags, strings.Split(exclude, ",")), models)
 		}

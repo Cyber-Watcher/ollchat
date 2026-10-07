@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 func nights(t *testing.T, names ...string) string {
@@ -95,6 +100,37 @@ func TestPicksLatestUnfinished(t *testing.T) {
 	}
 	if len(asked) != 1 {
 		t.Errorf("опрошено ночей %v — хватало одной, самой свежей", asked)
+	}
+}
+
+// Молчащий сервер — свой код выхода 3, а не общий 1: у pending «1» значит
+// «работы нет», и скрипт ночи, видя погашенную службу, выходил, не дойдя
+// до guard --start-service, который единственный может её поднять.
+func TestServerDownHasItsOwnExitCode(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close() // порт закрыт — как у погашенной службы
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "suites"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	suite := "[[task]]\nid = \"a\"\nlevel = 1\nprompt = \"а\"\n"
+	if err := os.WriteFile(filepath.Join(root, "suites", "go.toml"), []byte(suite), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	count := pendingCounter(context.Background(), root, ollama.New(url, time.Second, time.Second, nil),
+		"all", "", "", 1)
+	_, err := count("2026-08-22")
+	if code := exitCodeFor(err); code != exitServerDown {
+		t.Errorf("сервер молчит: код %d (%v), ожидался %d", code, err, exitServerDown)
+	}
+	if code := exitCodeFor(fmt.Errorf("ночь: %w", err)); code != exitServerDown {
+		t.Errorf("сквозь обёртку код потерялся: %d", code)
+	}
+	// «Работы нет» и прочие отказы — по-прежнему 1.
+	if exitCodeFor(errSilent) != 1 || exitCodeFor(fmt.Errorf("наборов нет")) != 1 || exitCodeFor(nil) != 0 {
+		t.Error("прежние коды выхода изменились")
 	}
 }
 
