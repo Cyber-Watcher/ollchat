@@ -1473,7 +1473,15 @@ func sessionDir() string {
 	if dir, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(dir, ".local", "share", "ollchat", "sessions")
 	}
-	return filepath.Join(os.TempDir(), "ollchat-sessions")
+	// Без HOME — свой каталог: кеш пользователя, если он задан, иначе
+	// временный с номером пользователя в имени. Прежний общий
+	// /tmp/ollchat-sessions делили все пользователи машины: кто создал его
+	// первым, тот и решал, кому в нём писать, и мог подложить чужим
+	// сессиям свою для /resume.
+	if dir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(dir, "ollchat", "sessions")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("ollchat-sessions-%d", os.Getuid()))
 }
 
 func usage() {

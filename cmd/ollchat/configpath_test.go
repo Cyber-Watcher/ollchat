@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +23,23 @@ func TestConfigPathOrder(t *testing.T) {
 	}
 	if got := configPath("", "~/x.toml"); strings.HasPrefix(got, "~") {
 		t.Errorf("тильда в переменной не раскрыта: %q", got)
+	}
+}
+
+// Без HOME сессии ложатся в свой каталог пользователя, а не в общий
+// /tmp/ollchat-sessions, который делили все пользователи машины.
+func TestSessionDirWithoutHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	got := sessionDir()
+	want := filepath.Join(os.TempDir(), fmt.Sprintf("ollchat-sessions-%d", os.Getuid()))
+	if got != want {
+		t.Errorf("без HOME и кеша: %s, ожидалось %s", got, want)
+	}
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	if got := sessionDir(); got != filepath.Join(cache, "ollchat", "sessions") {
+		t.Errorf("без HOME, с XDG_CACHE_HOME: %s", got)
 	}
 }
 
