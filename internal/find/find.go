@@ -122,6 +122,7 @@ type Excerpt struct {
 	ID       string // «books/12#37»
 	Book     string
 	Path     string // путь к файлу книги: по нему Ctrl+O открывает её целиком
+	Rel      string // у текстового файла — путь от корня коллекции для заголовка; у книг пусто
 	Author   string
 	Year     int
 	Unit     string // «стр.» или «разд.»
@@ -574,7 +575,7 @@ func merge(hits []kb.Result, fromG []Excerpt, o Opts) []Excerpt {
 			snippet = cut(h.Text, o.SnippetRunes)
 		}
 		out = append(out, Excerpt{
-			ID: h.ID, Book: h.Book, Path: h.Path, Author: h.Author, Year: h.Year,
+			ID: h.ID, Book: h.Book, Path: h.Path, Rel: h.Rel, Author: h.Author, Year: h.Year,
 			Unit: h.Unit, From: h.UnitFrom, To: h.UnitTo,
 			Text: h.Text, Snippet: snippet, Code: h.Code,
 		})

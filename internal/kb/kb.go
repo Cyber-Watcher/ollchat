@@ -235,10 +235,73 @@ func shortUnit(word string) string {
 	case "разделов":
 		return "разд."
 	case "строк":
-		return "строки"
+		return unitLines
 	default:
 		return "стр."
 	}
+}
+
+// unitLines — короткая форма единицы у текстовых файлов (.md, .go, .sh, .py).
+// По ней выдача отличает файл от книги: у книги единица «стр.» или «разд.».
+const unitLines = "строки"
+
+// relToRoots — путь файла от корня коллекции, с прямыми чертами.
+//
+// Корней у коллекции может быть много (у projectdocs это `docs`, `internal`,
+// `cmd` и другие каталоги проекта), и путь от самого корня потерял бы его имя:
+// «kb/kb.go» вместо «internal/kb/kb.go». Поэтому путь считается от общего
+// каталога всех корней; у коллекции с одним корнем это сам корень.
+//
+// Пусто, когда файл лежит вне всех записанных корней (корень потом убрали):
+// честнее промолчать, чем показать путь от неизвестно чего.
+func relToRoots(path string, roots []string) string {
+	inside := false
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return ""
+	}
+	rel, err := filepath.Rel(commonDir(roots), path)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+// commonDir — самый длинный каталог, в котором лежат все корни.
+func commonDir(roots []string) string {
+	sep := string(filepath.Separator)
+	common := strings.Split(filepath.Clean(roots[0]), sep)
+	for _, r := range roots[1:] {
+		parts := strings.Split(filepath.Clean(r), sep)
+		n := 0
+		for n < len(common) && n < len(parts) && common[n] == parts[n] {
+			n++
+		}
+		common = common[:n]
+	}
+	if dir := strings.Join(common, sep); dir != "" {
+		return dir
+	}
+	return sep
+}
+
+// TitleWithPath дописывает к названию документа его путь в скобках.
+//
+// У текстового файла название — первый заголовок первого уровня (у кода —
+// «каталог/файл»), и по нему файл на диске не найти. rel — путь от корня
+// коллекции, `Result.Rel`; у книг он пуст, и название остаётся как есть.
+// Путь не дублируется, когда название и так равно пути или имени файла.
+func TitleWithPath(title, rel string) string {
+	if rel == "" || title == rel || title == filepath.Base(rel) {
+		return title
+	}
+	return title + " (" + rel + ")"
 }
 
 // Base — корень базы знаний: набор коллекций.
@@ -810,6 +873,7 @@ type Result struct {
 	Book     string // заголовок книги
 	Author   string
 	Path     string
+	Rel      string // у текстового файла (единица «строки») — путь от корня коллекции; у книг пусто
 	Year     int    // год издания книги; 0 — неизвестен
 	YearSrc  string // откуда взят год
 	UnitFrom int
@@ -875,6 +939,9 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 				res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
 				res.Year, res.YearSrc = d.Year, d.YearSrc
 				res.Unit = shortUnit(d.UnitWord)
+				if res.Unit == unitLines {
+					res.Rel = relToRoots(d.Path, c.meta.Roots)
+				}
 				if res.Book == "" {
 					res.Book = filepath.Base(d.Path)
 				}
@@ -1055,6 +1122,9 @@ func (c *Collection) Around(id string, around int) ([]Result, error) {
 				res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
 				res.Year, res.YearSrc = d.Year, d.YearSrc
 				res.Unit = shortUnit(d.UnitWord)
+				if res.Unit == unitLines {
+					res.Rel = relToRoots(d.Path, c.meta.Roots)
+				}
 				if res.Book == "" {
 					res.Book = filepath.Base(d.Path)
 				}

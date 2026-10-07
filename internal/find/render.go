@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // Оформление выдачи для человека.
@@ -87,7 +88,7 @@ func Render(r Result, full bool, src graph.Chunks) string {
 // без автора и без диапазона страниц, у инструментов модели полный, у графа
 // свой — и человек, сверяя выдачи, не понимал, одна ли это книга.
 func Line(e Excerpt) string {
-	parts := []string{e.Book}
+	parts := []string{kb.TitleWithPath(e.Book, e.Rel)}
 	if e.Author != "" {
 		parts = append(parts, e.Author)
 	}

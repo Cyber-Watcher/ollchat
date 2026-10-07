@@ -187,7 +187,7 @@ func (t *kbSearchTool) run(ctx context.Context, name, query, book string, topK i
 // formatHit оформляет один фрагмент.
 func formatHit(n int, h kb.Result) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[%d] %s", n, h.Book)
+	fmt.Fprintf(&b, "[%d] %s", n, kb.TitleWithPath(h.Book, h.Rel))
 	if h.Author != "" {
 		fmt.Fprintf(&b, " · %s", h.Author)
 	}
