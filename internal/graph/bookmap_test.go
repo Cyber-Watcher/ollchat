@@ -1,9 +1,11 @@
 package graph
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -182,5 +184,142 @@ func TestRecordBooksAcceptsDuplicateFiles(t *testing.T) {
 	}
 	if st, err := RebaseBooks(dir, books, true); err != nil || st.Moved != 0 || st.Collision != "" {
 		t.Fatalf("копия файла принята за переезд: %+v %v", st, err)
+	}
+}
+
+// swapFixture — граф, у которого книги 1 и 2 обменялись номерами: перенос —
+// перестановка, и применённый дважды он вернул бы всё на прежние места.
+func swapFixture(t *testing.T) (dir string, swapped []KnownBook) {
+	t.Helper()
+	g := newGraphWith(t, "горутина", "канал")
+	dir = g.dir
+	one, two := ChunkKey{Doc: 1, Ord: 1}, ChunkKey{Doc: 2, Ord: 1}
+	must(t, g.Mentions().Add(1, one))
+	must(t, g.Mentions().Add(2, two))
+	must(t, g.Edges().Add(Edge{Src: 1, Dst: 2, Type: RelUses, Weight: 1, Evidence: one}))
+	must(t, g.Progress().Mark(one, MarkDone))
+	must(t, g.Progress().Mark(two, MarkEmpty))
+	must(t, g.dropped.add(DropRec{Book: 1, Path: "a.pdf"}))
+	if _, err := RecordBooks(dir, []KnownBook{{1, "h1", "a.pdf", 5}, {2, "h2", "b.pdf", 5}}); err != nil {
+		t.Fatal(err)
+	}
+	must(t, g.Close())
+	return dir, []KnownBook{{1, "h2", "b.pdf", 5}, {2, "h1", "a.pdf", 5}}
+}
+
+// Обрыв посреди подмены журналов не портит перестановку: повтор команды
+// доводит перенос по плану, а уже подменённое не переносит второй раз.
+// Пока перенос не доведён, сборка не идёт.
+//
+// До 07.10.2026 повтор после обрыва применял перестановку к уже
+// перенесённому журналу ещё раз — и записи книги 1 возвращались к книге 1,
+// а граф приписывал её кускам чужие понятия (аудит, 4.5).
+func TestRebaseBooksResumesAfterCrash(t *testing.T) {
+	dir, swapped := swapFixture(t)
+	m, err := loadBookMap(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Обрыв: заготовки и план записаны, подменён только первый журнал.
+	const stamp = "20261007-120000"
+	plan, err := prepareRebase(dir, stamp, planRebase(m, swapped).Moves, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(dir, plan.Files[0].Name)
+	if _, err := swapIn(first, rebaseTmp(first, stamp), first+".bak-"+stamp); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := Open(filepath.Dir(dir), 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &model{answer: func(int) (string, error) { return goodAnswer, nil }}
+	if _, err := Build(context.Background(), chunksFor(1, "/AI/c.pdf"), g, model, BuildOpts{Workers: 1}, nil); err == nil ||
+		!strings.Contains(err.Error(), "перенос номеров книг прерван") {
+		t.Fatalf("сборка при недоведённом переносе: %v", err)
+	}
+	must(t, g.Close())
+
+	st, err := RebaseBooks(dir, swapped, false)
+	if err != nil {
+		t.Fatalf("повтор переноса: %v", err)
+	}
+	if !st.Applied || !st.Resumed {
+		t.Fatalf("перенос не доведён по плану: %+v", st)
+	}
+	g2, err := Open(filepath.Dir(dir), 100, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	if got := g2.Mentions().Of(1); len(got) != 1 || got[0].Doc != 2 {
+		t.Errorf("упоминание книги 1 после переноса: %v, ожидалась книга 2", got)
+	}
+	if got := g2.Mentions().Of(2); len(got) != 1 || got[0].Doc != 1 {
+		t.Errorf("упоминание книги 2 после переноса: %v, ожидалась книга 1", got)
+	}
+	if e := g2.Edges().Of(1); len(e) != 1 || e[0].Evidence.Doc != 2 {
+		t.Errorf("подтверждение связи: %+v", e)
+	}
+	if mk, _ := g2.Progress().MarkOf(ChunkKey{Doc: 2, Ord: 1}); mk != MarkDone {
+		t.Errorf("отметка разбора не переехала с книгой: %d", mk)
+	}
+	if !g2.Dropped().Dropped(2) || g2.Dropped().Dropped(1) {
+		t.Error("отброшенная книга не переехала")
+	}
+	m2, err := loadBookMap(dir)
+	if err != nil || m2.Books[2].Hash != "h1" || m2.Books[1].Hash != "h2" {
+		t.Fatalf("карта после переноса: %+v %v", m2.Books, err)
+	}
+	if rebasePending(dir) {
+		t.Error("план переноса остался после доведения")
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".rebase-") {
+			t.Errorf("заготовка осталась: %s", e.Name())
+		}
+	}
+	if st, err := RebaseBooks(dir, swapped, false); err != nil || st.Moved != 0 {
+		t.Fatalf("третий прогон что-то перенёс: %+v %v", st, err)
+	}
+}
+
+// Журнал, переписанный после подготовки переноса, заготовкой не подменяется:
+// она устарела, и подмена потеряла бы ту правку. Перенос останавливается
+// с объяснением и с планом на месте.
+func TestRebaseBooksRefusesStalePreparation(t *testing.T) {
+	dir, swapped := swapFixture(t)
+	m, err := loadBookMap(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const stamp = "20261007-120000"
+	if _, err := prepareRebase(dir, stamp, planRebase(m, swapped).Moves, m); err != nil {
+		t.Fatal(err)
+	}
+	appendBytes(t, filepath.Join(dir, edgesFile), make([]byte, edgeSize))
+	if _, err := RebaseBooks(dir, swapped, false); err == nil || !strings.Contains(err.Error(), edgesFile) {
+		t.Fatalf("перенос по устаревшей заготовке: %v", err)
+	}
+	if !rebasePending(dir) {
+		t.Error("план убран, хотя перенос не доведён")
+	}
+}
+
+// Заготовки без плана — следы подготовки, оборванной до его записи: перенос
+// убирает их и идёт заново.
+func TestRebaseBooksDropsLeftoversWithoutPlan(t *testing.T) {
+	dir, swapped := swapFixture(t)
+	stray := rebaseTmp(filepath.Join(dir, mentionsFile), "20261007-115959")
+	must(t, os.WriteFile(stray, []byte("обрывок"), 0o644))
+	st, err := RebaseBooks(dir, swapped, false)
+	if err != nil || !st.Applied || st.Resumed {
+		t.Fatalf("перенос: %+v %v", st, err)
+	}
+	if _, err := os.Stat(stray); !os.IsNotExist(err) {
+		t.Error("ничья заготовка осталась")
 	}
 }

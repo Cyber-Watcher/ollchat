@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -193,30 +194,71 @@ func rewriteBinaryMap(path string, size int, stamp string, dry bool, change func
 // deleting — изменённые записи не переписывать (чистка), иначе — переписать
 // правленными (перенос номеров книг, bookmap.go).
 func rewriteBinaryWith(path string, size int, stamp string, dry bool, change func([]byte) bool, deleting bool) (rewriteResult, error) {
+	tmp := path + ".tmp-" + stamp
+	if dry {
+		tmp = ""
+	}
+	res, _, err := writeBinaryRewrite(path, tmp, size, change, deleting)
+	if err != nil || tmp == "" || res.dropped == 0 {
+		return res, err
+	}
+	// Подмена — ссылкой и одним переименованием (swap.go): обрыв посреди неё
+	// не оставляет каталог без журнала.
+	backup, err := swapIn(path, tmp, path+".bak-"+stamp)
+	if err != nil {
+		os.Remove(tmp)
+		return res, err
+	}
+	res.backup = backup
+	return res, nil
+}
+
+// writeBinaryRewrite читает журнал path записями по size байт и пишет
+// переписанный в tmp — сразу на диск; пустой tmp — только посчитать. Если
+// ничего не изменилось, заготовки не остаётся. Второе значение — сколько байт
+// журнала прочитано: по нему перенос номеров книг узнаёт, что журнал
+// не трогали между подготовкой и подменой.
+//
+// Оборванный хвост отбрасывается, как при чтении. А вот ошибка чтения посреди
+// файла — не хвост: до 07.10.2026 она тоже обрывала переписывание, и журнал,
+// укороченный сбоем диска, вставал на место целого.
+func writeBinaryRewrite(path, tmp string, size int, change func([]byte) bool, deleting bool) (rewriteResult, int64, error) {
 	var res rewriteResult
 	src, err := os.Open(path)
 	if os.IsNotExist(err) {
-		return res, nil
+		return res, 0, nil
 	}
 	if err != nil {
-		return res, err
+		return res, 0, err
 	}
 	defer src.Close()
 
-	tmp := path + ".tmp-" + stamp
 	var dst *os.File
 	var w *bufio.Writer
-	if !dry {
+	if tmp != "" {
 		if dst, err = os.Create(tmp); err != nil {
-			return res, err
+			return res, 0, err
 		}
 		w = bufio.NewWriterSize(dst, 1<<20)
 	}
+	fail := func(err error) (rewriteResult, int64, error) {
+		if dst != nil {
+			dst.Close()
+			os.Remove(tmp)
+		}
+		return res, 0, err
+	}
 	r := bufio.NewReaderSize(src, 1<<20)
 	buf := make([]byte, size)
+	var read int64
 	for {
-		if _, err := readFull(r, buf); err != nil {
-			break // обрыв хвоста — как при чтении
+		n, err := io.ReadFull(r, buf)
+		read += int64(n)
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break // обрыв хвоста — как при чтении
+			}
+			return fail(err)
 		}
 		changed := change(buf)
 		if changed {
@@ -227,56 +269,29 @@ func rewriteBinaryWith(path string, size int, stamp string, dry bool, change fun
 		}
 		if w != nil {
 			if _, err := w.Write(buf); err != nil {
-				dst.Close()
-				os.Remove(tmp)
-				return res, err
+				return fail(err)
 			}
 		}
 	}
-	if dry || res.dropped == 0 {
-		if dst != nil {
-			dst.Close()
-			os.Remove(tmp)
-		}
-		return res, nil
+	if dst == nil {
+		return res, read, nil
+	}
+	if res.dropped == 0 {
+		dst.Close()
+		os.Remove(tmp)
+		return res, read, nil
 	}
 	if err := w.Flush(); err != nil {
-		dst.Close()
-		os.Remove(tmp)
-		return res, err
+		return fail(err)
 	}
 	if err := dst.Sync(); err != nil {
-		dst.Close()
-		os.Remove(tmp)
-		return res, err
+		return fail(err)
 	}
 	if err := dst.Close(); err != nil {
 		os.Remove(tmp)
-		return res, err
+		return res, 0, err
 	}
-	// Подмена — ссылкой и одним переименованием (swap.go): обрыв посреди неё
-	// не оставляет каталог без журнала.
-	backup, err := swapIn(path, tmp, path+".bak-"+stamp)
-	if err != nil {
-		return res, err
-	}
-	res.backup = backup
-	return res, nil
-}
-
-func readFull(r *bufio.Reader, buf []byte) (int, error) {
-	n := 0
-	for n < len(buf) {
-		m, err := r.Read(buf[n:])
-		n += m
-		if err != nil {
-			if n == len(buf) {
-				return n, nil
-			}
-			return n, err
-		}
-	}
-	return n, nil
+	return res, read, nil
 }
 
 // recountEntities переписывает реестр со счётчиком упоминаний по журналу.
@@ -324,6 +339,7 @@ func recountEntities(path string, count map[uint32]int, stamp string, dry bool) 
 	// и векторов: подмена только ссылкой и одним переименованием (swap.go).
 	backup, err = swapIn(path, tmp, path+".bak-"+stamp)
 	if err != nil {
+		os.Remove(tmp)
 		return 0, 0, "", err
 	}
 	return changed, orphans, backup, nil

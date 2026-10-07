@@ -24,16 +24,15 @@ import (
 
 // swapIn ставит готовый файл tmp на место path, оставив прежний файл копией
 // под именем bak (или bak.1, bak.2…, если оно занято). Возвращает имя копии.
-// Не вышло — path остаётся прежним, а tmp и копия убираются.
+// Не вышло — path остаётся прежним, копия убирается, а заготовку tmp убирает
+// вызывающий: переносу номеров книг она нужна и после неудачи (bookmap.go).
 func swapIn(path, tmp, bak string) (string, error) {
 	used, err := keepBackup(path, bak)
 	if err != nil {
-		os.Remove(tmp)
 		return "", fmt.Errorf("копия %s: %w", filepath.Base(path), err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(used)
-		os.Remove(tmp)
 		return "", err
 	}
 	return used, nil
