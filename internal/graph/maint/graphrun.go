@@ -2261,10 +2261,14 @@ func planMerges(journal, recs []graph.MergeRec) mergePlan {
 
 	var p mergePlan
 	for _, r := range recs {
-		switch _, done := to[r.From]; {
+		// Правило то же, что у Merges.Add: «уже поглощено» — только когда
+		// понятие ведёт не в себя. Выживший круга (A→B и B→A сжимается
+		// в to[A] == A) поглощённым не считается, и его склейку с третьим
+		// понятием Add запишет — сухой прогон обязан обещать то же.
+		switch dst, done := to[r.From]; {
 		case r.From == 0 || r.To == 0 || r.From == r.To:
 			p.invalid++
-		case done:
+		case done && dst != r.From:
 			p.done++
 		case leadsTo(r.To, r.From):
 			p.opposite++
