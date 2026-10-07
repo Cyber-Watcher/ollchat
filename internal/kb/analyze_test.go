@@ -47,7 +47,7 @@ func TestIdentifiersStayWhole(t *testing.T) {
 }
 
 // TestIdentifierPartsIndexed — имя кладётся и по частям, на той же позиции:
-// иначе «http клиент» не найдёт HTTPClient, а «go mod» — go.mod.
+// иначе «waitgroup» не найдёт sync.WaitGroup, а «go mod» — go.mod.
 func TestIdentifierPartsIndexed(t *testing.T) {
 	toks := Tokens("вызов sync.WaitGroup здесь", nil)
 	var whole, part uint32
@@ -65,6 +65,30 @@ func TestIdentifierPartsIndexed(t *testing.T) {
 	}
 	if whole != part {
 		t.Fatalf("часть имени стоит на другой позиции: %d против %d", part, whole)
+	}
+}
+
+// TestCamelCaseNotSplit — тест-факт: имя в camelCase не режется по границам
+// регистра, `HTTPClient` лежит в индексе одним термом.
+//
+// Комментарии и имя теста выше до 07.10.2026 обещали обратное («http клиент»
+// найдёт HTTPClient), а код этого не делал. Обещание убрано: разбор общий
+// с графом понятий (graph.groundNames сверяет им имена с текстом куска),
+// и новые части у имён изменили бы, что принимает сборка графа. Если тест
+// упал — разбор научился резать camelCase: это новая AnalyzerVersion,
+// --kb-reanalyze по коллекциям и проверка сборки графа, а комментарии
+// в analyze.go надо вернуть к обещанию.
+func TestCamelCaseNotSplit(t *testing.T) {
+	got := terms("клиент HTTPClient и httpClient.Do")
+	for _, want := range []string{"httpclient", "httpclient.do"} {
+		if !has(got, want) {
+			t.Errorf("нет терма %q: %v", want, got)
+		}
+	}
+	for _, part := range []string{"http", "client"} {
+		if has(got, part) {
+			t.Errorf("camelCase разрезан: есть терм %q (%v)", part, got)
+		}
 	}
 }
 
