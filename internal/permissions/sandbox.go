@@ -163,7 +163,10 @@ func isWithin(root, path string) bool {
 
 // Rel возвращает путь относительно корня песочницы — для компактного показа.
 func (s *Sandbox) Rel(abs string) string {
-	if rel, err := filepath.Rel(s.displayRoot, abs); err == nil && !strings.HasPrefix(rel, "..") {
+	// Выход из корня — это «..» целым элементом пути, а не любое имя
+	// на «..»: каталог «..x» внутри корня показывался полным путём.
+	if rel, err := filepath.Rel(s.displayRoot, abs); err == nil &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return rel
 	}
 	return abs
