@@ -196,9 +196,10 @@ type Options struct {
 
 	// ConfluenceToken возвращает токен на момент вызова, а не хранит его
 	// строкой: токен приходит командой посреди сеанса и не должен пережить
-	// её отмену. Пусто — инструмент честно скажет, что токена нет.
+	// её отмену. Пусто — инструмент честно скажет, что токена нет, а ошибка
+	// объяснит почему (confluence.Resolver).
 	ConfluenceURL     string
-	ConfluenceToken   func() string
+	ConfluenceToken   func() (string, error)
 	ConfluenceTimeout time.Duration
 
 	// CanViewImages — включён ли инструмент view_image. Заполняется NewRegistry,

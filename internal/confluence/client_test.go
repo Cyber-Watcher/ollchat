@@ -37,7 +37,7 @@ func pageServer(t *testing.T, status int) (*httptest.Server, *string) {
 
 func TestGetPageWithChildrenAndFiles(t *testing.T) {
 	srv, auth := pageServer(t, http.StatusOK)
-	c := New(srv.URL, func() string { return "секрет" }, 5*time.Second)
+	c := New(srv.URL, fixedToken("секрет"), 5*time.Second)
 	p, err := c.Get(context.Background(), "https://wiki.example/pages/viewpage.action?pageId=123", true)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestGetErrorsNeverLeakToken(t *testing.T) {
 		{http.StatusInternalServerError, "ответил 500"},
 	} {
 		srv, _ := pageServer(t, tc.status)
-		c := New(srv.URL, func() string { return "секрет-токен" }, 5*time.Second)
+		c := New(srv.URL, fixedToken("секрет-токен"), 5*time.Second)
 		_, err := c.Get(context.Background(), "123", false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("код %d: ошибка %v, ожидалось %q", tc.status, err, tc.want)
@@ -89,7 +89,7 @@ func TestGetWithoutTokenDoesNotCallServer(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true }))
 	t.Cleanup(srv.Close)
-	c := New(srv.URL, func() string { return "  " }, time.Second)
+	c := New(srv.URL, fixedToken("  "), time.Second)
 	if _, err := c.Get(context.Background(), "123", false); err == nil || !strings.Contains(err.Error(), "токен") {
 		t.Fatalf("без токена ожидался понятный отказ: %v", err)
 	}
@@ -143,21 +143,51 @@ func TestResolverOrder(t *testing.T) {
 
 	sess := &Session{}
 	get := Resolver(sess, file, "printf из-команды", "OLLCHAT_TEST_CONF_TOKEN")
-	if got := get(); got != "из-файла" {
+	if got, _ := get(); got != "из-файла" {
 		t.Fatalf("файл главнее команды и окружения: %q", got)
 	}
 	sess.Set("из-сеанса")
-	if got := get(); got != "из-сеанса" {
+	if got, _ := get(); got != "из-сеанса" {
 		t.Fatalf("сеанс главнее всего: %q", got)
 	}
 	sess.Clear()
-	if got := Resolver(nil, "", "printf из-команды", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-команды" {
+	if got, _ := Resolver(nil, "", "printf из-команды", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-команды" {
 		t.Fatalf("команда главнее окружения: %q", got)
 	}
-	if got := Resolver(nil, "", "", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-окружения" {
+	if got, _ := Resolver(nil, "", "", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-окружения" {
 		t.Fatalf("окружение — последнее: %q", got)
 	}
-	if got := Resolver(nil, "", "", "")(); got != "" {
-		t.Fatalf("без источников — пусто: %q", got)
+	if got, err := Resolver(nil, "", "", "")(); got != "" || err != nil {
+		t.Fatalf("без источников — пусто и без ошибки: %q, %v", got, err)
+	}
+}
+
+func fixedToken(tok string) func() (string, error) {
+	return func() (string, error) { return tok, nil }
+}
+
+// Файл с токеном, открытый всем, не пропускается молча: подсказка
+// «chmod 600» доходит до человека через ошибку инструмента. Прежде
+// добытчик глотал её, и человек слышал «токен не задан» при заданном файле.
+func TestResolverSurfacesFileError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(file, []byte("секрет-из-файла"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolver(nil, file, "", "")(); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("ошибка прав файла потеряна: %v", err)
+	}
+	srv, _ := pageServer(t, http.StatusOK)
+	_, err := New(srv.URL, Resolver(nil, file, "", ""), time.Second).Get(context.Background(), "123", false)
+	if err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("инструмент не объяснил, что не так с файлом: %v", err)
+	}
+	if strings.Contains(err.Error(), "секрет-из-файла") {
+		t.Fatalf("токен попал в текст ошибки: %v", err)
+	}
+	// Есть другой источник — работаем им, как прежде.
+	t.Setenv("OLLCHAT_TEST_CONF_TOKEN", "из-окружения")
+	if got, err := Resolver(nil, file, "", "OLLCHAT_TEST_CONF_TOKEN")(); got != "из-окружения" || err != nil {
+		t.Fatalf("запасной источник не сработал: %q, %v", got, err)
 	}
 }

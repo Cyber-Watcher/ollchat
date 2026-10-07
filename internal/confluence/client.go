@@ -3,6 +3,7 @@ package confluence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,13 +25,15 @@ import (
 // Client — доступ к одному серверу Confluence.
 type Client struct {
 	BaseURL string
-	Token   func() string // берётся при каждом запросе: токен могли сменить на лету
-	HTTP    *http.Client
+	// Token берётся при каждом запросе: токен могли сменить на лету. Ошибка
+	// объясняет, почему токена нет (Resolver).
+	Token func() (string, error)
+	HTTP  *http.Client
 }
 
 // New собирает клиента. Токен запрашивается функцией, а не хранится строкой:
 // он может прийти командой посреди сеанса и не должен переживать её отмену.
-func New(base string, token func() string, timeout time.Duration) *Client {
+func New(base string, token func() (string, error), timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
@@ -209,11 +212,18 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	token := ""
+	token, terr := "", error(nil)
 	if c.Token != nil {
-		token = strings.TrimSpace(c.Token())
+		token, terr = c.Token()
+		token = strings.TrimSpace(token)
 	}
 	if token == "" {
+		if terr != nil {
+			// Причина — словами источника: «chmod 600» от файла с открытыми
+			// правами прежде терялся, и человек слышал «токен не задан»
+			// при заданном token_file.
+			return fmt.Errorf("токен Confluence не получен: %w", terr)
+		}
 		return fmt.Errorf("токен Confluence не задан: команда /confluencetoken, " +
 			"файл token_file или переменная token_env")
 	}
@@ -317,32 +327,50 @@ func (s *Session) Has() bool {
 //
 // Порядок задан решением владельца 25.08.2026: команда главнее всего,
 // потому что ею пользуются, когда прочее не сработало или токен сменился.
-func Resolver(sess *Session, tokenFile, tokenCmd, tokenEnv string) func() string {
-	return func() string {
+//
+// Токена нет ни в одном источнике — ошибка объясняет, что не так с файлом
+// и командой. Прежде она глоталась: файл с открытыми правами молча
+// пропускался, и вместо подсказки «chmod 600» человек слышал «токен не задан».
+func Resolver(sess *Session, tokenFile, tokenCmd, tokenEnv string) func() (string, error) {
+	return func() (string, error) {
 		if sess != nil {
 			sess.mu.RLock()
 			t := sess.token
 			sess.mu.RUnlock()
 			if t != "" {
-				return t
+				return t, nil
 			}
 		}
+		var why []error
 		if tokenFile != "" {
-			if t, err := TokenFromFile(tokenFile); err == nil && t != "" {
-				return t
+			t, err := TokenFromFile(tokenFile)
+			switch {
+			case err != nil:
+				why = append(why, fmt.Errorf("token_file: %w", err))
+			case t != "":
+				return t, nil
+			default:
+				why = append(why, fmt.Errorf("token_file: файл %s пуст", tokenFile))
 			}
 		}
 		if tokenCmd != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			t, err := TokenFromCmd(ctx, tokenCmd)
 			cancel()
-			if err == nil && t != "" {
-				return t
+			switch {
+			case err != nil:
+				why = append(why, fmt.Errorf("token_cmd: %w", err))
+			case t != "":
+				return t, nil
+			default:
+				why = append(why, errors.New("token_cmd: команда ничего не вывела"))
 			}
 		}
 		if tokenEnv != "" {
-			return strings.TrimSpace(os.Getenv(tokenEnv))
+			if t := strings.TrimSpace(os.Getenv(tokenEnv)); t != "" {
+				return t, nil
+			}
 		}
-		return ""
+		return "", errors.Join(why...)
 	}
 }
