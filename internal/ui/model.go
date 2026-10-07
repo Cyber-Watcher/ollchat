@@ -10,7 +10,6 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
@@ -123,7 +122,7 @@ type Model struct {
 	models     []ollama.ModelInfo
 
 	// Виджеты.
-	vp   viewport.Model
+	vp   feedView // окно ленты, см. feedview.go
 	ta   textarea.Model
 	spin spinner.Model
 	rend *renderer
@@ -724,14 +723,9 @@ func (m *Model) refreshViewport(stick bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	parts := make([]string, 0, len(m.rendered))
-	for _, r := range m.rendered {
-		if strings.TrimSpace(r) == "" {
-			continue
-		}
-		parts = append(parts, r)
-	}
-	m.vp.SetContent(strings.Join(parts, "\n\n"))
+	// Окно пересобирает только изменившиеся блоки (feedview.go): кусок потока
+	// стоит одного живого блока, а не всей истории.
+	m.vp.setParts(m.rendered)
 	if stick && atBottom {
 		m.vp.GotoBottom()
 	}

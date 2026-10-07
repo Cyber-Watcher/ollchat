@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
@@ -316,6 +315,7 @@ func (m *Model) handleResize(msg tea.WindowSizeMsg) tea.Cmd {
 		m.savePDF.input.SetWidth(savePDFInputWidth(msg.Width))
 	}
 	// Крайняя колонка отдана полосе прокрутки, поэтому текст переносим уже.
+	wasWidth := m.rend.width
 	m.rend.setWidth(msg.Width - 3)
 
 	vpHeight := m.viewportHeight()
@@ -323,14 +323,23 @@ func (m *Model) handleResize(msg tea.WindowSizeMsg) tea.Cmd {
 	if vpWidth < 1 {
 		vpWidth = 1
 	}
-	if !m.ready {
-		m.vp = viewport.New(viewport.WithWidth(vpWidth), viewport.WithHeight(vpHeight))
+	first := !m.ready
+	if first {
+		m.vp = newFeedView(vpWidth, vpHeight)
 		m.ready = true
 	} else {
 		m.vp.SetWidth(vpWidth)
 		m.vp.SetHeight(vpHeight)
 	}
-	m.rerenderAll()
+	// Отрисовка блоков зависит от ширины, но не от высоты. Прогонять всю
+	// историю через markdown на каждое изменение высоты окна — секунды
+	// на длинном сеансе (2.7 с при 500 обменах, аудит 07.10.2026) ради
+	// того же самого текста.
+	if first || m.rend.width != wasWidth {
+		m.rerenderAll()
+	} else {
+		m.refreshViewport(false)
+	}
 	m.vp.GotoBottom()
 	return nil
 }
