@@ -77,6 +77,13 @@ func (g *Graph) UndoMerges(pairs [][2]uint32, why string, dry bool) (UnmergeResu
 		}
 		defer release()
 	}
+	// Журнал перечитывается — под замком, — а не берётся снимком с открытия
+	// графа: --graph-merge и разбор очереди (/graph review) дописывают склейки
+	// без замка сборки, и подмена журнала по устаревшему снимку молча стёрла
+	// бы их решения (аудит 07.10.2026, №9).
+	if err := g.merges.reload(); err != nil {
+		return res, err
+	}
 	return g.merges.undo(pairs, why, dry, &res)
 }
 
@@ -130,6 +137,12 @@ func (m *Merges) undo(pairs [][2]uint32, why string, dry bool, res *UnmergeResul
 	}
 	if dry || len(res.Undone) == 0 {
 		return *res, nil
+	}
+
+	// Склейку могли дописать без замка, пока шла подготовка: подмена стёрла
+	// бы её. Окно узкое, но решение арбитра дороже повтора команды.
+	if fi, err := os.Stat(m.path); err != nil || fi.Size() != m.size {
+		return *res, fmt.Errorf("журнал склеек дописан, пока готовилось снятие — ничего не подменено, повторите команду")
 	}
 
 	// 1. Копия прежнего журнала. 2. След снятого. 3. Атомарная подмена.

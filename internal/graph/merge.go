@@ -61,6 +61,10 @@ type Merges struct {
 	from map[uint32][]uint32 // выживший → все поглощённые им
 	recs []MergeRec
 	gone int // сколько понятий поглощено: записи to, ведущие не в себя
+
+	// size — сколько байт журнала прочитано: по нему снятие склеек узнаёт,
+	// что журнал дописали, пока оно готовило подмену (см. undo).
+	size int64
 }
 
 // openMerges читает журнал склеек. Отсутствие файла — обычное состояние.
@@ -70,17 +74,36 @@ func openMerges(dir string) (*Merges, error) {
 		to:   map[uint32]uint32{},
 		from: map[uint32][]uint32{},
 	}
-	f, err := os.Open(m.path)
+	recs, size, err := readMergeRecs(m.path)
+	if err != nil {
+		return nil, err
+	}
+	m.recs, m.size = recs, size
+	m.rebuild()
+	return m, nil
+}
+
+// readMergeRecs читает записи журнала склеек и число прочитанных байт.
+// Нет файла — пусто, и это не ошибка.
+func readMergeRecs(path string) ([]MergeRec, int64, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return m, nil
+			return nil, 0, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
+	var recs []MergeRec
+	var size int64
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		adv, tok, err := bufio.ScanLines(data, atEOF)
+		size += int64(adv)
+		return adv, tok, err
+	})
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -90,10 +113,22 @@ func openMerges(dir string) (*Merges, error) {
 		if json.Unmarshal(line, &r) != nil || r.From == 0 || r.To == 0 || r.From == r.To {
 			continue // оборванная последняя строка — не беда, дозапись
 		}
-		m.recs = append(m.recs, r)
+		recs = append(recs, r)
 	}
+	return recs, size, nil
+}
+
+// reload перечитывает журнал склеек с диска.
+func (m *Merges) reload() error {
+	recs, size, err := readMergeRecs(m.path)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recs, m.size = recs, size
 	m.rebuild()
-	return m, nil
+	return nil
 }
 
 // rebuild собирает разрешение номеров по журналу.
@@ -296,6 +331,9 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 	}
 	if err := f.Close(); err != nil {
 		return 0, err
+	}
+	if fi, err := os.Stat(m.path); err == nil {
+		m.size = fi.Size()
 	}
 	m.recs = append(m.recs, fresh...)
 	m.rebuild()
