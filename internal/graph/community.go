@@ -337,8 +337,45 @@ func (g *Graph) LoadCommunities() (*Communities, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("разбиение на сообщества не читается: %w", err)
 	}
+	uniqueTopicIDs(c.List)
 	c.loaded = communityStamp(filepath.Join(g.dir, CommunityFile))
 	return &c, nil
+}
+
+// uniqueTopicIDs раздаёт новые номера темам, чей номер занят другой темой,
+// и возвращает, сколько тем перенумеровано.
+//
+// Разбиения, посчитанные до 07.10.2026, давали отрезанной части несвязной
+// темы номер её наименьшего ПОНЯТИЯ (splitparts.go), и он совпадал с номером
+// чужой темы: graph_topic #N отдавал первую из двух, а перенос описаний
+// (carry.go), сопоставляющий темы по номеру, путал их составы. Чинится при
+// чтении, файл при этом не правится — ближайшая запись разбиения ляжет уже
+// с исправленными номерами. Порядок не случаен и повторяется от чтения
+// к чтению: номер сохраняют верхние темы (на них ссылается Parent), из
+// нижних — первая по списку (её и находил прежний поиск по номеру);
+// остальным — номера выше всех занятых, по порядку списка.
+func uniqueTopicIDs(list []Community) int {
+	used := make(map[int]bool, len(list))
+	next := 0
+	for _, com := range list {
+		next = max(next, com.ID+1)
+		if com.Level != 0 {
+			used[com.ID] = true
+		}
+	}
+	renamed := 0
+	for i := range list {
+		if list[i].Level != 0 {
+			continue
+		}
+		if used[list[i].ID] {
+			list[i].ID = next
+			next++
+			renamed++
+		}
+		used[list[i].ID] = true
+	}
+	return renamed
 }
 
 // communityStamp — отпечаток файла разбиения: размер и время. По нему

@@ -31,6 +31,12 @@ import "sort"
 // splitDisconnected разрезает несвязные темы нижнего уровня на связные части.
 // Второе значение — сколько тем оказалось разрезано.
 func splitDisconnected(adj map[uint32]map[uint32]float64, list []Community) ([]Community, int) {
+	// Новым частям — номера выше всех занятых, на обоих уровнях: номер темы
+	// одного пространства с номерами тем, а не понятий (см. cutInto).
+	next := 0
+	for _, com := range list {
+		next = max(next, com.ID+1)
+	}
 	var out []Community
 	var split int
 	for _, com := range list {
@@ -44,13 +50,14 @@ func splitDisconnected(adj map[uint32]map[uint32]float64, list []Community) ([]C
 			continue
 		}
 		split++
-		out = append(out, cutInto(adj, com, parts)...)
+		out = append(out, cutInto(adj, com, parts, &next)...)
 	}
 	return out, split
 }
 
-// cutInto превращает одну несвязную тему в несколько связных.
-func cutInto(adj map[uint32]map[uint32]float64, com Community, parts [][]uint32) []Community {
+// cutInto превращает одну несвязную тему в несколько связных. nextID — номер
+// для следующей новой темы; сдвигается по мере выдачи.
+func cutInto(adj map[uint32]map[uint32]float64, com Community, parts [][]uint32, nextID *int) []Community {
 	// Крупнейшая часть идёт первой: ей достаются номер и описание темы.
 	// При равном размере верх берёт часть с меньшим номером первого понятия —
 	// иначе два запуска на одних данных дали бы разные номера тем.
@@ -88,10 +95,13 @@ func cutInto(adj map[uint32]map[uint32]float64, com Community, parts [][]uint32)
 			next.Title, next.Summary, next.Key = com.Title, com.Summary, com.Key
 			next.Books, next.Rating, next.Why = com.Books, com.Rating, com.Why
 		} else {
-			// Номер новой темы — наименьший номер понятия в ней. Темы не
-			// пересекаются по участникам, поэтому такой номер не может совпасть
-			// с номером другой темы.
-			next.ID = int(minID(part))
+			// Номер новой темы — следующий свободный номер темы. До 07.10.2026
+			// им был наименьший номер ПОНЯТИЯ в части: участники тем и правда
+			// не пересекаются, но номера тем и понятий — разные пространства,
+			// и такой номер совпадал с номером чужой темы — graph_topic #N
+			// отдавал не ту тему (аудит, 4.5).
+			next.ID = *nextID
+			*nextID++
 		}
 		out = append(out, next)
 	}
