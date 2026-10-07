@@ -39,8 +39,10 @@ func MarkArchive(collDir string) (release func(), err error) {
 	if desc := markerOwner(path); desc != "" {
 		return nil, fmt.Errorf("архив коллекции уже идёт: %s", desc)
 	}
-	body := fmt.Sprintf("%d %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := placeMarker(path); err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("архив коллекции уже идёт: %s", path)
+		}
 		return nil, err
 	}
 	return func() { os.Remove(path) }, nil
@@ -89,21 +91,86 @@ const lockMark = "LOCK"
 // markerOwner читает признак вида «pid время» и описывает живого хозяина.
 // Пусто — признака нет либо его хозяин мёртв; мёртвый снимается.
 func markerOwner(path string) string {
+	if held, desc := markerState(path); held {
+		return desc
+	}
+	os.Remove(path)
+	return ""
+}
+
+// markerFresh — сколько признак без номера процесса считается только что
+// поставленным, а не брошенным.
+//
+// Признак создаётся пустым (O_EXCL) и лишь следом получает номер процесса.
+// Читатель, попавший между этими шагами, видит пустой файл; сочти он его
+// брошенным — снял бы чужой замок, который вот-вот допишут.
+const markerFresh = 10 * time.Second
+
+// markerState читает признак, ничего не трогая: держит ли его живой процесс
+// и кто это.
+//
+// Пустой или испорченный признак не роняет программу: до 07.10.2026 замок
+// коллекции разбирался как strings.Fields(...)[0], и пустой LOCK — обрыв
+// питания между созданием файла и записью в него — давал панику при каждой
+// индексации. Теперь такой признак свежее markerFresh считается занятым,
+// давний — брошенным.
+func markerState(path string) (held bool, desc string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return false, ""
 	}
 	fields := strings.Fields(string(data))
 	pid := 0
 	if len(fields) > 0 {
 		pid, _ = strconv.Atoi(fields[0])
 	}
-	if pid > 0 && processAlive(pid) {
-		if len(fields) > 1 {
-			return fmt.Sprintf("процесс %d, с %s", pid, fields[1])
+	if pid <= 0 {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < markerFresh {
+			return true, "признак только что поставлен"
 		}
-		return fmt.Sprintf("процесс %d", pid)
+		return false, ""
 	}
-	os.Remove(path)
-	return ""
+	if !processAlive(pid) {
+		return false, ""
+	}
+	if len(fields) > 1 {
+		return true, fmt.Sprintf("процесс %d, с %s", pid, fields[1])
+	}
+	return true, fmt.Sprintf("процесс %d", pid)
+}
+
+// markerPID — номер процесса из признака; 0 — признака нет или он испорчен.
+func markerPID(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return 0
+	}
+	pid, _ := strconv.Atoi(fields[0])
+	return pid
+}
+
+// placeMarker ставит признак «pid время» созданием с O_EXCL: из двух процессов,
+// пришедших разом, его получает ровно один. Занято — ошибка, на которой
+// os.IsExist отвечает «да».
+//
+// До 07.10.2026 замок ставился «прочитать, нет ли, — записать», и два процесса,
+// прочитавшие «нет» одновременно, оба считали замок своим.
+func placeMarker(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := fmt.Fprintf(f, "%d %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(path)
+		return werr
+	}
+	return nil
 }

@@ -1233,18 +1233,36 @@ func (c *Collection) lock() error {
 		return err
 	}
 	path := filepath.Join(c.dir, lockMark)
-	if data, err := os.ReadFile(path); err == nil {
-		pid, _ := strconv.Atoi(strings.Fields(string(data))[0])
-		if pid > 0 && processAlive(pid) {
-			return fmt.Errorf("коллекция %q уже индексируется (процесс %d)", c.name, pid)
+	for attempt := 0; ; attempt++ {
+		err := placeMarker(path)
+		if err == nil || !os.IsExist(err) {
+			return err
 		}
-		// Замок от умершего процесса снимаем сами.
+		// Замок уже стоит. Живой хозяин — отказ; от умершего процесса (или
+		// давний испорченный) снимаем сами, но один раз: если и после этого
+		// не взять, его только что взял кто-то другой.
+		held, desc := markerState(path)
+		if held || attempt > 0 {
+			if desc == "" {
+				desc = "замок занят"
+			}
+			return fmt.Errorf("коллекция %q уже индексируется (%s)", c.name, desc)
+		}
 		os.Remove(path)
 	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d %s\n", os.Getpid(), time.Now().Format(time.RFC3339))), 0o644)
 }
 
-func (c *Collection) unlock() { os.Remove(filepath.Join(c.dir, lockMark)) }
+// unlock снимает замок, но только свой.
+//
+// Чужой замок не трогается: уплотнение подменяет каталог коллекции, и замок
+// в новом каталоге мог успеть поставить другой процесс — прежнее безусловное
+// удаление сняло бы его замок посреди работы.
+func (c *Collection) unlock() {
+	path := filepath.Join(c.dir, lockMark)
+	if markerPID(path) == os.Getpid() {
+		os.Remove(path)
+	}
+}
 
 func processAlive(pid int) bool {
 	p, err := os.FindProcess(pid)
