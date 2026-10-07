@@ -143,7 +143,7 @@ var pdLabels = []struct {
 	kind Kind
 }{
 	{full(`patient( name)?|(full )?name|client( name)?|insured( name)?|subscriber|пациент(ка)?|` +
-		`фио|ф\. ?и\. ?о\.?|имя|фамилия( имя отчество)?|клиент|застрахованный`), KindClient},
+		`фио|ф\. ?и\. ?о\.?|имя|фамилия( имя отчество)?|отчество|клиент|застрахованный`), KindClient},
 	{full(`((referring|ordering|attending|primary|treating) )?(provider|physician|doctor)|radiologist|` +
 		`copies to|(electronically )?signed by|dictated by|read by|((лечащий|направивший) )?врач|доктор|подпись`), KindDoctor},
 	{full(`mrn|acc(ession)?( (no|number))?|member id|policy( (no|number))?|insurance( (id|no|number))?|` +
@@ -266,15 +266,18 @@ func byLabels(words []Word, lines []line) {
 // «21 June 1988» под подписью «Date of birth» осталось в .md).
 const cellGapMax = 250.0 // pt; дальше справа — уже не соседняя клетка
 
-func byCells(words []Word, lines []line) {
-	box := func(l line) Rect {
-		r := words[l.idx[0]].Box
-		for _, i := range l.idx[1:] {
-			b := words[i].Box
-			r = Rect{min(r.X0, b.X0), min(r.Y0, b.Y0), max(r.X1, b.X1), max(r.Y1, b.Y1)}
-		}
-		return r
+// lineBox — рамка строки распознавания.
+func lineBox(words []Word, l line) Rect {
+	r := words[l.idx[0]].Box
+	for _, i := range l.idx[1:] {
+		b := words[i].Box
+		r = Rect{min(r.X0, b.X0), min(r.Y0, b.Y0), max(r.X1, b.X1), max(r.Y1, b.Y1)}
 	}
+	return r
+}
+
+func byCells(words []Word, lines []line) {
+	box := func(l line) Rect { return lineBox(words, l) }
 	for i := range lines {
 		k := labelKind(lines[i].text)
 		if k == KindNone {
@@ -314,6 +317,122 @@ func byCells(words []Word, lines []line) {
 			}
 		}
 	}
+}
+
+// byBelow — бланк в столбик: подпись поля стоит своей строкой, а значение —
+// строкой ниже («Дата рождения», под ней дата). byLabels и byCells ищут
+// значение в той же строке и справа, и до 07.10.2026 такие значения
+// оставались в .md. В ряду подписи должны стоять одни подписи («Фамилия Имя
+// Отчество» над клетками): ряд «Name Value Range» — шапка таблицы, и под ним
+// не поля, а анализы. Значение — ближайшая строка ниже, не дальше полутора
+// высот подписи и начинающаяся под ней, и оно должно походить на своё поле
+// (belowEnd).
+func byBelow(words []Word, lines []line) {
+	boxes := make([]Rect, len(lines))
+	for i := range lines {
+		boxes[i] = lineBox(words, lines[i])
+	}
+	isLabel := func(text string) bool { return labelKind(text) != KindNone || vocabLineRe.MatchString(text) }
+	for i := range lines {
+		k := labelKind(lines[i].text)
+		if k == KindNone {
+			continue
+		}
+		lb := boxes[i]
+		h := lb.Y1 - lb.Y0
+		header, best := false, -1
+		for j := range lines {
+			if j == i || lines[j].key[0] != lines[i].key[0] {
+				continue
+			}
+			b := boxes[j]
+			if cy := (b.Y0 + b.Y1) / 2; cy >= lb.Y0 && cy <= lb.Y1 {
+				if max(b.X0-lb.X1, lb.X0-b.X1) < cellGapMax && !isLabel(lines[j].text) {
+					header = true
+					break
+				}
+				continue
+			}
+			if b.Y0 < (lb.Y0+lb.Y1)/2 || b.Y0-lb.Y1 > 1.5*h || b.X0 < lb.X0-2*h || b.X0 > lb.X1 {
+				continue
+			}
+			if best < 0 || b.Y0 < boxes[best].Y0 {
+				best = j
+			}
+		}
+		if header || best < 0 || isLabel(lines[best].text) {
+			continue
+		}
+		v := &lines[best]
+		// Строка ниже начинается своей подписью — это своё поле, а не значение.
+		if ms := labelMatches(v.text); len(ms) > 0 && ms[0][2] <= 1 {
+			continue
+		}
+		end := belowEnd(words, v, k, lines[i].text)
+		if end == 0 {
+			continue
+		}
+		if n := v.mark(words, 0, end, k, "подпись над значением"); n > 0 && k.removed() {
+			for _, wi := range lines[i].idx {
+				words[wi].LabelOf = k
+			}
+		}
+	}
+}
+
+// vocabLineRe — строка из одних слов подписей («Sex», «Age», «Дата»): в ряду
+// подписей бланка она своя, а не столбец таблицы.
+var vocabLineRe = regexp.MustCompile(`(?i)^\s*` + labelVocab + `(?:[\s#.]+` + labelVocab + `)*\s*[#.№:;]?\s*$`)
+
+// nameWordRe — слово имени: с заглавной, из букв, инициалы с точками.
+var nameWordRe = regexp.MustCompile(`^\p{Lu}[\p{L}'’.-]*[,;]?$`)
+
+// oneWordNameRe — подписи, под которыми имя — одно слово.
+var oneWordNameRe = regexp.MustCompile(`(?i)^\s*(?:фамилия|имя|отчество)\s*[:.]?\s*$`)
+
+// belowEnd — где в строке под подписью вида k кончается значение, или 0,
+// если строка на значение не похожа: имя — слова с заглавной с начала строки
+// (одно — только под «Фамилия», «Имя», «Отчество»: под «Name» одно слово —
+// скорее название анализа), номер и дата — с цифрами, телефон — от пяти
+// цифр, адрес — с номером дома, почта — с «@».
+func belowEnd(words []Word, v *line, k Kind, label string) int {
+	switch {
+	case k.person():
+		need := 2
+		if oneWordNameRe.MatchString(label) {
+			need = 1
+		}
+		n, end := 0, 0
+		for _, sp := range v.spans {
+			if n == nameMaxWords || !nameWordRe.MatchString(words[sp.word].Text) {
+				break
+			}
+			n, end = n+1, sp.end
+		}
+		if n < need {
+			return 0
+		}
+		return end
+	case k == KindID || k == KindPhone || k == KindBirth:
+		end := v.valueEnd(words, 0, len(v.text), k)
+		digits := 0
+		for _, r := range v.text[:end] {
+			if r >= '0' && r <= '9' {
+				digits++
+			}
+		}
+		if k == KindPhone && digits < 5 {
+			return 0
+		}
+		if digits == 0 && !(k == KindBirth && dateWordRe.MatchString(strings.Fields(v.text[:end] + " .")[0])) {
+			return 0
+		}
+		return end
+	case k == KindAddress && !strings.ContainsAny(v.text, "0123456789"),
+		k == KindEmail && !strings.Contains(v.text, "@"):
+		return 0
+	}
+	return len(v.text)
 }
 
 // valueEnd — где кончается значение поля с номером, телефоном или датой

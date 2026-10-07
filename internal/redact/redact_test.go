@@ -35,6 +35,7 @@ func detect(words []Word, opt Options) []line {
 	lines := buildLines(words)
 	byLabels(words, lines)
 	byCells(words, lines)
+	byBelow(words, lines)
 	byPatterns(words, lines)
 	byNameDate(words, lines, 2026)
 	byRepeat(words, byHints(words, lines, opt))
@@ -512,6 +513,60 @@ func TestCellLabels(t *testing.T) {
 // строка съезжала — страница выходила косой мешаниной, а повторное
 // распознавание мешанины «утечек» не находило (синтетический набор
 // 03.10.2026, все серые JPEG-страницы).
+// Бланк в столбик: значение строкой ниже подписи. До 07.10.2026 оно
+// оставалось в .md. Шапка таблицы анализов («Name Value Range»), заголовок
+// над обычным текстом, пустое поле и строка далеко ниже полями не считаются.
+func TestValueBelowLabel(t *testing.T) {
+	var words []Word
+	add := func(block int, x, y float64, text string) { words = append(words, cell(block, x, y, text)...) }
+	add(1, 50, 100, "Дата рождения")
+	add(2, 50, 111, "01.02.1970")
+	add(3, 50, 130, "Фамилия")
+	add(4, 52, 141, "Иванова")
+	add(5, 150, 130, "Имя")
+	add(6, 150, 141, "Мария")
+	add(7, 250, 130, "Отчество")
+	add(8, 250, 141, "Петровна")
+	add(9, 50, 160, "Полис")
+	add(10, 50, 171, "ВС 8135")
+	add(11, 50, 190, "Адрес")
+	add(12, 50, 201, "Тверь, Примерная 5")
+	add(13, 50, 220, "Телефон")
+	add(14, 50, 231, "4822 123456")
+	// шапка таблицы анализов
+	add(20, 50, 300, "Name")
+	add(21, 200, 300, "Value")
+	add(22, 300, 300, "Range")
+	add(23, 50, 311, "Total Cholesterol")
+	add(24, 200, 311, "5.2")
+	add(25, 300, 311, "3.0-5.2")
+	// заголовок над текстом, пустое поле, значение далеко ниже
+	add(30, 50, 340, "Пациент")
+	add(31, 50, 351, "Жалобы на кашель")
+	add(32, 50, 380, "Факс")
+	add(33, 50, 391, "Email")
+	add(34, 50, 402, "нет данных 12345")
+	add(35, 50, 430, "Дата рождения")
+	add(36, 50, 470, "02.03.1971")
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"01.02.1970": KindBirth, "Иванова": KindClient, "Мария": KindClient, "Петровна": KindClient,
+		"ВС": KindID, "8135": KindID, "Тверь,": KindAddress, "Примерная": KindAddress, "5": KindAddress,
+		"4822": KindPhone, "123456": KindPhone,
+		"Total": KindNone, "Cholesterol": KindNone, "5.2": KindNone, "Жалобы": KindNone,
+		"нет": KindNone, "12345": KindNone, "02.03.1971": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+	for _, w := range words {
+		if w.Text == "Полис" && w.LabelOf != KindID {
+			t.Errorf("подпись «Полис» без значения осталась бы в .md: %v", w.LabelOf)
+		}
+	}
+}
+
 func TestPaintKeepsPaddedGray(t *testing.T) {
 	src := image.NewGray(image.Rect(0, 0, 101, 40))
 	for y := 0; y < 40; y++ {

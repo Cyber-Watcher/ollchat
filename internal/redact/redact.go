@@ -151,6 +151,7 @@ func Process(ctx context.Context, title string, pages []Page, opt Options) (*Res
 	lines := buildLines(words)
 	byLabels(words, lines)
 	byCells(words, lines)
+	byBelow(words, lines)
 	byPatterns(words, lines)
 	byNameDate(words, lines, time.Now().Year())
 	seeds := byHints(words, lines, opt)
