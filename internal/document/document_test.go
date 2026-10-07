@@ -13,7 +13,7 @@ import (
 // Пробники обоих форматов собираются прямо здесь: тесты не должны зависеть
 // от файлов на машине.
 
-func writeTemp(t *testing.T, name string, data []byte) string {
+func writeTemp(t testing.TB, name string, data []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -55,7 +55,7 @@ func samplePDF() []byte {
 }
 
 // sampleEPUB собирает книгу из одной главы с рисунком.
-func sampleEPUB(t *testing.T) []byte {
+func sampleEPUB(t testing.TB) []byte {
 	t.Helper()
 	png := []byte{
 		0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a,

@@ -11,7 +11,7 @@ import (
 // buildEPUB собирает книгу в памяти. store говорит, класть ли mimetype без
 // сжатия, как велит спецификация: часть книг его всё-таки сжимает, и это
 // отдельный случай для проверки.
-func buildEPUB(t *testing.T, store bool, files map[string]string) []byte {
+func buildEPUB(t testing.TB, store bool, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -105,7 +105,7 @@ var pngPixel = string([]byte{
 	0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82,
 })
 
-func sampleBook(t *testing.T, store bool) []byte {
+func sampleBook(t testing.TB, store bool) []byte {
 	t.Helper()
 	return buildEPUB(t, store, map[string]string{
 		"META-INF/container.xml": container,
