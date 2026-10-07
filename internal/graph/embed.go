@@ -229,7 +229,7 @@ func (g *Graph) EmbedEntities(ctx context.Context, emb kb.Embedder, o EmbedOpts,
 	o = o.norm()
 
 	// Один счёт векторов на граф: второй писатель — отказ, а не гонка файлов.
-	release, err := lockVectors(g.dir)
+	release, err := g.lockVectorsFresh()
 	if err != nil {
 		return err
 	}

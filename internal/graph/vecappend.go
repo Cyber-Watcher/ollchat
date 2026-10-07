@@ -58,6 +58,23 @@ func (v *EntityVectors) appendVectors(model, digest string, dim int, data []int8
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	// Дозапись считает место и сумму от паспорта в памяти — значит, на диске
+	// он обязан быть тем же. Иначе векторы пересчитал другой процесс, и
+	// дозапись срезала бы его данные, а сумма не сошлась бы уже никогда
+	// (аудит 07.10.2026, №9). Векторы, которые и при открытии не приняты
+	// (problem), перезаписываются, как и прежде: беречь в них нечего.
+	if v.problem == "" {
+		disk, err := diskEntVecMeta(v.dir)
+		if err != nil {
+			return err
+		}
+		if disk != v.meta {
+			return fmt.Errorf("%w: паспорт векторов понятий на диске сменился после чтения "+
+				"(%d понятий против %d в памяти) — их пересчитал другой процесс; повторите заход",
+				ErrStale, disk.Count, v.meta.Count)
+		}
+	}
+
 	if v.meta.Count == 0 {
 		// Дописывать не к чему — это обычная первая запись.
 		return v.saveLocked(model, digest, dim, data)

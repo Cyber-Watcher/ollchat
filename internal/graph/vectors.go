@@ -130,6 +130,44 @@ func openEntityVectors(dir string) *EntityVectors {
 	return v
 }
 
+// diskEntVecMeta читает паспорт векторов с диска; нет файла или он не читается —
+// пустой паспорт, как и при открытии.
+func diskEntVecMeta(dir string) (entVecMeta, error) {
+	var m entVecMeta
+	raw, err := os.ReadFile(filepath.Join(dir, entVecMetaFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return m, nil
+		}
+		return m, err
+	}
+	if json.Unmarshal(raw, &m) != nil || m.Magic != entVecMagic {
+		return entVecMeta{}, nil
+	}
+	return m, nil
+}
+
+// refresh перечитывает векторы с диска, если паспорт там не тот, что
+// в памяти (см. lockVectorsFresh). Тот же — ничего не делает: файл данных
+// на сотни мегабайт без нужды не читается.
+func (v *EntityVectors) refresh() {
+	if v == nil {
+		return
+	}
+	if disk, err := diskEntVecMeta(v.dir); err == nil {
+		v.mu.RLock()
+		same := disk == v.meta && v.problem == ""
+		v.mu.RUnlock()
+		if same {
+			return
+		}
+	}
+	fresh := openEntityVectors(v.dir)
+	v.mu.Lock()
+	v.meta, v.data, v.problem = fresh.meta, fresh.data, fresh.problem
+	v.mu.Unlock()
+}
+
 // Problem объясняет, почему векторы с диска не приняты; пусто — всё в порядке
 // или файлов просто нет.
 func (v *EntityVectors) Problem() string {

@@ -58,8 +58,9 @@ func (g *Graph) EmbedNewEntities(ctx context.Context, emb kb.Embedder, o EmbedOp
 	o = o.norm()
 
 	// Один счёт векторов на граф: догонщик рядом с --graph-embed или второй
-	// догонщик — отказ, а не два писателя в одном файле.
-	release, err := lockVectors(g.dir)
+	// догонщик — отказ, а не два писателя в одном файле. Векторы под замком
+	// перечитываются: граф открыт задолго до него (lockVectorsFresh).
+	release, err := g.lockVectorsFresh()
 	if err != nil {
 		return EmbedNewResult{}, err
 	}
