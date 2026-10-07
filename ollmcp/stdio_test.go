@@ -26,7 +26,7 @@ func TestServeStdioOneCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, _, err := build(cfg, false)
+	srv, _, err := build(cfg, false, mcp.ServiceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/mcp"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
@@ -42,7 +43,7 @@ func TestToolsListEqualsReadOnlyNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("конфиг: %v", err)
 	}
-	srv, _, err := build(cfg, false)
+	srv, _, err := build(cfg, false, mcp.ServiceOptions{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

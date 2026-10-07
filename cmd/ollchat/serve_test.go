@@ -136,6 +136,83 @@ func TestServeRefusesNetworkWithoutToken(t *testing.T) {
 	}
 }
 
+// ollchat --serve --mcp собирает службу MCP той же mcp.NewService, что ollmcp:
+// предел из ollmcp.toml рядом с конфигом виден в описании параметра, а вызов
+// ложится в журнал шагов. Прежде здесь стоял голый NewServer — тот же набор
+// шёл без пределов, срока вызова, потолка ответа и журнала.
+func TestServeMCPUsesServiceSettings(t *testing.T) {
+	dir := t.TempDir()
+	base, err := kb.OpenBase(filepath.Join(dir, "kb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.Create("books", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ollmcp.toml"),
+		[]byte("[limits]\ngraph_overview_top_k = 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Path = filepath.Join(dir, "config.toml")
+	cfg.Log.Enabled = true
+	cfg.Log.Dir = filepath.Join(dir, "logs")
+
+	sb, err := permissions.NewSandbox(dir, false, false, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := tools.NewRegistry([]string{tools.NameGraphOverview},
+		tools.Options{Sandbox: sb, KB: base, KBDir: base.Dir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, _, closeSvc, err := serveMux(cfg, "k", true, reg, base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(body string) map[string]any {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer k")
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		var d map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+			t.Fatalf("ответ /mcp не разобрался: %v (%s)", err, w.Body.String())
+		}
+		return d
+	}
+
+	list := post(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	tl, _ := list["result"].(map[string]any)["tools"].([]any)
+	desc := ""
+	for _, x := range tl {
+		tool := x.(map[string]any)
+		if tool["name"] == tools.NameGraphOverview {
+			props := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			desc, _ = props["top_k"].(map[string]any)["description"].(string)
+		}
+	}
+	if !strings.Contains(desc, "1..3") {
+		t.Errorf("предел из ollmcp.toml не дошёл до службы: описание top_k %q", desc)
+	}
+
+	post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"graph_overview","arguments":{}}}`)
+	closeSvc()
+	logs, _ := filepath.Glob(filepath.Join(cfg.Log.Dir, "steps-*.jsonl"))
+	found := false
+	for _, f := range logs {
+		if b, err := os.ReadFile(f); err == nil && strings.Contains(string(b), tools.NameGraphOverview) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("вызов по /mcp не попал в журнал шагов (%v)", logs)
+	}
+}
+
 func mustGraphRegistry(t *testing.T, full *tools.Registry) *tools.Registry {
 	t.Helper()
 	reg, err := graphRegistry(full)

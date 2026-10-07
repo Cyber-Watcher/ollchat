@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"errors"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/Cyber-Watcher/ollchat/internal/mcp"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
@@ -23,6 +22,11 @@ import (
 // файла подхватывается без перезапуска сеанса клиента: служба перезапускает
 // себя на новых настройках и сообщает клиенту, что набор сменился (описания
 // параметров строятся из пределов).
+//
+// Файл один на обе службы MCP — `ollmcp` и `ollchat --serve --mcp` (NewService):
+// до 07.10.2026 он жил в пакете ollmcp, и вторая служба шла без пределов,
+// срока вызова и потолка ответа. `ollchat --serve` читает его при запуске:
+// перезапуска на правке у неё нет.
 
 // Settings — содержимое ollmcp.toml.
 type Settings struct {
@@ -101,8 +105,8 @@ func LoadSettings(path string) (Settings, error) {
 func (s Settings) Watch() bool { return s.WatchConfig == nil || *s.WatchConfig }
 
 // Policy переводит настройки в политику службы. defaultKB — agent.max_output_kb.
-func (s Settings) Policy(defaultKB int) (mcp.Policy, error) {
-	p := mcp.Policy{Limits: map[string]map[string]mcp.Limit{}}
+func (s Settings) Policy(defaultKB int) (Policy, error) {
+	p := Policy{Limits: map[string]map[string]Limit{}}
 	switch {
 	case s.OutputKB > 0:
 		p.OutputBytes = s.OutputKB * 1024
@@ -127,9 +131,9 @@ func (s Settings) Policy(defaultKB int) (mcp.Policy, error) {
 			return p, fmt.Errorf("limits.%s = %d: выше потолка самого инструмента (%d) — он всё равно урежет", sp.key, v, sp.hard)
 		}
 		if p.Limits[sp.tool] == nil {
-			p.Limits[sp.tool] = map[string]mcp.Limit{}
+			p.Limits[sp.tool] = map[string]Limit{}
 		}
-		p.Limits[sp.tool][sp.param] = mcp.Limit{Min: sp.min, Max: v}
+		p.Limits[sp.tool][sp.param] = Limit{Min: sp.min, Max: v}
 	}
 	return p, nil
 }

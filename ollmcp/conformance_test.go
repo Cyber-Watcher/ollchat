@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Cyber-Watcher/ollchat/internal/mcp"
 )
 
 // Приёмочная проверка протокола на СОБРАННОМ бинаре (этап 109).
@@ -537,7 +539,7 @@ func searchTopKDesc(t *testing.T, r map[string]any) string {
 func TestConformanceSettingsLive(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testConfig(t, dir)
-	conf := SettingsPath(cfg)
+	conf := mcp.SettingsPath(cfg)
 	p := startStdio(t, installBinary(t, dir), cfg)
 	result(t, p.call(1, "initialize", ""))
 	if d := searchTopKDesc(t, result(t, p.call(2, "tools/list", ""))); !strings.Contains(d, "1..20") {

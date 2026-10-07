@@ -79,32 +79,23 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 		defer ln.Close()
 	}
 
-	// Служба — это режим --http без --tools: только ей нужен прогретый граф.
-	srv, data, err := build(cfg, addr != "" && !list)
-	if err != nil {
-		return err
-	}
 	stepsPattern, err := cfg.Log.StepsPattern()
 	if err != nil {
 		return fmt.Errorf("log.steps_file_pattern: %w", err)
 	}
-	srv.Steps = steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollmcp", cfg.Log.Enabled)
-	defer srv.Steps.Close()
+	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollmcp", cfg.Log.Enabled)
+	defer steps.Close()
 
 	// Настройки службы: пределы, потолок ответа, срок вызова (этап 109).
 	if mcpConf == "" {
-		mcpConf = SettingsPath(path)
+		mcpConf = mcp.SettingsPath(path)
 	}
-	settings, err := LoadSettings(mcpConf)
+	// Служба — это режим --http без --tools: только ей нужен прогретый граф.
+	srv, data, err := build(cfg, addr != "" && !list, mcp.ServiceOptions{
+		Settings: mcpConf, OutputKB: cfg.Agent.MaxOutputKB, Steps: steps,
+	})
 	if err != nil {
 		return err
-	}
-	if srv.Policy, err = settings.Policy(cfg.Agent.MaxOutputKB); err != nil {
-		return fmt.Errorf("%s: %w", mcpConf, err)
-	}
-	if settings.Watch() {
-		srv.WatchFiles = []string{mcpConf}
-		srv.Validate = func() error { _, err := LoadSettings(mcpConf); return err }
 	}
 
 	if list {
