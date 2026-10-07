@@ -165,16 +165,9 @@ type Entities struct {
 
 const entitiesFile = "entities.jsonl"
 
-func openEntities(dir string, stemMinLen int) (*Entities, error) {
-	return openEntitiesWith(dir, stemMinLen, nil, false)
-}
-
-// strictKeys — правило формата 2: аббревиатура ключом не служит (см. put).
-func openEntitiesWith(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool) (*Entities, error) {
-	return openEntitiesShared(dir, stemMinLen, cb, strictKeys, 0)
-}
-
-// openEntitiesShared — то же с правилом общего синонима (sharedLimit).
+// openEntitiesShared открывает реестр понятий на дозапись. strictKeys —
+// правило формата 2: аббревиатура ключом не служит (см. put); sharedLimit —
+// правило общего синонима.
 func openEntitiesShared(dir string, stemMinLen int, cb func(OpenProgress), strictKeys bool, sharedLimit int) (*Entities, error) {
 	e := &Entities{path: filepath.Join(dir, entitiesFile), stemMinLen: stemMinLen, strictKeys: strictKeys,
 		sharedLimit: sharedLimit, aliasOwners: map[string]int{},
