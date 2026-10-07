@@ -204,7 +204,7 @@ func countDrop(order []uint32, drop map[uint32]bool) int {
 func (g *Graph) DeadEntities() []uint32 {
 	var dead []uint32
 	for _, e := range g.ents.Live() {
-		if g.merges.Gone(e.ID) || len(g.merges.Absorbed(e.ID)) > 0 {
+		if g.merges.inJournal(e.ID) {
 			continue
 		}
 		alive := false

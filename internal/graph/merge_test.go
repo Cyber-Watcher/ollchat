@@ -259,3 +259,52 @@ func TestMergeRefusesReverseDirection(t *testing.T) {
 		t.Errorf("поглощено %d, ожидалось 2", got)
 	}
 }
+
+// Выключенные склейки (merges_enabled = false) выключены целиком: граф такой,
+// будто журнала нет. До 07.10.2026 выключался лишь Resolve — поглощённое
+// понятие находилось само, его связи доставались ещё и выжившему, а из Live
+// оно пропадало: одна связь читалась с двух концов (аудит, 4.5).
+func TestMergesOffIsWhole(t *testing.T) {
+	g := mergeFixture(t)
+	if _, err := g.Merges().Add([]MergeRec{{From: 2, To: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := g.Dir()
+	must(t, g.Close())
+	off, err := open(dir, Meta{Version: FormatVersion}, Rules{MergesOff: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer off.Close()
+
+	if n := off.Merges().Count(); n != 0 {
+		t.Errorf("при выключенных склейках поглощено %d", n)
+	}
+	if n := len(off.Entities().Live()); n != 4 {
+		t.Errorf("живых понятий %d, ожидалось 4 — поглощённое пропало", n)
+	}
+	// Связь английского имени — только у него, не у русского.
+	if got := off.Edges().Of(1); len(got) != 1 || got[0].Dst != 3 {
+		t.Errorf("связи русского имени: %+v — ожидалась одна, с кучей", got)
+	}
+	if got := off.Mentions().Of(1); len(got) != 2 {
+		t.Errorf("упоминаний русского имени %d, ожидалось 2 — без чужих", len(got))
+	}
+	if ent, _ := off.Entities().Get(1); len(ent.Aliases) != 0 {
+		t.Errorf("русскому имени приписаны синонимы поглощённого: %v", ent.Aliases)
+	}
+	// Связь видна с обоих концов одинаково: у кого сосед Y, тот и сосед Y.
+	// В гибриде связь английского имени у русского читалась исходящей,
+	// а у её второго конца — входящей от английского.
+	for _, ent := range off.Entities().Live() {
+		for _, nb := range off.Edges().Neighbors(ent.ID) {
+			back := false
+			for _, x := range off.Edges().Neighbors(nb.ID) {
+				back = back || x.ID == ent.ID
+			}
+			if !back {
+				t.Errorf("связь %d—%d видна только с одного конца", ent.ID, nb.ID)
+			}
+		}
+	}
+}

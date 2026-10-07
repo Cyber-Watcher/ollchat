@@ -196,9 +196,17 @@ func (m *Merges) Resolve(id uint32) uint32 {
 	return id
 }
 
+// Выключенные склейки (Rules.MergesOff) выключены целиком: Resolve, Absorbed,
+// Gone и Count отвечают так, будто журнала нет. До 07.10.2026 выключался
+// только Resolve, и граф выходил гибридным: поглощённое понятие находилось
+// само по себе, но его связи и упоминания доставались ещё и выжившему, а из
+// Live оно пропадало — связь считалась дважды (аудит, 4.5). Записи журнала
+// (Records, Add, снятие склеек) от выключателя не зависят: это работа
+// с журналом, а не его действие на граф.
+
 // Absorbed возвращает номера, поглощённые этим понятием.
 func (m *Merges) Absorbed(id uint32) []uint32 {
-	if m == nil {
+	if m == nil || m.off {
 		return nil
 	}
 	m.mu.RLock()
@@ -211,7 +219,7 @@ func (m *Merges) Absorbed(id uint32) []uint32 {
 
 // Gone сообщает, что понятие поглощено и само по себе больше не существует.
 func (m *Merges) Gone(id uint32) bool {
-	if m == nil {
+	if m == nil || m.off {
 		return false
 	}
 	m.mu.RLock()
@@ -234,12 +242,26 @@ func (m *Merges) Gone(id uint32) bool {
 // понятие как быструю проверку «склеек нет» (Edges.outgoing, Entities.Live),
 // и проход по таблице на каждый вызов делал доктора квадратичным.
 func (m *Merges) Count() int {
-	if m == nil {
+	if m == nil || m.off {
 		return 0
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.gone
+}
+
+// inJournal — участвует ли понятие в журнале склеек поглощённым или
+// выжившим, включены склейки или нет. Нужен уплотнению: понятие из журнала
+// выбрасывать нельзя, даже пока склейки выключены, — включат их снова,
+// и склейка повиснет на пустом номере.
+func (m *Merges) inJournal(id uint32) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	dst, ok := m.to[id]
+	return (ok && dst != id) || len(m.from[id]) > 0
 }
 
 // leadsTo — приводит ли цепочка склеек от понятия id к понятию target.
