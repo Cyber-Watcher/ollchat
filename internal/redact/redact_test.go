@@ -502,6 +502,24 @@ func TestMarkdownHidesEverything(t *testing.T) {
 	}
 }
 
+// Заголовок обезличенного .md — нейтральный, а не имя файла скана: сканы
+// называют по фамилии пациента. В распознанной копии имя файла остаётся.
+func TestMarkdownTitleNeutral(t *testing.T) {
+	const name = "Иванова Мария Петровна выписка"
+	ru := doc(0, "Патологических изменений в исследованной области не выявлено.")
+	md := buildMD(name, ru, nil, 1, false)
+	if strings.Contains(md, "Иванова") || !strings.HasPrefix(md, "# Обезличенный документ\n") {
+		t.Errorf("заголовок обезличенного .md:\n%s", md)
+	}
+	en := doc(0, "No significant abnormality is seen in the examined region.")
+	if md := buildMD(name, en, nil, 1, false); !strings.HasPrefix(md, "# Redacted document\n") {
+		t.Errorf("заголовок английского документа:\n%s", md)
+	}
+	if plain := buildMD(name, ru, nil, 1, true); !strings.HasPrefix(plain, "# "+name+"\n") {
+		t.Errorf("у распознанной копии заголовок — имя файла:\n%s", plain)
+	}
+}
+
 func TestMarkdownDropsWordsUnderInk(t *testing.T) {
 	words := doc(0, "Requested measurements review")
 	detect(words, Options{})

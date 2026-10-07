@@ -93,7 +93,8 @@ type Check struct {
 func (c Check) OK() bool { return len(c.LeaksPDF) == 0 && len(c.LeaksMD) == 0 }
 
 // Process распознаёт страницы, находит персональные данные, замазывает их
-// и собирает .md. title — заголовок .md (имя документа без расширения).
+// и собирает .md. title — заголовок распознанной копии (имя документа без
+// расширения); у обезличенного .md заголовок нейтральный (buildMD).
 func Process(ctx context.Context, title string, pages []Page, opt Options) (*Result, error) {
 	if len(pages) == 0 {
 		return nil, fmt.Errorf("в документе нет страниц")
