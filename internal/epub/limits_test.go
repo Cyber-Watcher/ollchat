@@ -1,6 +1,8 @@
 package epub
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,44 @@ func TestSpineDeduplicated(t *testing.T) {
 			t.Errorf("разделов %d, а глава одна", res.TotalSections)
 		}
 	})
+}
+
+// manyChapters — книга из n глав по body каждая.
+func manyChapters(t *testing.T, n int, body string) []byte {
+	var items, refs strings.Builder
+	files := map[string]string{"META-INF/container.xml": container}
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&items, `<item href="c%d.xhtml" id="c%d" media-type="application/xhtml+xml"/>`, i, i)
+		fmt.Fprintf(&refs, `<itemref idref="c%d"/>`, i)
+		files[fmt.Sprintf("OEBPS/c%d.xhtml", i)] = body
+	}
+	files["OEBPS/content.opf"] = `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">` +
+		`<metadata/><manifest>` + items.String() + `</manifest><spine>` + refs.String() + `</spine></package>`
+	return buildEPUB(t, true, files)
+}
+
+// Распакованное и текст считаются на всю книгу: главы-бомбы по 64 КБ
+// разжимаются в 64 МБ каждая, и сотня таких давала гигабайты. Обычная книга
+// в те же пределы укладывается.
+func TestBookBudget(t *testing.T) {
+	oldBase, oldPer, oldText := readBase, readPerByte, maxBookText
+	t.Cleanup(func() { readBase, readPerByte, maxBookText = oldBase, oldPer, oldText })
+	readBase, readPerByte, maxBookText = 2<<20, 1, 256<<10
+
+	empty := "<html><body>" + strings.Repeat("<b></b>", 40000) + "</body></html>" // ~280 КБ без текста
+	if _, err := Extract(manyChapters(t, 20, empty), Options{}); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("распакованное: ожидался ErrTooLarge, получено %v", err)
+	}
+	words := "<html><body><p>" + strings.Repeat("слово ", 5000) + "</p></body></html>" // ~60 КБ текста
+	if _, err := Extract(manyChapters(t, 8, words), Options{}); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("текст: ожидался ErrTooLarge, получено %v", err)
+	}
+	if _, err := ExtractImages(manyChapters(t, 20, empty), ImageOptions{}); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("картинки: ожидался ErrTooLarge, получено %v", err)
+	}
+	if _, err := Extract(sampleBook(t, true), Options{}); err != nil {
+		t.Errorf("обычная книга: %v", err)
+	}
 }
 
 // hugeGIF — GIF в несколько десятков байт, где и экран, и кадр — 65535×65535.

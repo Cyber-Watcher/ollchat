@@ -2,6 +2,7 @@ package epub
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/png"
 	"path"
@@ -69,6 +70,9 @@ func ExtractImages(data []byte, opt ImageOptions) (out []Image, err error) {
 	for i := first - 1; i < last && i < len(pkg.spine); i++ {
 		href := pkg.spine[i]
 		raw, err := b.read(href)
+		if errors.Is(err, ErrTooLarge) {
+			return nil, err
+		}
 		if err != nil {
 			continue
 		}
@@ -81,6 +85,9 @@ func ExtractImages(data []byte, opt ImageOptions) (out []Image, err error) {
 			}
 			seen[name] = true
 			blob, err := b.read(name)
+			if errors.Is(err, ErrTooLarge) {
+				return nil, err
+			}
 			if err != nil {
 				continue
 			}
