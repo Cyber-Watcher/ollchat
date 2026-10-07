@@ -301,6 +301,48 @@ func TestContentsArrayBounded(t *testing.T) {
 	}
 }
 
+// Форма, вызывающая саму себя десять раз: при глубине 8 это сто миллионов
+// вызовов, файл в полкилобайта разбирался дольше полутора минут. Так же —
+// цепочка из восьми разных форм, где каждая зовёт следующую десять раз.
+func TestFormFanOutBounded(t *testing.T) {
+	self := build(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm0 5 0 R >> /Font << /F1 6 0 R >> >> /Contents 4 0 R >>",
+		stream("", "/Fm0 Do"),
+		stream("<< /Type /XObject /Subtype /Form /Resources << /XObject << /Fm0 5 0 R >> /Font << /F1 6 0 R >> >> >>",
+			"BT /F1 12 Tf 72 720 Td (loop) Tj ET "+strings.Repeat("/Fm0 Do ", 10)),
+		helvetica)
+
+	// Цепочка: объекты 5…12 — формы, каждая зовёт следующую десять раз,
+	// последняя пишет текст.
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm 5 0 R >> >> /Contents 4 0 R >>",
+		stream("", "/Fm Do"),
+	}
+	for i := 0; i < 8; i++ {
+		if i == 7 {
+			objs = append(objs, stream("<< /Type /XObject /Subtype /Form /Resources << /Font << /F1 13 0 R >> >> >>",
+				"BT /F1 12 Tf 72 720 Td (leaf) Tj ET"))
+			continue
+		}
+		objs = append(objs, stream(fmt.Sprintf("<< /Type /XObject /Subtype /Form /Resources << /XObject << /Fm %d 0 R >> >> >>", 6+i),
+			strings.Repeat("/Fm Do ", 10)))
+	}
+	chain := build(append(objs, helvetica)...)
+
+	bounded(t, 20*time.Second, func() {
+		if got := pageText(t, self); got != "loop" {
+			t.Errorf("форма, зовущая себя: %q", got)
+		}
+		if got := pageText(t, chain); !strings.Contains(got, "leaf") {
+			t.Errorf("цепочка форм: %.40q", got)
+		}
+	})
+}
+
 // /N объектного потока берётся из файла: до правки под него заранее
 // выделялась память — полтора терабайта на файл в килобайт.
 func TestObjectStreamHugeCount(t *testing.T) {

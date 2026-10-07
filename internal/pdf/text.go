@@ -41,7 +41,25 @@ type extractor struct {
 	// spans — открытые блоки размеченного содержимого (см. marked.go). Общие
 	// на страницу: форма, вызванная изнутри блока с ActualText, тоже молчит.
 	spans []mcSpan
+
+	// forms — сколько форм вызвано на этой странице, drawing — какие формы
+	// рисуются сейчас, выше по стеку (см. xobject).
+	forms   int
+	drawing map[*Stream]bool
 }
+
+// Пределы вызова форм. Глубина ограничена давно, а ширина не была: форма,
+// вызывающая саму себя десять раз, при глубине 8 давала сто миллионов
+// вызовов, и файл в 548 байт разбирался дольше полутора минут. Поэтому форма,
+// уже рисуемая выше по стеку, второй раз не входит, а вызовов на страницу
+// не больше maxPageForms — у настоящих страниц их десятки, у карт с
+// условными знаками тысячи. Каждый вызов к тому же списывает formCost
+// с бюджета документа (budget.go): пустые формы ничего не распаковывают,
+// но время на вызов тратят.
+const (
+	maxPageForms = 1 << 16
+	formCost     = 256
+)
 
 // pageImage — картинка, нарисованная на странице. Порядок отрисовки важен:
 // по нему картинки нумеруются и в тексте, и при выгрузке, иначе метка
@@ -56,7 +74,7 @@ type pageImage struct {
 }
 
 func newExtractor(d *Document) *extractor {
-	return &extractor{doc: d, fonts: map[int]*font{}}
+	return &extractor{doc: d, fonts: map[int]*font{}, drawing: map[*Stream]bool{}}
 }
 
 // page извлекает текст одной страницы.
@@ -64,6 +82,7 @@ func (e *extractor) page(page Dict) string {
 	e.frags = e.frags[:0]
 	e.images = e.images[:0]
 	e.spans = e.spans[:0]
+	e.forms = 0
 	content := e.doc.contentOf(page)
 	res, _ := e.doc.Resolve(page["Resources"]).(Dict)
 	e.run(content, res)
@@ -82,7 +101,10 @@ type state struct {
 }
 
 func (e *extractor) run(content []byte, res Dict) {
-	if e.depth > 8 {
+	// Разобранное списывается с бюджета документа, как и распакованное:
+	// одна и та же форма, нарисованная на каждой из тысяч страниц, стоит
+	// работы на каждой из них.
+	if e.depth > 8 || !e.doc.spend(len(content)) {
 		return
 	}
 	p := newParser(content, e.doc)
@@ -332,6 +354,11 @@ func (e *extractor) xobject(res Dict, name Name, ctm matrix, penX, penY float64)
 	default:
 		return
 	}
+	// Пределы — см. maxPageForms.
+	if e.drawing[s] || e.forms >= maxPageForms || !e.doc.spend(formCost) {
+		return
+	}
+	e.forms++
 	data, err := e.doc.Decode(s)
 	if err != nil && len(data) == 0 {
 		return
@@ -340,9 +367,11 @@ func (e *extractor) xobject(res Dict, name Name, ctm matrix, penX, penY float64)
 	if sub == nil {
 		sub = res
 	}
+	e.drawing[s] = true
 	e.depth++
 	e.run(data, sub)
 	e.depth--
+	delete(e.drawing, s)
 }
 
 // markImage ставит метку рисунка в том месте страницы, где он нарисован.
