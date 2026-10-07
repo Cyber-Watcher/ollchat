@@ -1020,7 +1020,7 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 // hybrid собирает выдачу из двух поисков: по словам и по смыслу.
 func (c *Collection) hybrid(ctx context.Context, query string, opt SearchOpts, emb Embedder) ([]Hit, string, error) {
 	if opt.TopK <= 0 {
-		opt = DefaultSearchOpts()
+		opt = opt.withDefaults()
 	}
 	words, err := c.index.Candidates(query, opt)
 	if err != nil {

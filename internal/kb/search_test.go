@@ -243,6 +243,44 @@ func TestSearchByBookFilter(t *testing.T) {
 	}
 }
 
+// Настройки без TopK получают умолчания, но отбор книг не теряют.
+//
+// Нулевой TopK заменял настройки умолчаниями целиком: поиск «только в этой
+// книге» искал по всей коллекции, а отбор живых книг выпадал, и удалённая
+// книга возвращалась в выдачу.
+func TestSearchZeroTopKKeepsFilters(t *testing.T) {
+	_, coll, _ := mergeFixture(t) // go, k8s и удалённая perl
+	if found(t, coll, "perl") {
+		t.Fatal("удалённая книга ищется и с TopK")
+	}
+	hits, err := coll.Search("perl regular expressions", SearchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) > 0 {
+		t.Fatalf("без TopK вернулась удалённая книга: %s", hits[0].Path)
+	}
+
+	var k8s uint32
+	for _, b := range coll.Books() {
+		if filepath.Base(b.Path) == "k8s.pdf" {
+			k8s = b.ID
+		}
+	}
+	hits, err = coll.Search("plain sentence of book text", SearchOpts{Docs: []uint32{k8s}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("в отобранной книге ничего не нашлось")
+	}
+	for _, h := range hits {
+		if filepath.Base(h.Path) != "k8s.pdf" {
+			t.Fatalf("отбор по книге без TopK пропустил %s", h.Path)
+		}
+	}
+}
+
 // TestSearchEmptyAndUnknown — пустой запрос и слово, которого нет, не должны
 // ломать поиск.
 func TestSearchEmptyAndUnknown(t *testing.T) {
