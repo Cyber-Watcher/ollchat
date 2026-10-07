@@ -311,13 +311,7 @@ func TestConformanceStdioReplace(t *testing.T) {
 	before := inode(t, pid)
 
 	replaceBinary(t, bin)
-	deadline := time.Now().Add(10 * time.Second)
-	for inode(t, pid) == before {
-		if time.Now().After(deadline) {
-			t.Fatal("процесс не перешёл на новый файл за 10 с")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	waitExec(t, pid, before, 10*time.Second)
 	// Первое сообщение после перехода — ответ, а не уведомление: набор тот же.
 	checkToolList(t, result(t, p.call(2, "tools/list", "")))
 
@@ -331,11 +325,38 @@ func TestConformanceStdioReplace(t *testing.T) {
 // inode файла, из которого запущен процесс pid.
 func inode(t *testing.T, pid int) uint64 {
 	t.Helper()
-	var st syscall.Stat_t
-	if err := syscall.Stat("/proc/"+strconv.Itoa(pid)+"/exe", &st); err != nil {
+	ino, err := inodeOf(pid)
+	if err != nil {
 		t.Fatalf("процесс %d: %v", pid, err)
 	}
-	return uint64(st.Ino)
+	return ino
+}
+
+func inodeOf(pid int) (uint64, error) {
+	var st syscall.Stat_t
+	if err := syscall.Stat("/proc/"+strconv.Itoa(pid)+"/exe", &st); err != nil {
+		return 0, err
+	}
+	return uint64(st.Ino), nil
+}
+
+// waitExec ждёт, пока процесс pid перейдёт на новый файл. Пока ядро меняет
+// образ процесса (exec из неглавного потока ждёт, пока главный уйдёт),
+// /proc/pid/exe на миг недоступен: это не смерть процесса, и проверка,
+// падавшая на этом миге, изредка ложно краснела.
+func waitExec(t *testing.T, pid int, before uint64, limit time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for {
+		ino, err := inodeOf(pid)
+		if err == nil && ino != before {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("процесс %d не перешёл на новый файл за %s (%v)", pid, limit, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func contains(xs []string, s string) bool {
@@ -493,13 +514,7 @@ func TestConformanceHTTP(t *testing.T) {
 	pid := cmd.Process.Pid
 	before := inode(t, pid)
 	replaceBinary(t, bin)
-	deadline := time.Now().Add(20 * time.Second)
-	for inode(t, pid) == before {
-		if time.Now().After(deadline) {
-			t.Fatal("служба не перешла на новый файл за 20 с")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	waitExec(t, pid, before, 20*time.Second)
 	waitHealth(t, h.url)
 	resp = h.post(`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`, session, both)
 	body := readBody(t, resp)
