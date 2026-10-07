@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,6 +125,50 @@ func TestDetectByContentNotExtension(t *testing.T) {
 	}
 	if got := DetectFile(writeTemp(t, "документ", samplePDF())); got != KindPDF {
 		t.Fatalf("документ без расширения не распознан: %q", got)
+	}
+}
+
+// Книга со сжатым mimetype узнаётся по оглавлению архива, а архив, который
+// не книга, в память целиком не читается: прежде любой файл с «PK» в начале
+// читался весь ещё до проверки размера.
+func TestDetectZipByDirectory(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range []string{"mimetype", "META-INF/container.xml"} {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte("application/epub+zip"))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := DetectFile(writeTemp(t, "книга", buf.Bytes())); got != KindEPUB {
+		t.Errorf("книга со сжатым mimetype: %q", got)
+	}
+
+	// Разреженный файл в 256 МБ, начинающийся с «PK»: на диске он пуст,
+	// а в память при чтении целиком лёг бы весь.
+	big := filepath.Join(t.TempDir(), "archive.zip")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write([]byte("PK\x03\x04"))
+	if err := f.Truncate(256 << 20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	kind := DetectFile(big)
+	runtime.ReadMemStats(&after)
+	if kind != KindNone {
+		t.Errorf("архив без книги: %q", kind)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > 16<<20 {
+		t.Errorf("на определение вида архива в 256 МБ выделено %d МБ", n>>20)
 	}
 }
 

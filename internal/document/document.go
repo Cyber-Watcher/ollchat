@@ -7,10 +7,12 @@
 package document
 
 import (
+	"archive/zip"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/Cyber-Watcher/ollchat/internal/epub"
@@ -137,8 +139,8 @@ func Detect(head []byte) Kind {
 // DetectFile определяет формат файла по содержимому, а не по расширению.
 //
 // Для EPUB одного заголовка мало: строка типа бывает сжата, и признаком
-// служит имя обязательного файла внутри архива. Поэтому читается либо начало
-// файла, либо — для архивов — файл целиком.
+// служит имя обязательного файла внутри архива. Поэтому читается начало
+// файла, а у архивов — ещё и их оглавление (zipHasContainer).
 func DetectFile(path string) Kind {
 	f, err := os.Open(path)
 	if err != nil {
@@ -152,10 +154,8 @@ func DetectFile(path string) Kind {
 	if k := Detect(head); k != KindNone {
 		return k
 	}
-	if n >= 4 && string(head[:4]) == "PK\x03\x04" {
-		if data, err := os.ReadFile(path); err == nil && epub.IsEPUB(data) {
-			return KindEPUB
-		}
+	if n >= 4 && string(head[:4]) == "PK\x03\x04" && zipHasContainer(f) {
+		return KindEPUB
 	}
 	// Подписи не нашлось. Текст от текста ничем не отличается — у .md и .txt
 	// один признак на двоих, «это буквы», — поэтому здесь и только здесь
@@ -168,6 +168,30 @@ func DetectFile(path string) Kind {
 		return KindText
 	}
 	return KindNone
+}
+
+// zipHasContainer сообщает, есть ли в архиве META-INF/container.xml —
+// обязательный файл книги EPUB.
+//
+// Читается только оглавление архива, а не файл целиком: прежде любой файл,
+// начинающийся с «PK», читался в память весь, и архив в десятки гигабайт
+// рядом с книгами съедал память раньше, чем доходило до проверки размера.
+func zipHasContainer(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	zr, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return false
+	}
+	for _, zf := range zr.File {
+		name := strings.TrimPrefix(path.Clean(strings.ReplaceAll(zf.Name, "\\", "/")), "/")
+		if name == "META-INF/container.xml" {
+			return true
+		}
+	}
+	return false
 }
 
 // detectForIndex — то же, но для индексации базы знаний, где код тоже текст.
