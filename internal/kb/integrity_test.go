@@ -408,6 +408,36 @@ func TestSegmentSkipsUncommittedTail(t *testing.T) {
 	}
 }
 
+// Удалённая книга не возвращается в выдачу и через явный список книг,
+// а кусок её по ссылке читается с признаком удалённости.
+//
+// Отбор живых книг ставился только без Docs, и kb_search с отбором по названию
+// и служба, передающая список книг, находили удалённую книгу. ChunkByRef
+// отдавал её кусок с Deleted=false, и подтверждения графа выдавали её наравне
+// с живыми.
+func TestDeletedBookStaysHidden(t *testing.T) {
+	_, coll, drop := mergeFixture(t) // perl.pdf удалена
+	perl := bookID(t, coll, filepath.Base(drop))
+	hits, err := coll.Search("perl regular expressions", SearchOpts{TopK: 5, Docs: []uint32{perl}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) > 0 {
+		t.Fatalf("удалённая книга нашлась через явный список: %s", hits[0].ID)
+	}
+	info, ok := coll.ChunkByRef(perl, 0)
+	if !ok {
+		t.Fatal("кусок удалённой книги по ссылке не читается — граф ссылается и на такие")
+	}
+	if !info.Book.Deleted {
+		t.Fatal("кусок удалённой книги отдан без признака удалённости")
+	}
+	live := bookID(t, coll, "go.pdf")
+	if info, ok := coll.ChunkByRef(live, 0); !ok || info.Book.Deleted {
+		t.Fatalf("живая книга по ссылке: найдена %v, удалена %v", ok, info.Book.Deleted)
+	}
+}
+
 // texts0 — тексты всех кусков хранилища коллекции.
 func texts0(t *testing.T, c *Collection) []string {
 	t.Helper()

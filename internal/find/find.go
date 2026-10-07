@@ -539,11 +539,17 @@ func QueryVector(ctx context.Context, d Deps, query string, o Opts) ([]int8, kb.
 }
 
 // fromGraph превращает подтверждения графа в выдержки.
+//
+// Граф помнит и удалённые книги, и прежние версии перечитанных: его ссылки
+// переживают и то и другое. В выдачу такие куски не идут — поиск по книгам их
+// тоже не показывает, и выдержка из книги, которую человек убрал, читалась бы
+// как ошибка удаления. Кусок без записи в реестре (прежняя версия книги) узнаётся
+// по пустому номеру книги.
 func fromGraph(src *kb.Collection, keys []graph.ChunkKey, o Opts) []Excerpt {
 	out := make([]Excerpt, 0, len(keys))
 	for _, k := range keys {
 		info, ok := src.ChunkByRef(k.Doc, k.Ord)
-		if !ok {
+		if !ok || info.Book.ID == 0 || info.Book.Deleted {
 			continue
 		}
 		out = append(out, Excerpt{

@@ -877,11 +877,19 @@ func topFolder(path string, roots []string) string {
 }
 
 // liveDocs — номера книг, которые может выдавать поиск: прочитанные, стоящие
-// в реестре и не помеченные удалёнными. Под замком чтения.
-func (c *Collection) liveDocs() map[uint32]bool {
+// в реестре и не помеченные удалёнными; only — ещё и только из этого списка
+// (пусто — любые). Под замком чтения.
+func (c *Collection) liveDocs(only ...uint32) map[uint32]bool {
+	var want map[uint32]bool
+	if len(only) > 0 {
+		want = make(map[uint32]bool, len(only))
+		for _, id := range only {
+			want[id] = true
+		}
+	}
 	out := make(map[uint32]bool, len(c.docs))
 	for _, d := range c.docs {
-		if d.ID != 0 && d.Kind == BookOK && !c.deleted[d.ID] {
+		if d.ID != 0 && d.Kind == BookOK && !c.deleted[d.ID] && (want == nil || want[d.ID]) {
 			out[d.ID] = true
 		}
 	}
@@ -1043,9 +1051,12 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 	// --kb-sync до той же даты), и обрывки прерванной записи. Пометки у них
 	// нет, и в коллекции без единого удаления они находились поиском с пустыми
 	// названием и путём.
-	if len(opt.Docs) == 0 {
-		opt.docFilter = c.liveDocs()
-	}
+	//
+	// **И при явном списке книг тоже.** Список приходит снаружи — kb_search
+	// с отбором по названию, служба по запросу клиента, — и до 07.10.2026 при
+	// непустом Docs отбор живых не ставился вовсе: удалённая книга, попавшая
+	// в список, находилась.
+	opt.docFilter = c.liveDocs(opt.Docs...)
 	hits, note, err := c.hybrid(ctx, query, opt, emb)
 	if err != nil {
 		return nil, err

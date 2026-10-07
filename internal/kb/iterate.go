@@ -297,6 +297,11 @@ func (c *Collection) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 	}
 	if b, found := c.book(rec.Doc); found {
 		info.Book = b
+		// Кусок удалённой книги по ссылке читается — граф хранит ссылки
+		// и на них, — но признак удалённости обязан дойти до вызывающего:
+		// до 07.10.2026 он был ложным всегда, и подтверждения графа выдавали
+		// удалённые книги наравне с живыми.
+		info.Book.Deleted = c.deleted[rec.Doc]
 		if b.UnitWord == "разделов" {
 			info.Unit = "разд."
 		}
