@@ -291,6 +291,9 @@ type Model struct {
 	archiveErrShown string
 	// heldNotes — заметки, придержанные до конца ответа модели.
 	heldNotes []block
+	// heldAttach — файлы /add, дочитанные посреди хода: в историю они лягут,
+	// когда ход кончится (см. Update, attachMsg).
+	heldAttach []attachMsg
 }
 
 // New создаёт модель интерфейса.
@@ -1005,6 +1008,7 @@ func (m *Model) stopStreaming() {
 	if m.streaming {
 		m.finishTurn()
 	}
+	m.flushHeldAttach()
 }
 
 // finishTurn завершает обмен: пишет ответ в журнал и сбрасывает состояние.
@@ -1053,6 +1057,9 @@ func (m *Model) finishTurn() {
 
 	m.liveIdx = -1
 	m.thinkIdx = -1
+	// Файлы, дочитанные посреди хода, — теперь, когда историю никто
+	// не дописывает.
+	m.flushHeldAttach()
 }
 
 // stampTurn помечает блоки ответа завершившегося хода временем и моделью.

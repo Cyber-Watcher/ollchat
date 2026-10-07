@@ -163,6 +163,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case attachMsg:
+		// Посреди хода историю дописывает агент из своей горутины: вызов
+		// инструмента, следом его результат. Вложение, вставшее между ними,
+		// ломает порядок, которого требует сервер (аудит 07.10.2026). Файл
+		// уже прочитан — в историю он ляжет, как только ход кончится.
+		if m.streaming {
+			m.heldAttach = append(m.heldAttach, msg)
+			m.statusMsg = "файл " + msg.rel + " приложится после ответа модели"
+			return m, nil
+		}
 		return m, m.attach(msg.rel, msg.body, msg.notice)
 
 	case graphRemovedMsg:
@@ -176,6 +185,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onCompactDone(msg)
 
 	case sessionLoadedMsg:
+		// Восстановление заменяет и историю, и ленту. Посреди хода агент
+		// дописывал бы ответ в чужой диалог, а индекс живого блока указывал
+		// за конец новой ленты — программа падала с index out of range, и
+		// диалог пропадал (аудит 07.10.2026). Сессия дочиталась, когда вопрос
+		// уже задан; восстанавливать её поверх ответа нельзя, а повторить
+		// команду дёшево.
+		if m.streaming || m.mixing {
+			again := strings.TrimSpace("/resume " + msg.rec.ID)
+			m.addBlock(block{kind: blockError, text: "сессия не восстановлена: она дочиталась, " +
+				"когда уже шёл ответ модели. Повторите " + again + " после ответа"})
+			return m, nil
+		}
 		m.applyResumed(msg.rec)
 		return m, nil
 
@@ -765,7 +786,10 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	case agent.EventContent:
 		m.speed.Tick(time.Now())
 		m.turnAnswer.WriteString(ev.Text)
-		if m.liveIdx < 0 {
+		// Индекс живого блока сверяется с лентой: если её заменили посреди
+		// хода, устаревший индекс ронял программу, а теперь ответ просто
+		// продолжится новым блоком.
+		if m.liveIdx < 0 || m.liveIdx >= len(m.blocks) {
 			// Модель проставляем сразу, а не в конце хода: копировать ответ
 			// можно и посреди генерации.
 			m.liveIdx = m.addBlock(block{kind: blockAssistant, text: ev.Text,
@@ -785,7 +809,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	case agent.EventThinking:
 		m.speed.Tick(time.Now())
 		m.turnThink.WriteString(ev.Text)
-		if m.thinkIdx < 0 {
+		if m.thinkIdx < 0 || m.thinkIdx >= len(m.blocks) {
 			m.thinkIdx = m.addBlock(block{kind: blockThinking, text: ev.Text})
 		} else {
 			b := m.blocks[m.thinkIdx]

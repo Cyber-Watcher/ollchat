@@ -935,6 +935,16 @@ func (m *Model) attach(rel, body, notice string) tea.Cmd {
 	return nil
 }
 
+// flushHeldAttach кладёт в историю файлы, дочитанные посреди хода.
+// Зовётся, когда ход кончился: агент историю больше не дописывает.
+func (m *Model) flushHeldAttach() {
+	held := m.heldAttach
+	m.heldAttach = nil
+	for _, a := range held {
+		m.attach(a.rel, a.body, a.notice)
+	}
+}
+
 func (m *Model) logCmd(arg string) tea.Cmd {
 	switch strings.ToLower(arg) {
 	case "on", "вкл":
