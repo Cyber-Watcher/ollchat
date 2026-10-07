@@ -360,6 +360,31 @@ func TestRussianBareLabels(t *testing.T) {
 	}
 }
 
+// Адрес без «д.» — номер дома сразу за улицей: до 07.10.2026 он оставался
+// в .md. «Площадь» в описании очага, «пл.» перед числом и улица без
+// названия — не адрес.
+func TestRussianAddressWithoutHouseWord(t *testing.T) {
+	words := doc(0,
+		"Проживает г. Тверь, ул. Примерная, 5, кв. 12",
+		"Ул. 8 Марта 14/2 корп. 3, пр-т Мира, 21а",
+		"Почтовый 170000, г. Примерск",
+		"Площадь поражения 7 см, пл. 2,5 см2, ул. не указана 9",
+		"Гемоглобин 135 г/л",
+	)
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"Тверь,": KindAddress, "Примерная,": KindAddress, "5,": KindAddress, "12": KindAddress,
+		"Марта": KindAddress, "14/2": KindAddress, "3,": KindAddress, "Мира,": KindAddress, "21а": KindAddress,
+		"170000,": KindAddress, "Примерск": KindAddress,
+		"Площадь": KindNone, "поражения": KindNone, "7": KindNone, "2,5": KindNone, "9": KindNone,
+		"135": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
 func TestNameFragmentsAndRepeatedBirth(t *testing.T) {
 	words := doc(0,
 		"Patient: Roe, Annabel DOB: 02/03/1997",
