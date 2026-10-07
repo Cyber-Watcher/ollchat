@@ -118,6 +118,7 @@ func readUnmergeList(file string) ([][2]uint32, error) {
 	defer f.Close()
 	var out [][2]uint32
 	fromCol, toCol := 0, 1
+	header := false
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for line := 1; sc.Scan(); line++ {
@@ -126,7 +127,12 @@ func readUnmergeList(file string) ([][2]uint32, error) {
 			continue
 		}
 		p := strings.Split(sc.Text(), "\t")
-		if _, err := strconv.ParseUint(strings.TrimSpace(p[0]), 10, 32); err != nil && len(out) == 0 {
+		// Заголовок — только первая строка с данными и только один раз. Прежде
+		// заголовком считалась всякая строка, пока не прочитано ни одной пары,
+		// и у файла, где первый столбец не номер (cos, имя), заголовком
+		// выходили и все строки данных: список молча оказывался пустым.
+		if _, err := strconv.ParseUint(strings.TrimSpace(p[0]), 10, 32); err != nil && !header && len(out) == 0 {
+			header = true
 			// Заголовок: ищем в нём столбцы from и to.
 			for i, h := range p {
 				switch strings.TrimSpace(h) {
