@@ -3,6 +3,7 @@ package graph
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -306,5 +307,54 @@ func TestMergesOffIsWhole(t *testing.T) {
 				t.Errorf("связь %d—%d видна только с одного конца", ent.ID, nb.ID)
 			}
 		}
+	}
+}
+
+// Выжившего круга (A→B и B→A после ручной правки журнала) можно склеить
+// с третьим понятием. До 07.10.2026 его новая склейка отбрасывалась молча,
+// как «уже склеенное» (аудит, 4.5).
+func TestCircleSurvivorCanBeMerged(t *testing.T) {
+	g := mergeFixture(t)
+	dir := g.Dir()
+	must(t, g.Close())
+	circle := `{"from":1,"to":2,"at":1}` + "\n" + `{"from":2,"to":1,"at":2}` + "\n"
+	must(t, os.WriteFile(filepath.Join(dir, mergesFile), []byte(circle), 0o644))
+	g2, err := open(dir, Meta{Version: FormatVersion}, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	m := g2.Merges()
+	survivor := m.Resolve(1)
+	if survivor != 1 && survivor != 2 {
+		t.Fatalf("круг разрешился в %d", survivor)
+	}
+	if n, err := m.Add([]MergeRec{{From: survivor, To: 3}}); err != nil || n != 1 {
+		t.Fatalf("склейка выжившего круга с третьим: записано %d, %v", n, err)
+	}
+	for _, id := range []uint32{1, 2} {
+		if got := m.Resolve(id); got != 3 {
+			t.Errorf("понятие %d ведёт к %d, ожидалось 3", id, got)
+		}
+	}
+}
+
+// Слишком длинная строка в журнале склеек пропускается, как битая, а склейки
+// после неё действуют. До 07.10.2026 чтение на ней останавливалось молча,
+// и снятие склеек затем переписывало журнал по усечённому — навсегда.
+func TestMergesSurviveLongLine(t *testing.T) {
+	g := mergeFixture(t)
+	dir := g.Dir()
+	must(t, g.Close())
+	long := `{"from":3,"to":4,"why":"` + strings.Repeat("x", 2<<20) + `"}` + "\n"
+	rec := `{"from":2,"to":1,"at":1}` + "\n"
+	must(t, os.WriteFile(filepath.Join(dir, mergesFile), []byte(long+rec), 0o644))
+	g2, err := open(dir, Meta{Version: FormatVersion}, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g2.Close()
+	if got := g2.Merges().Resolve(2); got != 1 {
+		t.Fatalf("склейка после длинной строки потеряна: 2 ведёт к %d", got)
 	}
 }

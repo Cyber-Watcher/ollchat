@@ -1,8 +1,11 @@
 package graph
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -108,4 +111,44 @@ func (t *journalTail) prepare(f *os.File, path string) error {
 	}
 	t.ready = true
 	return nil
+}
+
+// eachLine зовёт fn на каждую строку из r (без перевода строки) и возвращает,
+// сколько байт прочитано. Строка длиннее max байт пропускается целиком, как
+// битая. Ошибка — только настоящая ошибка чтения.
+//
+// bufio.Scanner на слишком длинной строке останавливался с ErrTooLong,
+// и до 07.10.2026 чтение журналов склеек и запретов этой ошибки не смотрело:
+// все записи после неё молча пропадали, а снятие склеек затем переписывало
+// журнал по усечённому — навсегда (аудит, 4.5). fn не должна хранить срез:
+// он живёт до следующей строки.
+func eachLine(r io.Reader, max int, fn func(line []byte)) (int64, error) {
+	br := bufio.NewReaderSize(r, max)
+	var read int64
+	for {
+		line, err := br.ReadSlice('\n')
+		read += int64(len(line))
+		if err == bufio.ErrBufferFull {
+			for err == bufio.ErrBufferFull {
+				line, err = br.ReadSlice('\n')
+				read += int64(len(line))
+			}
+			if err == io.EOF {
+				return read, nil
+			}
+			if err != nil {
+				return read, err
+			}
+			continue
+		}
+		if len(line) > 0 {
+			fn(bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r")))
+		}
+		if err == io.EOF {
+			return read, nil
+		}
+		if err != nil {
+			return read, err
+		}
+	}
 }

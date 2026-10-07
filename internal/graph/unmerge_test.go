@@ -187,3 +187,23 @@ func TestUndoMergesKeepsMergeAddedAfterOpen(t *testing.T) {
 		t.Fatal("названная склейка не снята")
 	}
 }
+
+// След снятого пишется после подмены журнала: сорвись подмена — в следе не
+// окажется склеек, которые в журнале остались. Сорвался сам след — снятие
+// уже сделано, о чём и говорит ошибка, а снятое цело в копии журнала.
+func TestUndoMergesTraceAfterSwap(t *testing.T) {
+	g, a, b, _, _ := graphWithChain(t)
+	defer g.Close()
+	// След писать некуда: на месте его файла — каталог.
+	must(t, os.MkdirAll(filepath.Join(g.Dir(), undoneMergesFile), 0o755))
+	res, err := g.UndoMerges([][2]uint32{{a, b}}, "проверка", false)
+	if err == nil || !strings.Contains(err.Error(), "склейки сняты") {
+		t.Fatalf("сорванный след: %v", err)
+	}
+	if g.Merges().Resolve(a) != a {
+		t.Fatal("склейка не снята, хотя подмена журнала прошла")
+	}
+	if _, err := os.Stat(res.Backup); err != nil {
+		t.Fatalf("копии прежнего журнала нет: %v", err)
+	}
+}

@@ -195,7 +195,11 @@ func openEntitiesShared(dir string, stemMinLen int, cb func(OpenProgress), stric
 // внезапного выключения, а не повод потерять сорок тысяч сущностей.
 func (e *Entities) load(cb func(OpenProgress)) error {
 	// Запреты читаются до реестра: put применяет их к каждой записи.
-	e.deny = loadAliasDeny(filepath.Dir(e.path))
+	deny, err := loadAliasDeny(filepath.Dir(e.path))
+	if err != nil {
+		return err
+	}
+	e.deny = deny
 	for _, r := range e.extraDeny {
 		if k := Normalize(r.Alias); k != "" && r.ID != 0 {
 			if e.deny == nil {

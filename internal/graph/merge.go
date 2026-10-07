@@ -3,6 +3,7 @@ package graph
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -96,24 +97,21 @@ func readMergeRecs(path string) ([]MergeRec, int64, error) {
 	defer f.Close()
 
 	var recs []MergeRec
-	var size int64
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
-		adv, tok, err := bufio.ScanLines(data, atEOF)
-		size += int64(adv)
-		return adv, tok, err
-	})
-	for sc.Scan() {
-		line := sc.Bytes()
+	// Битая и слишком длинная строки пропускаются, а ошибка чтения — ошибка:
+	// журнал, молча усечённый сбоем диска, снятие склеек переписало бы
+	// по усечённому навсегда (eachLine).
+	size, err := eachLine(f, 1024*1024, func(line []byte) {
 		if len(line) == 0 {
-			continue
+			return
 		}
 		var r MergeRec
 		if json.Unmarshal(line, &r) != nil || r.From == 0 || r.To == 0 || r.From == r.To {
-			continue // оборванная последняя строка — не беда, дозапись
+			return // оборванная последняя строка — не беда, дозапись
 		}
 		recs = append(recs, r)
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", mergesFile, err)
 	}
 	return recs, size, nil
 }
@@ -330,7 +328,11 @@ func (m *Merges) Add(recs []MergeRec) (int, error) {
 		if r.From == 0 || r.To == 0 || r.From == r.To {
 			continue
 		}
-		if _, done := m.to[r.From]; done {
+		// Уже поглощено — значит, ведёт не в себя. Выживший круга (A→B и B→A
+		// в журнале) ведёт в себя, и до 07.10.2026 его новая склейка
+		// отбрасывалась молча, как «уже склеенное»: склеить такое понятие
+		// с третьим было нельзя никогда (аудит, 4.5).
+		if dst, done := m.to[r.From]; done && dst != r.From {
 			continue
 		}
 		// Встречная склейка: To уже поглощён понятием From (прямо или через

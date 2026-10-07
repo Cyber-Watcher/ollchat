@@ -44,35 +44,41 @@ type AliasDeny struct {
 }
 
 // loadAliasDeny читает журнал: номер понятия → нормализованные запрещённые
-// синонимы. Нет файла — нет запретов. Битая строка пропускается, как в реестре.
-func loadAliasDeny(dir string) map[uint32]map[string]bool {
+// синонимы. Нет файла — нет запретов. Битая и слишком длинная строки
+// пропускаются, как в реестре, а ошибка чтения — ошибка: молча усечённый
+// журнал вернул бы ложные синонимы в ключи, и сборка лила бы по ним снова.
+func loadAliasDeny(dir string) (map[uint32]map[string]bool, error) {
 	f, err := os.Open(filepath.Join(dir, aliasDenyFile))
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	defer f.Close()
 	deny := map[uint32]map[string]bool{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
+	_, err = eachLine(f, 1024*1024, func(line []byte) {
 		var r AliasDeny
-		if err := json.Unmarshal(sc.Bytes(), &r); err != nil || r.ID == 0 {
-			continue
+		if err := json.Unmarshal(line, &r); err != nil || r.ID == 0 {
+			return
 		}
 		k := Normalize(r.Alias)
 		if k == "" {
-			continue
+			return
 		}
 		if r.Undo {
 			delete(deny[r.ID], k)
-			continue
+			return
 		}
 		if deny[r.ID] == nil {
 			deny[r.ID] = map[string]bool{}
 		}
 		deny[r.ID][k] = true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", aliasDenyFile, err)
 	}
-	return deny
+	return deny, nil
 }
 
 // allowedAliases убирает из списка запрещённые для этого понятия синонимы.
