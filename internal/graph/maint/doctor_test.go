@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
-	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // Порог пересчёта разметки: судим по понятиям вне тем, а не по перекроенным темам.
@@ -142,40 +141,7 @@ func lineWith(out, prefix string) string {
 // вдобавок складывал «не разобрала модель» со «служебными» в одно «пропущено».
 func TestDoctorCountsAgreeWithStatusAndPending(t *testing.T) {
 	f := newMaintFixture(t)
-	g, err := graph.Open(f.coll, 0, f.cfg.Graph.Rules())
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, err := kb.OpenBase(f.cfg.KB.Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer base.Close()
-	coll, err := base.Open(f.name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ords []uint32
-	_ = coll.EachChunkRef(kb.ChunkFilter{}, func(c kb.ChunkRef) error {
-		ords = append(ords, c.Ord)
-		return nil
-	})
-	// У живой книги: кусок 0 — с понятиями (фикстура), 1 — модель не ответила,
-	// 2 — «служебный» без признака оглавления (забыт чисткой: сборка возьмёт снова).
-	mustMark := func(k graph.ChunkKey, m uint32) {
-		if err := g.Progress().Mark(k, m); err != nil {
-			t.Fatal(err)
-		}
-	}
-	mustMark(graph.ChunkKey{Doc: f.keep, Ord: ords[1]}, graph.MarkSkipped)
-	mustMark(graph.ChunkKey{Doc: f.keep, Ord: ords[2]}, graph.MarkService)
-	// Следы книги, которой нет и в хранилище кусков (коллекцию уплотнили).
-	for ord := uint32(0); ord < 40; ord++ {
-		mustMark(graph.ChunkKey{Doc: 999, Ord: ord}, graph.MarkDone)
-	}
-	if err := g.Close(); err != nil {
-		t.Fatal(err)
-	}
+	f.markMixed(t)
 
 	total := f.keepChunks
 	marked, pending := 3, total-2 // забытый кусок и в «разобрано», и в «осталось»

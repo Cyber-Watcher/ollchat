@@ -1782,7 +1782,13 @@ REPARTITION=no
 ```bash
 ollscripts/graphdoctorcheck.py           # коллекция books по умолчанию
 ollscripts/graphdoctorcheck.py мойкорпус
+ollscripts/graphdoctorcheck.py мойкорпус --kb-dir /data/kb   # база знаний не по умолчанию
 ```
+
+Каталог базы знаний скрипт находит так же, как сам ollchat: `--kb-dir`, иначе `kb.dir`
+из настроек (`-c`, иначе `OLLCHAT_CONFIG`), иначе `~/.local/share/ollchat/kb`. Разобранные
+куски он считает тем же правилом, что доктор, — по кускам живых книг, — но своим путём:
+по `chunks.idx`, `docs.jsonl` и `deleted.ids` коллекции.
 
 Сверка 02.09.2026 сошлась по всем одиннадцати числам: понятия, связи, упоминания,
 разобранные куски и их разбивка на «с понятиями / пусто / пропущено», темы и темы

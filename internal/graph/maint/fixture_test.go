@@ -33,6 +33,7 @@ type maintFixture struct {
 	keep, gone uint32 // номера живой и удалённой книг
 	keepChunks int
 	goneChunks int
+	keepOrds   []uint32 // номера кусков живой книги
 }
 
 // fixtureText — текст книги из lines строк; куска хватает примерно на
@@ -109,6 +110,7 @@ func newMaintFixture(t *testing.T) *maintFixture {
 		t.Fatal(err)
 	}
 	f.keepChunks, f.goneChunks = len(keepOrds), len(goneOrds)
+	f.keepOrds = keepOrds
 	// Мёртвых отметок должно быть больше, чем живых кусков: иначе прежний
 	// счёт «разобрано» по всем отметкам не дорастал бы до «осталось 0».
 	if f.keepChunks < 4 || f.goneChunks <= f.keepChunks {
@@ -177,6 +179,32 @@ func newMaintFixture(t *testing.T) *maintFixture {
 		t.Fatalf("удалённых книг %d, ожидалась 1", len(coll.DeletedBooks()))
 	}
 	return f
+}
+
+// markMixed добавляет отметки всех видов, на которых расходились счёты:
+// у живой книги кусок 1 модель не разобрала, кусок 2 — «служебный» без
+// признака оглавления (забыт чисткой, сборка возьмёт его снова); и 40 отметок
+// книги, которой нет даже в хранилище кусков (коллекцию уплотнили).
+// После этого у живой книги разобрано 3 куска, а сборка возьмёт keepChunks-2.
+func (f *maintFixture) markMixed(t *testing.T) {
+	t.Helper()
+	g, err := graph.Open(f.coll, 0, f.cfg.Graph.Rules())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := func(k graph.ChunkKey, m uint32) {
+		if err := g.Progress().Mark(k, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mark(graph.ChunkKey{Doc: f.keep, Ord: f.keepOrds[1]}, graph.MarkSkipped)
+	mark(graph.ChunkKey{Doc: f.keep, Ord: f.keepOrds[2]}, graph.MarkService)
+	for ord := uint32(0); ord < 40; ord++ {
+		mark(graph.ChunkKey{Doc: 999, Ord: ord}, graph.MarkDone)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // dirHash — отпечаток каталога: имена и содержимое всех файлов. Время

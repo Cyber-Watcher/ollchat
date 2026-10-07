@@ -195,6 +195,7 @@ curl -s 'http://СЕРВЕР:8888/search?q=golang&format=json' | head -c 200
 ```bash
 ollscripts/graphdoctorcheck.py           # коллекция books
 ollscripts/graphdoctorcheck.py мойкорпус
+ollscripts/graphdoctorcheck.py мойкорпус --kb-dir /data/kb   # каталог базы знаний; без ключа — kb.dir из настроек ollchat
 ```
 
 Сверка 02.09.2026 сошлась по всем одиннадцати числам. Подробности и оговорки —
