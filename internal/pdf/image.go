@@ -262,8 +262,10 @@ func (d *Document) rasterize(s *Stream, data []byte) (image.Image, error) {
 				return float64(row[i])
 			}
 		case 16:
+			// Оба байта, старший первым: один старший байт, делённый на
+			// 65535, делал любую такую картинку почти чёрной.
 			if 2*i+1 < len(row) {
-				return float64(row[2*i])
+				return float64(uint16(row[2*i])<<8 | uint16(row[2*i+1]))
 			}
 		case 1, 2, 4:
 			bit := i * bpc
