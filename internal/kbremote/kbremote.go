@@ -123,8 +123,7 @@ func (c *Client) Source(name string) (kb.Source, error) {
 	for _, ci := range list {
 		if ci.Name == want {
 			s := &source{cl: c, name: ci.Name}
-			s.apply(ci)
-			if err := s.loadBooks(context.Background()); err != nil {
+			if err := s.refresh(context.Background(), ci); err != nil {
 				return nil, err
 			}
 			return s, nil
@@ -226,24 +225,19 @@ func (s *source) afterCall(ctx context.Context, gen, note string) {
 	}
 	for _, ci := range list {
 		if ci.Name == s.name {
-			s.apply(ci)
-			_ = s.loadBooks(ctx)
+			_ = s.refresh(ctx, ci) // не вышло — повторим на следующем ответе
 			return
 		}
 	}
 }
 
-func (s *source) apply(ci collectionInfo) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.gen = ci.Generation
-	s.stats = kb.Stats{
-		Books: ci.Books, Indexed: ci.Books, Chunks: ci.Chunks,
-		Vectors: ci.Vectors, VecModel: ci.VecModel, VecDim: ci.VecDim,
-	}
-}
-
-func (s *source) loadBooks(ctx context.Context) error {
+// refresh читает реестр книг и только после него принимает новое поколение:
+// поколение, состав и книги меняются вместе.
+//
+// Раньше поколение ставилось до загрузки книг. Сбой загрузки оставлял старый
+// реестр, а следующий ответ с тем же поколением считался уже учтённым —
+// и книги не перечитывались до следующей доливки на сервере.
+func (s *source) refresh(ctx context.Context, ci collectionInfo) error {
 	var resp struct {
 		Books []kb.BookRec `json:"books"`
 	}
@@ -251,8 +245,13 @@ func (s *source) loadBooks(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gen = ci.Generation
+	s.stats = kb.Stats{
+		Books: ci.Books, Indexed: ci.Books, Chunks: ci.Chunks,
+		Vectors: ci.Vectors, VecModel: ci.VecModel, VecDim: ci.VecDim,
+	}
 	s.books = resp.Books
-	s.mu.Unlock()
 	return nil
 }
 
@@ -325,7 +324,7 @@ func (c *Client) do(req *http.Request, out any) error {
 	return nil
 }
 
-// Формы запросов и ответов повторяют серверные (`ollmcp/dataapi.go`).
+// Формы запросов и ответов повторяют серверные (`internal/kbserve/kbserve.go`).
 // Дублирование намеренное: связать их общим пакетом значило бы, что клиент
 // и служба обязаны обновляться вместе, а они живут на разных машинах и
 // обновляются порознь.

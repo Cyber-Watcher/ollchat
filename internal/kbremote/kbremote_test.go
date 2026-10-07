@@ -31,6 +31,8 @@ type fakeServer struct {
 	lastReq  searchRequest
 	requests int
 	fail     int // код ответа вместо выдачи; 0 — отвечать нормально
+
+	booksFail int // сколько следующих запросов реестра книг отклонить
 }
 
 func (f *fakeServer) handler() http.Handler {
@@ -57,6 +59,11 @@ func (f *fakeServer) handler() http.Handler {
 	mux.HandleFunc("/api/v1/books", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(r) {
 			http.Error(w, "нужен ключ доступа", http.StatusUnauthorized)
+			return
+		}
+		if f.booksFail > 0 {
+			f.booksFail--
+			http.Error(w, "служба перезапускается", http.StatusServiceUnavailable)
 			return
 		}
 		recs := make([]kb.BookRec, 0, f.books)
@@ -199,6 +206,32 @@ func TestGenerationChangeRefreshesStats(t *testing.T) {
 	}
 	if len(src.Books()) != 5 {
 		t.Errorf("реестр книг не обновился: %d", len(src.Books()))
+	}
+}
+
+// Реестр книг не прочитался — поколение не принимается, и следующий ответ
+// перечитывает состав снова. Прежде поколение ставилось до загрузки книг,
+// и после одного сбоя реестр оставался вчерашним до следующей доливки.
+func TestGenerationKeptUntilBooksLoaded(t *testing.T) {
+	f := &fakeServer{gen: "g1", books: 2, chunks: 100}
+	cl, _ := newFake(t, f)
+	src, err := cl.Source("books")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.books, f.chunks, f.gen, f.booksFail = 5, 250, "g2", 1
+	if _, err := src.SearchWith(context.Background(), "вопрос", kb.DefaultSearchOpts(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.SearchWith(context.Background(), "вопрос", kb.DefaultSearchOpts(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(src.Books()); n != 5 {
+		t.Errorf("реестр книг после сбоя загрузки так и не обновился: %d книг, ожидалось 5", n)
+	}
+	if st := src.Stats(); st.Indexed != 5 || st.Chunks != 250 {
+		t.Errorf("состав: %+v", st)
 	}
 }
 
