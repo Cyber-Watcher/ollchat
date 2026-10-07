@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 )
 
@@ -95,6 +96,14 @@ type parser struct {
 	pos   int
 	res   resolver
 	depth int // текущая вложенность составных объектов
+
+	// full — весь файл, когда b — лишь участок одного объекта (parseAt):
+	// данные потока по /Length вправе уходить за конец участка, остальное нет.
+	full []byte
+	// ends — смещения всех «endstream» во всём файле, когда разбирается он
+	// (Document.ends); nil — конец потока ищется перебором, как в теле
+	// объектного потока.
+	ends []int
 }
 
 func newParser(b []byte, res resolver) *parser { return &parser{b: b, res: res} }
@@ -408,6 +417,32 @@ func hexVal(c byte) (byte, bool) {
 	return 0, false
 }
 
+// structural сообщает, что на месте стоит ключевое слово строения файла.
+// Внутри массива или словаря его не бывает: встретилось — значит, скобка
+// не закрыта, и составной объект кончился. Без этого незакрытый массив
+// читал остаток файла, захватывая все объекты после себя; у файла из тысяч
+// таких объектов каждый разбирался до конца файла, и 116 КБ превращались
+// в 5 ГБ разобранного.
+func (p *parser) structural() bool {
+	if p.pos >= len(p.b) {
+		return false
+	}
+	switch p.b[p.pos] {
+	case 'o', 'e', 's', 't', 'x':
+	default:
+		return false
+	}
+	end := p.pos
+	for end < len(p.b) && end-p.pos < 10 && isRegular(p.b[end]) {
+		end++
+	}
+	switch string(p.b[p.pos:end]) {
+	case "obj", "endobj", "stream", "endstream", "trailer", "xref", "startxref":
+		return true
+	}
+	return false
+}
+
 func (p *parser) array() (Array, error) {
 	p.pos++ // '['
 	if p.depth >= maxDepth {
@@ -418,6 +453,10 @@ func (p *parser) array() (Array, error) {
 
 	var out Array
 	for {
+		p.skipSpace()
+		if p.structural() {
+			return out, nil // скобка не закрыта: дальше уже другой объект
+		}
 		obj, op, isOp, err := p.token()
 		if errors.Is(err, errEndCollection) {
 			return out, nil
@@ -463,6 +502,9 @@ func (p *parser) dict() (Dict, error) {
 			}
 			return out, nil
 		}
+		if p.structural() {
+			return out, nil // словарь не закрыт, см. structural
+		}
 		if p.b[p.pos] != '/' {
 			// Ключ обязан быть именем; если это не так, файл битый — пропускаем
 			// один элемент и пробуем дальше.
@@ -473,6 +515,10 @@ func (p *parser) dict() (Dict, error) {
 		}
 		key, err := p.name()
 		if err != nil {
+			return out, nil
+		}
+		p.skipSpace()
+		if p.structural() {
 			return out, nil
 		}
 		val, op, isOp, err := p.token()
@@ -498,12 +544,18 @@ func (p *parser) maybeStream(d Dict) (Object, string, bool, error) {
 		p.pos = save
 		return d, "", false, nil
 	}
+	// Данные потока вправе уходить за участок объекта (см. parseAt): внутри
+	// них бывает что угодно, в том числе чужие заголовки «N G obj».
+	b := p.b
+	if p.full != nil {
+		b = p.full
+	}
 	p.pos += 6
 	// После ключевого слова обязателен перевод строки.
-	if p.pos < len(p.b) && p.b[p.pos] == '\r' {
+	if p.pos < len(b) && b[p.pos] == '\r' {
 		p.pos++
 	}
-	if p.pos < len(p.b) && p.b[p.pos] == '\n' {
+	if p.pos < len(b) && b[p.pos] == '\n' {
 		p.pos++
 	}
 	start := p.pos
@@ -518,31 +570,46 @@ func (p *parser) maybeStream(d Dict) (Object, string, bool, error) {
 	}
 
 	end := -1
-	if length >= 0 && start+length <= len(p.b) {
-		// Доверяем /Length, только если сразу за данными действительно endstream.
-		tail := p.b[start+length:]
-		if k := indexKeyword(tail, "endstream", 4); k >= 0 && k <= 4 {
+	if length >= 0 && start+length <= len(b) {
+		// Доверяем /Length, только если сразу за данными действительно endstream:
+		// он обязан начаться в первых четырёх байтах хвоста, дальше не смотрим.
+		tail := b[start+length:]
+		if bytes.Contains(tail[:min(len(tail), 4+len("endstream"))], []byte("endstream")) {
 			end = start + length
 		}
 	}
 	if end < 0 {
-		k := indexKeyword(p.b[start:], "endstream", len(p.b))
+		k := p.nextEndstream(b, start)
 		if k < 0 {
-			end = len(p.b)
+			end = len(b)
 		} else {
 			end = start + k
 			// Отрезаем перевод строки, добавленный перед endstream.
-			for end > start && (p.b[end-1] == '\n' || p.b[end-1] == '\r') {
+			for end > start && (b[end-1] == '\n' || b[end-1] == '\r') {
 				end--
 			}
 		}
 	}
-	raw := p.b[start:end]
+	raw := b[start:end]
 	p.pos = end
-	if k := indexKeyword(p.b[p.pos:], "endstream", len(p.b)); k >= 0 {
+	if k := p.nextEndstream(b, p.pos); k >= 0 {
 		p.pos += k + len("endstream")
 	}
 	return &Stream{Dict: d, Raw: raw}, "", false, nil
+}
+
+// nextEndstream — сколько байт от from до ближайшего «endstream» в b; −1 —
+// дальше его нет. По всему файлу ищется двоичным поиском в заранее собранном
+// списке: перебор остатка файла на каждый поток без конца давал квадрат —
+// тысячи потоков с неверной длиной без единого «endstream» после них.
+func (p *parser) nextEndstream(b []byte, from int) int {
+	if p.ends == nil {
+		return indexKeyword(b[from:], "endstream", len(b))
+	}
+	if i := sort.SearchInts(p.ends, from); i < len(p.ends) {
+		return p.ends[i] - from
+	}
+	return -1
 }
 
 // indexKeyword ищет ключевое слово: сначала в пределах limit байт от начала,

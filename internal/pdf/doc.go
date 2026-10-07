@@ -28,6 +28,14 @@ type Document struct {
 	loading map[int]bool // защита от циклических ссылок
 	trailer Dict
 
+	// heads — смещения всех заголовков «N G obj» по возрастанию, включая
+	// перекрытые поздними определениями; ends — смещения всех «endstream».
+	// По ним разбор одного объекта не уходит за следующий (parseAt), а конец
+	// потока с неверной длиной ищется двоичным поиском, а не перебором
+	// остатка файла на каждый поток.
+	heads []int
+	ends  []int
+
 	// crypt — расшифровка содержимого. Пусто у обычных документов;
 	// у зашифрованных с пустым паролем пользователя — см. crypt.go.
 	crypt *crypt
@@ -83,9 +91,19 @@ func IsPDF(data []byte) bool {
 	return bytes.Contains(head, []byte("%PDF-"))
 }
 
-// scanObjects проходит по файлу и запоминает смещение каждого «N G obj».
+// scanObjects проходит по файлу и запоминает смещение каждого «N G obj»
+// и каждого «endstream».
 func (d *Document) scanObjects() {
 	b := d.data
+	d.ends = []int{} // не nil: пустой список тоже ответ — «endstream» в файле нет
+	for i := 0; ; {
+		k := bytes.Index(b[i:], []byte("endstream"))
+		if k < 0 {
+			break
+		}
+		d.ends = append(d.ends, i+k)
+		i += k + len("endstream")
+	}
 	for i := 0; i+3 <= len(b); {
 		k := bytes.Index(b[i:], []byte("obj"))
 		if k < 0 {
@@ -132,7 +150,15 @@ func (d *Document) scanObjects() {
 			continue
 		}
 		d.offsets[num] = numStart
+		d.heads = append(d.heads, numStart)
 	}
+}
+
+// fileParser — разборщик всего файла, знающий, где в нём «endstream».
+func (d *Document) fileParser() *parser {
+	p := newParser(d.data, d)
+	p.ends = d.ends
+	return p
 }
 
 func atoi(b []byte) int {
@@ -167,7 +193,7 @@ func (d *Document) readTrailer() {
 			break
 		}
 		pos = k
-		p := newParser(d.data, d)
+		p := d.fileParser()
 		p.pos = k + len("trailer")
 		if obj, err := p.object(); err == nil {
 			if dict, ok := obj.(Dict); ok {
@@ -330,8 +356,16 @@ func (d *Document) object(num int) Object {
 }
 
 // parseAt разбирает объект, заголовок которого начинается со смещения off.
+//
+// Разбор не заходит за заголовок следующего объекта: незакрытая строка,
+// массив или словарь иначе читали остаток файла, и каждый из тысяч таких
+// объектов разбирался до конца — квадрат по времени и по памяти. Данные
+// потока за эту границу заходить вправе (см. maybeStream).
 func (d *Document) parseAt(off int) Object {
-	p := newParser(d.data, d)
+	p := d.fileParser()
+	if i := sort.SearchInts(d.heads, off+1); i < len(d.heads) {
+		p.b, p.full = d.data[:d.heads[i]], d.data
+	}
 	p.pos = off
 	// Пропускаем «N G obj».
 	p.skipSpace()

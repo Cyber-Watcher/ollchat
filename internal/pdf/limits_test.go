@@ -343,6 +343,99 @@ func TestFormFanOutBounded(t *testing.T) {
 	})
 }
 
+// manyObjects — файл из n объектов с телом body (номер подставляется в %d)
+// и трейлером в конце.
+func manyObjects(n int, body string) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "%d 0 obj\n", i)
+		fmt.Fprintf(&b, body, i)
+		b.WriteString("\n")
+	}
+	b.WriteString("trailer\n<< /Root 1 0 R >>\n")
+	return b.Bytes()
+}
+
+// Незакрытый массив, строка или словарь не съедают остаток файла: прежде
+// каждый из тысяч таких объектов разбирался до конца файла, и сотня
+// килобайт превращалась в гигабайты разобранного. То же — тысячи трейлеров
+// с незакрытым словарём и тысячи потоков с неверной длиной без единого
+// «endstream» после них: на каждый остаток файла перебирался заново.
+func TestUnclosedObjectsStayLocal(t *testing.T) {
+	cases := []struct {
+		name  string
+		data  []byte
+		check func(d *Document) string
+	}{
+		{"массивы", manyObjects(20000, "[ %d 2 3 4 5 6 7 8 9 10"), func(d *Document) string {
+			if a, ok := d.object(7).(Array); !ok || len(a) != 10 || a[0] != int64(7) {
+				return fmt.Sprintf("объект 7: %#v", d.object(7))
+			}
+			return ""
+		}},
+		{"строки", manyObjects(20000, "(незакрытая строка %d"), func(d *Document) string {
+			if s, ok := d.object(7).(String); !ok || len(s) > 60 {
+				return fmt.Sprintf("объект 7: строка %d байт", len(s))
+			}
+			return ""
+		}},
+		{"словари", manyObjects(20000, "<< /Type /Page /N %d /Kids [1 0 R"), func(d *Document) string {
+			if dict, ok := d.object(7).(Dict); !ok || dict["N"] != int64(7) {
+				return fmt.Sprintf("объект 7: %#v", d.object(7))
+			}
+			return ""
+		}},
+		{"трейлеры", append(append([]byte("%PDF-1.7\n"), bytes.Repeat([]byte("trailer\n<< /Info [ "), 30000)...),
+			"\ntrailer\n<< /Root 1 0 R >>\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"...), func(d *Document) string {
+			if d.trailer["Root"] == nil {
+				return "трейлер не найден"
+			}
+			return ""
+		}},
+		{"потоки без конца", manyObjects(50000, "<< /Length 999999999 /N %d >>\nstream\nданные"), func(d *Document) string {
+			if s, ok := d.object(7).(*Stream); !ok || s.Dict["N"] != int64(7) {
+				return fmt.Sprintf("объект 7: %#v", d.object(7))
+			}
+			return ""
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bounded(t, 10*time.Second, func() {
+				d, err := Open(c.data)
+				if err != nil {
+					t.Errorf("открытие: %v", err)
+					return
+				}
+				if msg := c.check(d); msg != "" {
+					t.Error(msg)
+				}
+			})
+		})
+	}
+}
+
+// Объект, за которым следующий заголовок, разбирается как прежде, а поток
+// по /Length вправе уходить за чужой заголовок внутри своих данных.
+func TestObjectRegionKeepsStreams(t *testing.T) {
+	inner := "1 0 obj\n(ложный заголовок внутри данных)\nendobj\n"
+	doc := build(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		stream("", "BT /F1 12 Tf 72 720 Td (text) Tj ET\n% "+inner),
+		helvetica)
+	d, err := Open(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := d.object(4).(*Stream)
+	if !ok || !bytes.Contains(s.Raw, []byte("ложный заголовок")) {
+		t.Fatalf("поток обрезан по чужому заголовку: %#v", d.object(4))
+	}
+}
+
 // /N объектного потока берётся из файла: до правки под него заранее
 // выделялась память — полтора терабайта на файл в килобайт.
 func TestObjectStreamHugeCount(t *testing.T) {
