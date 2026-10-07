@@ -659,7 +659,9 @@ func parseFlagsNoParse() *cliFlags {
 	f.askColl = flag.String("kb-use", "", "с --ask: коллекция базы знаний")
 
 	// Служба знаний: тот же бинарь раздаёт собранную библиотеку по сети.
-	f.serveAddr = flag.String("serve", "", "поднять службу знаний: --serve 0.0.0.0:8377")
+	f.serveAddr = flag.String("serve", "",
+		"поднять службу знаний: --serve 127.0.0.1:8377; сетевой адрес (--serve 0.0.0.0:8377) —\n"+
+			"только с ключом в OLLMCP_TOKEN, без него служба на таком адресе не стартует")
 	f.serveMCP = flag.Bool("mcp", false, "с --serve: отдавать и протокол MCP на том же порту")
 
 	// Числа отбора: те же, что в конфиге и в командах /graph tune, /kb tune.
