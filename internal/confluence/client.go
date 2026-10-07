@@ -25,14 +25,19 @@ import (
 // Client — доступ к одному серверу Confluence.
 type Client struct {
 	BaseURL string
-	// Token берётся при каждом запросе: токен могли сменить на лету. Ошибка
-	// объясняет, почему токена нет (Resolver).
+	// Token добывает токен; ошибка объясняет, почему его нет (Resolver).
+	// Зовётся один раз на клиента и ещё раз на отказ 401 — см. token.
 	Token func() (string, error)
 	HTTP  *http.Client
+
+	mu  sync.Mutex
+	tok string
 }
 
 // New собирает клиента. Токен запрашивается функцией, а не хранится строкой:
 // он может прийти командой посреди сеанса и не должен переживать её отмену.
+// Клиент живёт один вызов инструмента, так что смена токена между вызовами
+// подхватывается.
 func New(base string, token func() (string, error), timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -202,21 +207,33 @@ func (c *Client) Get(ctx context.Context, page string, withChildren bool) (*Page
 	return p, nil
 }
 
+// token — токен на время жизни клиента; fresh — спросить источник заново.
+//
+// Раньше добытчик звался на каждый HTTP-запрос, а с token_cmd это `sh -c`
+// с хранилищем паролей — три запуска на страницу (текст, вложения, дети)
+// и больше с перелистыванием списков. Теперь один на клиента и ещё один,
+// если сервер ответил 401: токен мог истечь или смениться у источника.
+func (c *Client) token(fresh bool) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tok != "" && !fresh {
+		return c.tok, nil
+	}
+	if c.Token == nil {
+		return "", nil
+	}
+	t, err := c.Token()
+	c.tok = strings.TrimSpace(t)
+	return c.tok, err
+}
+
 // get выполняет запрос и разбирает ответ.
 //
 // Токен подставляется заголовком и **никогда не печатается**: ни в ошибках,
 // ни в отладке. Ошибка называет код ответа и путь, но не то, чем мы
 // представились.
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
-	if err != nil {
-		return err
-	}
-	token, terr := "", error(nil)
-	if c.Token != nil {
-		token, terr = c.Token()
-		token = strings.TrimSpace(token)
-	}
+	token, terr := c.token(false)
 	if token == "" {
 		if terr != nil {
 			// Причина — словами источника: «chmod 600» от файла с открытыми
@@ -227,32 +244,54 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("токен Confluence не задан: команда /confluencetoken, " +
 			"файл token_file или переменная token_env")
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("Confluence не отвечает: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	status, body, err := c.fetch(ctx, path, token)
 	if err != nil {
 		return err
 	}
-	switch resp.StatusCode {
+	if status == http.StatusUnauthorized {
+		// Тот же токен повторять незачем: заново — только если источник
+		// отдал другой.
+		if again, _ := c.token(true); again != "" && again != token {
+			if status, body, err = c.fetch(ctx, path, again); err != nil {
+				return err
+			}
+		}
+	}
+	switch status {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("Confluence не пустил (%d): проверьте токен и права на пространство",
-			resp.StatusCode)
+			status)
 	case http.StatusNotFound:
 		// Confluence отвечает 404 и на «нет такой страницы», и на «нет прав
 		// её видеть»: существование чужой страницы он не подтверждает.
 		return fmt.Errorf("страница не найдена — её нет либо она не видна этому токену")
 	default:
-		return fmt.Errorf("Confluence ответил %d на %s", resp.StatusCode, safePath(path))
+		return fmt.Errorf("Confluence ответил %d на %s", status, safePath(path))
 	}
 	return json.Unmarshal(body, out)
+}
+
+// fetch — один запрос с данным токеном: код ответа и тело.
+func (c *Client) fetch(ctx context.Context, path, token string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("Confluence не отвечает: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, body, nil
 }
 
 // safePath убирает из пути возможные параметры запроса: в сообщение об ошибке

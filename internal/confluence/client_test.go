@@ -191,3 +191,61 @@ func TestResolverSurfacesFileError(t *testing.T) {
 		t.Fatalf("запасной источник не сработал: %q, %v", got, err)
 	}
 }
+
+// token_cmd запускается один раз на клиента, а не на каждый HTTP-запрос:
+// страница с вложениями и детьми — три запроса, и прежде три запуска `sh -c`.
+func TestTokenCmdRunsOncePerClient(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "запуски")
+	cmd := "echo x >> '" + counter + "'; printf секрет"
+	srv, _ := pageServer(t, http.StatusOK)
+	c := New(srv.URL, Resolver(nil, "", cmd, ""), 5*time.Second)
+	if _, err := c.Get(context.Background(), "123", true); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "x"); n != 1 {
+		t.Errorf("команда за токеном запущена %d раз на одну страницу", n)
+	}
+}
+
+// На 401 токен спрашивается у источника заново, один раз: он мог истечь
+// или смениться. Тот же токен повторно не шлётся.
+func TestTokenRefreshedOnUnauthorized(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Header.Get("Authorization") != "Bearer новый" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"123","title":"Т","body":{"storage":{"value":"<p>ок</p>"}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	asked := 0
+	rotating := func() (string, error) {
+		asked++
+		if asked == 1 {
+			return "старый", nil
+		}
+		return "новый", nil
+	}
+	if _, err := New(srv.URL, rotating, time.Second).Get(context.Background(), "123", false); err != nil {
+		t.Fatalf("сменившийся токен не подхвачен: %v", err)
+	}
+	if asked != 2 {
+		t.Errorf("источник спрошен %d раз, ожидалось 2", asked)
+	}
+
+	hits = 0
+	_, err := New(srv.URL, fixedToken("старый"), time.Second).Get(context.Background(), "123", false)
+	if err == nil || !strings.Contains(err.Error(), "не пустил") {
+		t.Fatalf("неверный токен должен давать отказ: %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("тот же токен отправлен повторно: запросов %d", hits)
+	}
+}
