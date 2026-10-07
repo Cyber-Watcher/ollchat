@@ -22,3 +22,16 @@ func TestConfigPathOrder(t *testing.T) {
 		t.Errorf("тильда в переменной не раскрыта: %q", got)
 	}
 }
+
+// Неизвестные ключи конфига печатаются при запуске с путём к файлу:
+// иначе опечатка молча оставляла бы умолчание.
+func TestConfigWarningsPrinted(t *testing.T) {
+	cfg := config.Default()
+	cfg.Path = "/home/i/.config/ollchat/config.toml"
+	cfg.Warnings = []string{"неизвестный ключ permissions.deny_list не действует"}
+	var buf strings.Builder
+	warnConfig(&buf, cfg)
+	if s := buf.String(); !strings.Contains(s, cfg.Path) || !strings.Contains(s, "permissions.deny_list") {
+		t.Errorf("предупреждение напечатано не так: %q", s)
+	}
+}

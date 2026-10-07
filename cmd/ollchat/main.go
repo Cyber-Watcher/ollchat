@@ -13,6 +13,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/graphex/probes"
 	kmaint "github.com/Cyber-Watcher/ollchat/internal/kb/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1154,6 +1155,18 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 	return false, nil
 }
 
+// warnConfig печатает замечания к файлу настроек — неизвестные ключи.
+//
+// Печатается при каждом запуске и до всякой работы, в том числе до
+// интерфейса: опечатка в имени ключа молча оставляет умолчание, и человек
+// иначе так и не узнал бы, что его настройка ни на что не влияет. В stderr,
+// чтобы не портить вывод команд, который читают скрипты.
+func warnConfig(w io.Writer, cfg *config.Config) {
+	for _, msg := range cfg.Warnings {
+		fmt.Fprintf(w, "ollchat: предупреждение: %s: %s\n", cfg.Path, msg)
+	}
+}
+
 // parseEvery разбирает срок между кругами догонщика векторов.
 //
 // Пустая строка — «как по умолчанию», а не ноль: ноль здесь означал бы
@@ -1203,6 +1216,7 @@ func run() error {
 	if !exists {
 		return fmt.Errorf("файл настроек %s не найден.\nСоздайте его командой: ollchat --init-config", path)
 	}
+	warnConfig(os.Stderr, cfg)
 
 	if *f.stepsFile != "" {
 		cfg.Log.StepsFile = *f.stepsFile
