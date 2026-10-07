@@ -224,14 +224,7 @@ func (g *Graph) Summarize(ctx context.Context, ex Extractor, c *Communities,
 		wg.Add(1)
 		go worker()
 	}
-	for _, i := range work {
-		if ctx.Err() != nil {
-			break
-		}
-		jobs <- i
-	}
-	close(jobs)
-	wg.Wait()
+	dispatch(ctx, jobs, work, &wg)
 
 	if ctx.Err() != nil {
 		// Обрыв не повод потерять сделанное: пишем и уходим.
@@ -239,6 +232,35 @@ func (g *Graph) Summarize(ctx context.Context, ex Extractor, c *Communities,
 		return ctx.Err()
 	}
 	return save()
+}
+
+// dispatch раздаёт задания рабочим и ждёт их всех.
+//
+// Канал без буфера, и отправка в нём ждёт читателя. Рабочие же уходят
+// раньше конца раздачи — по отмене или после неудачной записи на диск, —
+// и до 07.10.2026 раздатчик, оставшийся без читателей, висел на отправке
+// вечно: Ctrl+C в --graph-summaries вешал процесс (повторные нажатия глотает
+// NotifyContext), а ленивое описание тем в диалоге и службе оставляло вечную
+// горутину с экземпляром графа на сотни мегабайт (аудит, №12). Теперь
+// раздача прекращается, как только отменён контекст или рабочих не осталось.
+func dispatch(ctx context.Context, jobs chan<- int, work []int, wg *sync.WaitGroup) {
+	gone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(gone)
+	}()
+send:
+	for _, i := range work {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			break send
+		case <-gone:
+			break send
+		}
+	}
+	close(jobs)
+	<-gone
 }
 
 // DescribeTopics описывает темы с данными номерами, у которых описания ещё
