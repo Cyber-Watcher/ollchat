@@ -1,9 +1,13 @@
 package graph
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Запрещённый синоним перестаёт быть ключом, исчезает из карточки, не
@@ -130,5 +134,47 @@ func TestSharedAliasIsNotAKey(t *testing.T) {
 	defer g3.Close()
 	if _, ok := g3.Entities().Lookup("api"); !ok {
 		t.Fatal("с выключенным правилом синоним должен остаться ключом")
+	}
+}
+
+// Запрет пишется под замком сборки: признак неживого процесса команда
+// подбирает и снимает за собой; сухой прогон замка не берёт. До 07.10.2026
+// замок только проверялся, и сборка, открывшая реестр между проверкой
+// и записью, запрета не видела (аудит, №9).
+func TestDenyAliasesTakesBuildLock(t *testing.T) {
+	g, _ := graph(t)
+	dir := g.Dir()
+	id, _, _ := g.Entities().Add("Kubernetes", TypeTech, "K8s", "cluster")
+	must(t, g.Entities().SaveCounters())
+	must(t, g.Close())
+	lock := filepath.Join(dir, lockFile)
+	stale := fmt.Sprintf("pid %d, начато %s\n", findDeadPID(t), time.Now().Format(time.RFC3339))
+	must(t, os.WriteFile(lock, []byte(stale), 0o644))
+
+	recs := []AliasDeny{{ID: id, Alias: "cluster", Why: "кластеры Kafka и Redis"}}
+	if _, err := DenyAliases(dir, recs, true); err != nil {
+		t.Fatalf("сухой прогон: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("сухой прогон тронул признак сборки")
+	}
+	if _, err := DenyAliases(dir, recs, false); err != nil {
+		t.Fatalf("запрет: %v", err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatal("запрет записан без замка сборки: брошенный признак остался на месте")
+	}
+	// Живая сборка — отказ, и журнал запретов не тронут.
+	build, err := Open(filepath.Dir(dir), 1000, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer build.Close()
+	must(t, build.Lock())
+	if _, err := DenyAliases(dir, []AliasDeny{{ID: id, Alias: "K8s"}}, false); !errors.Is(err, ErrLocked) {
+		t.Fatalf("запрет под идущей сборкой: %v, ожидался ErrLocked", err)
+	}
+	if deny := loadAliasDeny(dir); deny[id]["k8s"] {
+		t.Fatal("запрет записан под идущей сборкой")
 	}
 }

@@ -33,7 +33,7 @@ import (
 // **Как пишется.** Каждый файл — во временный рядом, старый переименовывается
 // в .bak-<время>, новый встаёт на место; каталог синхронизируется. Граф
 // при этом обязан быть закрыт, а замок сборки — свободен: журналы читает
-// и дописывает сама сборка.
+// и дописывает сама сборка. Замок чистка берёт себе на всё время перезаписи.
 
 // ForgetStats — что изменилось.
 type ForgetStats struct {
@@ -71,10 +71,22 @@ func ForgetChunksAs(dir string, drop func(ChunkKey) bool, mark uint32, dry bool)
 	if mark != MarkService && mark != MarkSkipped {
 		return st, fmt.Errorf("забытому куску ставится отметка «служебный» или «пропущен», а не %d", mark)
 	}
-	if _, err := os.Stat(filepath.Join(dir, lockFile)); err == nil {
-		if owner := readLock(filepath.Join(dir, lockFile)); owner.alive() {
-			return st, &LockedError{Path: filepath.Join(dir, lockFile), PID: owner.PID, Since: owner.Since}
+	if dry {
+		// Сухой прогон ничего не пишет, но числа по журналам, которые прямо
+		// сейчас дописывает сборка, врали бы.
+		if err := buildRunning(dir); err != nil {
+			return st, err
 		}
+	} else {
+		// Замок сборки — на всю перезапись, а не проверка в начале: сборка,
+		// начавшая открывать граф после проверки, держала бы дескрипторы
+		// журналов, которые здесь уйдут в «.bak-…», и писала бы в копии
+		// (аудит 07.10.2026, №9).
+		release, err := holdBuildLock(dir)
+		if err != nil {
+			return st, err
+		}
+		defer release()
 	}
 	stamp := time.Now().Format("20060102-150405")
 	touched := map[uint64]bool{}

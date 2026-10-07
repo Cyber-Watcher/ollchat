@@ -103,16 +103,25 @@ type DenyEffect struct {
 }
 
 // DenyAliases дописывает запреты в журнал графа в каталоге dir. dry — только
-// показать последствия. Граф обязан быть закрыт, сборка — не идти.
+// показать последствия. Граф обязан быть закрыт, сборка — не идти; замок
+// сборки запрет занимает сам на всё время работы.
 //
 // Опечатка не проходит молча: понятия с таким номером нет или у него нет
 // такого синонима — ошибка до любой записи.
 func DenyAliases(dir string, recs []AliasDeny, dry bool) ([]DenyEffect, error) {
-	lock := filepath.Join(dir, lockFile)
-	if _, err := os.Stat(lock); err == nil {
-		if owner := readLock(lock); owner.alive() {
-			return nil, &LockedError{Path: lock, PID: owner.PID, Since: owner.Since}
+	if dry {
+		if err := buildRunning(dir); err != nil {
+			return nil, err
 		}
+	} else {
+		// Замок сборки — на всё время работы, а не проверка в начале: сборка,
+		// открывшая реестр между проверкой и записью запрета, не увидела бы
+		// его и лила бы по ложному ключу весь заход (аудит 07.10.2026, №9).
+		release, err := holdBuildLock(dir)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
 	path := filepath.Join(dir, entitiesFile)
 	before, err := readEntitiesFile(path)

@@ -210,6 +210,20 @@ func (g *Graph) DeadEntities() []uint32 {
 	return dead
 }
 
+// buildRunning — LockedError, если сборка графа идёт прямо сейчас (её признак
+// стоит и процесс жив); nil — не идёт. Для работ, которые ничего не пишут,
+// но считают по журналам: замка они не берут.
+func buildRunning(dir string) error {
+	path := filepath.Join(dir, lockFile)
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	if owner := readLock(path); owner.alive() {
+		return &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
+	}
+	return nil
+}
+
 // holdBuildLock занимает признак сборки графа на время работы, которая
 // подменяет файлы реестра. Формат и правила — те же, что у Graph.Lock:
 // живой хозяин — отказ, признак от мёртвого процесса снимается.
