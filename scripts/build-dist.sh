@@ -18,22 +18,22 @@
 
 set -euo pipefail
 # Несовпавший шаблон должен исчезать, а не превращаться в имя файла: иначе
-# сборка одной цели спотыкается об отсутствующий архив другого типа.
+# сборка спотыкается о лицензию, которой нет ни под одним из принятых имён.
 shopt -s nullglob
 
 readonly ROOT=$(cd "$(dirname "$0")/.." && pwd)
 readonly DIST="$ROOT/dist"
 
-# Цели выпуска. olldiagtools кладётся только под linux: он меряет видеопамять
-# на сервере с Ollama, а серверы эти — линуксовые.
+# Цели выпуска — Linux и macOS. Windows и FreeBSD убраны решением владельца
+# 07.10.2026: ими никто не пользуется, а замки базы знаний на Windows не работают
+# (живость процесса там не проверяется), и выпуск под неё обещал бы то, чего нет.
+# olldiagtools кладётся только под linux: он меряет видеопамять на сервере
+# с Ollama, а серверы эти — линуксовые.
 TARGETS=${TARGETS:-"
 linux/amd64
 linux/arm64
 darwin/amd64
 darwin/arm64
-windows/amd64
-windows/arm64
-freebsd/amd64
 "}
 
 VERSION=${VERSION:-}
@@ -53,13 +53,10 @@ for target in $TARGETS; do
     stage="$DIST/$name"
     mkdir -p "$stage"
 
-    ext=""
-    [ "$goos" = windows ] && ext=".exe"
-
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
         -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \
-        -o "$stage/ollchat${ext}" "$ROOT/cmd/ollchat"
+        -o "$stage/ollchat" "$ROOT/cmd/ollchat"
 
     # Вторая программа — только под linux, см. комментарий к TARGETS.
     if [ "$goos" = linux ]; then
@@ -82,22 +79,16 @@ for target in $TARGETS; do
         cp "$lic" "$stage/"
     done
 
-    # Под Windows привычен zip, под остальными — tar.gz.
-    if [ "$goos" = windows ]; then
-        (cd "$DIST" && zip -qr "${name}.zip" "$name")
-    else
-        (cd "$DIST" && tar -czf "${name}.tar.gz" "$name")
-    fi
+    (cd "$DIST" && tar -czf "${name}.tar.gz" "$name")
     rm -rf "$stage"
     say "собрано: $target"
 done
 
 # Суммы считаются по именам файлов без пути: иначе `sha256sum -c` из каталога
-# с архивами их не найдёт. Список собирается явно — при сборке одной цели
-# архивов второго типа просто нет, и это не повод падать.
+# с архивами их не найдёт.
 (
     cd "$DIST"
-    archives=(*.tar.gz *.zip)
+    archives=(*.tar.gz)
     sha256sum "${archives[@]}" > checksums.txt
 )
 
