@@ -642,3 +642,38 @@ func TestUnderRootRespectsBoundary(t *testing.T) {
 		}
 	}
 }
+
+// Удаление книги и правки реестра ждут своей очереди за индексацией.
+//
+// Они переписывают или дописывают реестр копиями записей, и рядом с идущей
+// доливкой (другой процесс — замок коллекции) запись сделанного в эту минуту
+// потерялась бы или перекрылась устаревшей копией. Пока замок занят — отказ.
+func TestRegistryWritersRespectCollectionLock(t *testing.T) {
+	_, coll, books := syncFixture(t)
+	if err := coll.lock(); err != nil { // «идёт индексация»
+		t.Fatal(err)
+	}
+	defer coll.unlock()
+
+	if err := coll.Forget(filepath.Join(books, "guide.pdf")); err == nil {
+		t.Error("Forget прошёл под чужой индексацией")
+	}
+	if _, err := coll.RefreshHashes(context.Background(), true, nil); err == nil {
+		t.Error("RefreshHashes прошёл под чужой индексацией")
+	}
+	if _, err := coll.RefreshYears(context.Background(), 0, true, nil); err == nil {
+		t.Error("RefreshYears прошёл под чужой индексацией")
+	}
+	if _, err := coll.RetitleTechnical(false); err == nil {
+		t.Error("RetitleTechnical прошёл под чужой индексацией")
+	}
+	if _, err := coll.RetitleTechnical(true); err != nil {
+		t.Errorf("сухой RetitleTechnical не пишет и замка не ждёт: %v", err)
+	}
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err == nil {
+		t.Error("Sync прошёл под чужой индексацией")
+	}
+	if coll.isDeleted(bookID(t, coll, "guide.pdf")) {
+		t.Error("книга помечена удалённой, хотя Forget отказал")
+	}
+}

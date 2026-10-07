@@ -764,6 +764,13 @@ func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progre
 		}
 	}
 
+	// Пометки и снятие записей — под замком коллекции, как и сама доливка:
+	// снятие записи переписывает реестр целиком, и параллельная индексация
+	// в другом процессе потеряла бы дописанную в эту минуту книгу. Замок
+	// отпускается перед Add — та берёт его сама.
+	if err := c.lock(); err != nil {
+		return IndexResult{}, err
+	}
 	var removed int
 	for _, d := range docs {
 		if d.ID != 0 && c.isDeleted(d.ID) {
@@ -777,13 +784,16 @@ func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progre
 		}
 		if d.ID == 0 {
 			if err := c.forgetRecord(d.Path); err != nil {
+				c.unlock()
 				return IndexResult{}, err
 			}
 		} else if err := c.markDeleted(d.ID); err != nil {
+			c.unlock()
 			return IndexResult{}, err
 		}
 		removed++
 	}
+	c.unlock()
 
 	res, err := c.Add(ctx, roots, opt, report)
 	res.Removed = removed
@@ -911,6 +921,12 @@ func (c *Collection) Forget(path string) error {
 	if !found {
 		return fmt.Errorf("книги %q в коллекции нет", path)
 	}
+	// Под замком коллекции: снятие записи переписывает реестр целиком, и
+	// параллельная индексация потеряла бы дописанную в эту минуту книгу.
+	if err := c.lock(); err != nil {
+		return err
+	}
+	defer c.unlock()
 	// **Нулевой номер — не «книги нет», а «книга не прочиталась».**
 	//
 	// Номер выдаётся при успешном разборе; у книги, отвергнутой как скан,

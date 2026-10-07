@@ -17,6 +17,13 @@ type HashProgress struct {
 // Цена — чтение библиотеки целиком (у нас ~10 ГБ, минуты диска), и она
 // платится один раз: новые книги получают хеш при индексации.
 func (c *Collection) RefreshHashes(ctx context.Context, force bool, onProgress func(HashProgress)) (HashProgress, error) {
+	// Под замком коллекции, как индексация: запись дописывается в реестр
+	// копией прежней, и побеждает последняя по пути — копия, снятая до того,
+	// как параллельная индексация обновила книгу, вернула бы устаревшую.
+	if err := c.lock(); err != nil {
+		return HashProgress{}, err
+	}
+	defer c.unlock()
 	books := c.Books()
 	p := HashProgress{Total: len(books)}
 	report := func() {

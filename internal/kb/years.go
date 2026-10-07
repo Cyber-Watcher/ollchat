@@ -36,6 +36,13 @@ type YearsProgress struct {
 func (c *Collection) RefreshYears(ctx context.Context, maxBytes int64, force bool,
 	onProgress func(YearsProgress)) (YearsProgress, error) {
 
+	// Под замком коллекции, как индексация: запись дописывается в реестр
+	// копией прежней, и побеждает последняя по пути — копия, снятая до того,
+	// как параллельная индексация обновила книгу, вернула бы устаревшую.
+	if err := c.lock(); err != nil {
+		return YearsProgress{}, err
+	}
+	defer c.unlock()
 	books := c.Books()
 	p := YearsProgress{Total: len(books)}
 	report := func() {
@@ -137,6 +144,15 @@ func YearSpan(res []Result, now time.Time) (from, to int, note string) {
 // разбора книги заново. Здесь правится только запись реестра: номер, куски
 // и вклад в граф остаются на месте, как это делает RefreshYears для годов.
 func (c *Collection) RetitleTechnical(dry bool) (fixed []string, err error) {
+	if !dry {
+		// Под замком коллекции, как индексация: запись дописывается в реестр
+		// копией прежней, и побеждает последняя по пути — копия, снятая до того,
+		// как параллельная индексация обновила книгу, вернула бы устаревшую.
+		if err := c.lock(); err != nil {
+			return nil, err
+		}
+		defer c.unlock()
+	}
 	for _, b := range c.Books() {
 		if b.Kind != BookOK || !technicalTitle(b.Title) {
 			continue
