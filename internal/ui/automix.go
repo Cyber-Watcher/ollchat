@@ -57,6 +57,9 @@ type mixReadyMsg struct {
 	graphDir   string
 	graphStamp int64
 	note       string
+	// lent — граф модели, которым считала команда (mixJob.graphOpen):
+	// с этим сообщением он возвращается, см. returnGraph.
+	lent *graph.Graph
 
 	// show — это /mix show: подмес показать, а не отправлять модели.
 	show   bool
@@ -138,7 +141,7 @@ func (m *Model) mixPlan() (mixJob, bool) {
 func runMixCmd(gen int, question string, job mixJob, prog chan<- graph.OpenProgress) tea.Cmd {
 	return func() tea.Msg {
 		defer close(prog) // закрытый канал говорит ленте, что полосу пора убрать
-		msg := mixReadyMsg{gen: gen, question: question}
+		msg := mixReadyMsg{gen: gen, question: question, lent: job.graphOpen}
 		g := job.graphOpen
 		if job.needsOpen() {
 			opened, err := graph.OpenWithProgress(job.graphDir, job.chunks, job.graphCfg.Rules(), sendProgress(prog))
@@ -363,11 +366,42 @@ func (m *Model) releaseGraph() {
 }
 
 // closeGraph закрывает открытый граф. Зовётся при смене коллекции и на выходе.
+//
+// Граф, которым в эту минуту считает подмешивание, не закрывается, а только
+// отпускается: конец индексации и решение «y» в окне разбора приходят когда
+// угодно, и горутина команды дочитывала бы закрытый под ней граф (аудит
+// 07.10.2026). Закроет его returnGraph, когда подмешивание вернётся.
 func (m *Model) closeGraph() {
-	if m.gr.open != nil {
-		_ = m.gr.open.Close()
+	if g := m.gr.open; g != nil && m.gr.lent[g] == 0 {
+		_ = g.Close()
 	}
 	m.gr.open, m.gr.dir, m.gr.stamp = nil, "", 0
+}
+
+// lendGraph отмечает, что граф ушёл считать подмешивание в горутину команды.
+func (m *Model) lendGraph(g *graph.Graph) {
+	if g == nil {
+		return
+	}
+	if m.gr.lent == nil {
+		m.gr.lent = map[*graph.Graph]int{}
+	}
+	m.gr.lent[g]++
+}
+
+// returnGraph — подмешивание вернулось, и граф снова свободен. Если модель
+// успела его отпустить, пока он был занят, он закрывается теперь.
+func (m *Model) returnGraph(g *graph.Graph) {
+	if g == nil || m.gr.lent[g] == 0 {
+		return
+	}
+	if m.gr.lent[g]--; m.gr.lent[g] > 0 {
+		return
+	}
+	delete(m.gr.lent, g)
+	if g != m.gr.open {
+		_ = g.Close()
+	}
 }
 
 // graphStamp — признак того, что реестр понятий не менялся: размер файла.

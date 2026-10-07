@@ -58,6 +58,10 @@ type graphState struct {
 	dir    string
 	stamp  int64
 	cache  *graph.Cache
+	// lent — графы, отданные подмешиванию в горутину команды, со счётом
+	// выдач. Такой граф closeGraph не закрывает, а только отпускает: закроет
+	// его returnGraph, когда подмешивание вернётся (см. automix.go).
+	lent map[*graph.Graph]int
 }
 
 // Model — состояние TUI.
@@ -867,6 +871,7 @@ func (m *Model) send(text string) tea.Cmd {
 		m.mixing = true
 		m.mixOpening = job.needsOpen()
 		m.pendingImages = images
+		m.lendGraph(job.graphOpen)
 		prog := make(chan graph.OpenProgress, 64)
 		m.graphBarStart = time.Now()
 		return tea.Batch(runMixCmd(m.gen.mix, text, job, prog),

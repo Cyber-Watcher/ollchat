@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
@@ -134,5 +136,111 @@ func TestMixGatekeeper(t *testing.T) {
 	// А привратник продолжает работать: посторонний вопрос по-прежнему пуст.
 	if mix := m.autoMix("перепиши эту функцию покороче"); !mix.Empty() {
 		t.Fatalf("подмешано на постороннем вопросе при /graph auto off: %q", mix.Text)
+	}
+}
+
+// graphClosed — закрыт ли граф: закрытый не принимает дозапись, буфер журнала
+// упирается в закрытый файл. Открытому граф проверки дописывает одно
+// упоминание — тестовому графу это безразлично.
+func graphClosed(t *testing.T, g *graph.Graph) bool {
+	t.Helper()
+	if err := g.Mentions().Add(1, graph.ChunkKey{Doc: 1, Ord: 0}); err != nil {
+		return true
+	}
+	return g.Mentions().Flush() != nil
+}
+
+// openModelGraph открывает граф коллекции и кладёт его в модель — так,
+// как он лежит после первого вопроса.
+func openModelGraph(t *testing.T, m *Model, coll *kb.Collection) *graph.Graph {
+	t.Helper()
+	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), m.cfg.Graph.Rules())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.gr.open, m.gr.dir, m.gr.stamp = g, coll.Dir(), graphStamp(coll.Dir(), m.cfg.Graph.Name)
+	return g
+}
+
+// Конец индексации закрывал граф модели, пока подмешивание считало им же
+// в горутине команды (аудит 07.10.2026). Теперь граф отпускается, а закрывается,
+// когда подмешивание вернётся — даже если вопрос к тому времени брошен.
+func TestJobEndDoesNotCloseGraphUnderMixing(t *testing.T) {
+	m, books := kbTestModel(t)
+	m.cfg.KB.EmbedModel = "" // без эмбеддера подмешивание считается без сети
+	writeTestBook(t, books, "go.pdf", "goroutines and channels explained")
+	drainJob(t, m, m.runCommand("/kb add go "+books))
+	m.runCommand("/kb use go")
+	coll, err := m.kbCollection("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildTestGraph(t, coll)
+	g := openModelGraph(t, m, coll)
+	m.gr.autoOn = true
+	gen := idleJob(t, m)
+
+	cmd := m.send("как связаны goroutine и channel")
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || !m.mixing {
+		t.Fatal("подготовка: подмешивание не ушло в фон")
+	}
+	mix := batch[0] // runMixCmd: считает графом модели
+
+	m.Update(jobDoneMsg{gen: gen, p: kb.Progress{Done: true}})
+	if graphClosed(t, g) {
+		t.Fatal("граф закрыт под работающим подмешиванием")
+	}
+	if m.gr.open != nil {
+		t.Error("модель держит граф, который велено закрыть")
+	}
+
+	// Человек передумал, а подмешивание вернулось позже.
+	m.Update(keyPress("esc"))
+	ready, ok := mix().(mixReadyMsg)
+	if !ok {
+		t.Fatal("подмешивание вернуло не mixReadyMsg")
+	}
+	m.Update(ready)
+	if !graphClosed(t, g) {
+		t.Fatal("граф не закрыт, когда подмешивание вернулось")
+	}
+}
+
+// Отпущенный граф закрывается, когда его вернёт последний, кто им считает
+// (вопрос и /mix show могут считать одновременно), а граф, который модель
+// держит по-прежнему, после возврата остаётся открытым.
+func TestLentGraphClosesOnLastReturn(t *testing.T) {
+	m, books := kbTestModel(t)
+	writeTestBook(t, books, "go.pdf", "goroutines and channels explained")
+	drainJob(t, m, m.runCommand("/kb add go "+books))
+	coll, err := m.kbCollection("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildTestGraph(t, coll)
+
+	g := openModelGraph(t, m, coll)
+	m.lendGraph(g)
+	m.lendGraph(g)
+	m.closeGraph() // решение «y» в окне разбора, /kb use и прочие
+	m.returnGraph(g)
+	if graphClosed(t, g) {
+		t.Fatal("граф закрыт, хотя им ещё считают")
+	}
+	m.returnGraph(g)
+	if !graphClosed(t, g) {
+		t.Fatal("отпущенный граф не закрыт после последнего возврата")
+	}
+
+	kept := openModelGraph(t, m, coll)
+	m.lendGraph(kept)
+	m.returnGraph(kept)
+	if graphClosed(t, kept) {
+		t.Fatal("закрыт граф, который модель держит")
+	}
+	m.closeGraph()
+	if !graphClosed(t, kept) {
+		t.Fatal("свободный граф не закрыт")
 	}
 }

@@ -1104,6 +1104,9 @@ func (m *Model) onGraphProgress(msg graphProgressMsg) (tea.Model, tea.Cmd) {
 
 // onMixReady — обработка mixReadyMsg, вынесена из Update (этап 91, R6.12).
 func (m *Model) onMixReady(msg mixReadyMsg) (tea.Model, tea.Cmd) {
+	// Команда вернулась — граф, которым она считала, свободен, даже если
+	// вопрос брошен: его горутина больше не читает.
+	m.returnGraph(msg.lent)
 	// Открытый граф забираем всегда, даже если вопрос уже брошен: он стоил
 	// десятков секунд, и выбрасывать его из-за отменённого хода — значит
 	// заплатить за него ещё раз на следующем вопросе.
