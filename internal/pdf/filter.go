@@ -393,7 +393,7 @@ func ascii85Decode(data []byte, limit int) []byte {
 		case isSpace(c):
 			continue
 		case c == '~':
-			i = len(data)
+			// «~>» — конец данных: цикл обрывает break после switch.
 		case c == 'z' && n == 0:
 			out = append(out, 0, 0, 0, 0)
 			continue
