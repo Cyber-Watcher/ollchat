@@ -12,9 +12,9 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/signintech/gopdf v0.38.0
 	github.com/yuin/goldmark v1.7.13
-	golang.org/x/image v0.30.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.45.0
+	golang.org/x/image v0.46.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
 )
 
 require (
@@ -39,7 +39,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/net v0.39.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )
