@@ -157,33 +157,90 @@ func OnlySafePipeline(cmd string) bool {
 // файл. Но и спрашивать про `find заметки -type f | wc -l` незачем — это счёт
 // файлов. Поэтому разрешение даётся программе, а ключи из этой таблицы
 // возвращают вопрос.
-var writingFlags = map[string][]string{
-	"find":  {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"},
-	"sort":  {"-o", "--output"},
-	"cp":    {"*"},
-	"mv":    {"*"},
-	"tee":   {"*"},
-	"tar":   {"*"},
-	"chmod": {"*"},
+var writingFlags = map[string]writingKeys{
+	"find": {words: []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}},
+	// Короткие ключи sort со значением: -k, -o, -S, -t, -T.
+	"sort":  {short: "o", valued: "kSTt", long: []string{"output"}},
+	"cp":    {all: true},
+	"mv":    {all: true},
+	"tee":   {all: true},
+	"tar":   {all: true},
+	"chmod": {all: true},
+}
+
+// writingKeys — чем читающая программа пишет.
+type writingKeys struct {
+	all   bool     // пишет всегда, какие ключи ни дай
+	words []string // ключи целым словом, как у find: -delete, -exec
+	// short — короткие пишущие ключи. Разбираются как у getopt: связка
+	// `-rofile` — это `-r -o file`, и `sort -ofile` пишет в file так же,
+	// как `sort -o file`. Сравнение слова целиком такое пропускало.
+	short string
+	// valued — прочие короткие ключи со значением: после такой буквы
+	// в связке идёт значение, а не ключи (`sort -to` — разделитель «o»),
+	// а без слитного значения им становится следующее слово.
+	valued string
+	// long — длинные пишущие ключи. getopt принимает и сокращения:
+	// `--out=файл` — это `--output=файл`.
+	long []string
 }
 
 // WritesSomething сообщает, несёт ли команда ключ, которым читающая программа
 // пишет или запускает чужое. Проверяется только имя программы и её ключи:
 // путей и содержимого мы не знаем и знать не должны.
 func WritesSomething(cmd string) bool {
-	flags, ok := writingFlags[CommandName(cmd)]
+	words, err := SplitWords(cmd)
+	if err != nil {
+		words = strings.Fields(cmd)
+	}
+	for len(words) > 0 && isAssignment(words[0]) {
+		words = words[1:]
+	}
+	if len(words) == 0 {
+		return false
+	}
+	keys, ok := writingFlags[words[0]]
 	if !ok {
 		return false
 	}
-	if len(flags) == 1 && flags[0] == "*" {
+	return keys.writes(words[1:])
+}
+
+func (k writingKeys) writes(args []string) bool {
+	if k.all {
 		return true
 	}
-	fields := strings.Fields(cmd)
-	for _, f := range fields[min(1, len(fields)):] {
-		for _, bad := range flags {
-			// `-o` и `-o=имя`, но не `-original`.
-			if f == bad || strings.HasPrefix(f, bad+"=") {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		for _, w := range k.words {
+			if a == w || strings.HasPrefix(a, w+"=") {
 				return true
+			}
+		}
+		if k.short == "" {
+			continue
+		}
+		switch {
+		case a == "--":
+			return false // дальше только имена файлов
+		case strings.HasPrefix(a, "--"):
+			name, _, _ := strings.Cut(a[2:], "=")
+			for _, l := range k.long {
+				if name != "" && strings.HasPrefix(l, name) {
+					return true
+				}
+			}
+		case len(a) > 1 && a[0] == '-':
+			for j := 1; j < len(a); j++ {
+				if strings.IndexByte(k.short, a[j]) >= 0 {
+					return true
+				}
+				if strings.IndexByte(k.valued, a[j]) >= 0 {
+					if j == len(a)-1 {
+						i++ // значение — следующее слово, это не ключ
+					}
+					break
+				}
 			}
 		}
 	}
