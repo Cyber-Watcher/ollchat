@@ -255,7 +255,7 @@ deny = [
   # чувствительные файлы
   "Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
   # удаление и работа с дисками
-  "Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(fdisk:*)", "Bash(parted:*)",
+  "Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
   "Bash(mount:*)", "Bash(umount:*)",
   # повышение прав и учётные записи
   "Bash(sudo:*)", "Bash(su:*)", "Bash(useradd:*)", "Bash(userdel:*)", "Bash(passwd:*)", "Bash(visudo:*)",

@@ -1386,19 +1386,23 @@ func Default() *Config {
 			MaxOutputKB: 64,
 		},
 		Permissions: Permissions{
-			Allow: []string{"Read(./**)", "Bash(go build:*)", "Bash(go test:*)", "Bash(git status:*)", "Bash(git diff:*)"},
-			Ask:   []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
+			// Списки совпадают с образцом (--init-config) слово в слово и в том же
+			// порядке: конфиг без раздела [permissions] берёт их отсюда, и машина
+			// с «нетронутыми» настройками не должна получать другие права, чем
+			// созданная командой --init-config. Сверяет TestTemplateMatchesDefaults.
+			Allow: []string{"Read(./**)", "Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)",
+				"Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(ls:*)"},
+			Ask: []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
 			Deny: []string{
-				"Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)",
-				"Write(~/.ssh/**)",
-				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(sudo:*)", "Bash(su:*)",
-				"Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(dd:*)", "Bash(fdisk:*)", "Bash(parted:*)",
+				"Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
+				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
+				"Bash(mount:*)", "Bash(umount:*)",
+				"Bash(sudo:*)", "Bash(su:*)", "Bash(useradd:*)", "Bash(userdel:*)", "Bash(passwd:*)", "Bash(visudo:*)",
+				"Bash(chmod:*)", "Bash(chown:*)",
 				"Bash(shutdown:*)", "Bash(reboot:*)", "Bash(halt:*)", "Bash(poweroff:*)", "Bash(init:*)",
-				"Bash(chmod:*)", "Bash(chown:*)", "Bash(mount:*)", "Bash(umount:*)",
-				"Bash(kill:*)", "Bash(killall:*)", "Bash(pkill:*)",
 				"Bash(systemctl:*)", "Bash(service:*)", "Bash(crontab:*)",
-				"Bash(apt:*)", "Bash(apt-get:*)", "Bash(dpkg:*)", "Bash(snap:*)",
-				"Bash(useradd:*)", "Bash(userdel:*)", "Bash(passwd:*)", "Bash(visudo:*)",
+				"Bash(kill:*)", "Bash(killall:*)", "Bash(pkill:*)",
+				"Bash(apt:*)", "Bash(apt-get:*)", "Bash(dpkg:*)", "Bash(snap:*)", "Bash(pip:*)",
 				"Bash(iptables:*)", "Bash(nft:*)", "Bash(ip:*)",
 				"Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ssh:*)", "Bash(scp:*)",
 			},

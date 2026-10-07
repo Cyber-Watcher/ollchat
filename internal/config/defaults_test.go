@@ -34,8 +34,6 @@ func TestTemplateMatchesDefaults(t *testing.T) {
 	// Разделы, которые здесь не сверяются.
 	skipped := map[string]string{
 		"servers": "в образце примеры серверов, а не умолчания",
-		"permissions": "списки правил — решение о правах; оно правится вместе с проверками " +
-			"самих правил, и сводить образец с Default() надо там же",
 	}
 	var walk func(path []string, def, got reflect.Value)
 	walk = func(path []string, def, got reflect.Value) {
