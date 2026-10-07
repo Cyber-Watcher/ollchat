@@ -404,6 +404,9 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			ModTime: p.cand.info.ModTime().UnixNano(), At: time.Now().Unix(),
 			Hash: p.cand.hash,
 		}
+		// Номер прежней версии той же книги: запись реестра по этому пути
+		// новая заменит, и прежние куски надо пометить удалёнными (ниже).
+		prev := c.docIDAt(p.cand.path)
 		// Тощая ли книга, решается до switch: причину надо и записать в реестр,
 		// и показать человеку, а считать вердикт дважды — значит однажды
 		// разойтись. Проверка идёт здесь, а не в пробе на скан: пока книга
@@ -490,6 +493,19 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 				Title: rec.Title, Year: rec.Year,
 				Chunks: rec.Chunks, Path: p.cand.path,
 			})
+		}
+		// Прежняя версия книги — в удалённые, и только теперь, когда новая
+		// запись уже в реестре (а у прочитанной — и куски на диске).
+		//
+		// До 07.10.2026 этого шага не было: --kb-sync перечитывал изменённый
+		// файл под новым номером, а прежний номер удалённым не помечал. Запись
+		// реестра заменялась по пути, прежние куски оставались ничьими —
+		// и находились поиском, с пустыми названием и путём, ровно там, где
+		// документацию доливают после каждой правки.
+		if prev != 0 && prev != rec.ID {
+			if err := c.markDeleted(prev); err != nil {
+				return res, err
+			}
 		}
 
 		send(Progress{
@@ -796,6 +812,17 @@ func (c *Collection) Forget(path string) error {
 		return err
 	}
 	return c.reopenIndex()
+}
+
+// docIDAt — номер книги, записанной в реестре по этому пути; 0 — такой нет
+// или она не прочиталась.
+func (c *Collection) docIDAt(path string) uint32 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if i, ok := c.byPath[path]; ok {
+		return c.docs[i].ID
+	}
+	return 0
 }
 
 func (c *Collection) isDeleted(id uint32) bool {

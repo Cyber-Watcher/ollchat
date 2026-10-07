@@ -196,7 +196,7 @@ func (s *searcher) Candidates(query string, opt SearchOpts) ([]Hit, error) {
 	if len(terms) == 0 {
 		return nil, nil
 	}
-	if len(opt.Docs) > 0 {
+	if opt.docFilter == nil && len(opt.Docs) > 0 {
 		opt.docFilter = make(map[uint32]bool, len(opt.Docs))
 		for _, d := range opt.Docs {
 			opt.docFilter[d] = true

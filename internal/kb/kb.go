@@ -838,6 +838,18 @@ func topFolder(path string, roots []string) string {
 	return filepath.Base(filepath.Dir(path))
 }
 
+// liveDocs — номера книг, которые может выдавать поиск: прочитанные, стоящие
+// в реестре и не помеченные удалёнными. Под замком чтения.
+func (c *Collection) liveDocs() map[uint32]bool {
+	out := make(map[uint32]bool, len(c.docs))
+	for _, d := range c.docs {
+		if d.ID != 0 && d.Kind == BookOK && !c.deleted[d.ID] {
+			out[d.ID] = true
+		}
+	}
+	return out
+}
+
 // Book находит ЖИВУЮ книгу по её номеру: удалённую не возвращает.
 //
 // Удаление здесь не переписывает запись реестра — он только дописывается,
@@ -967,14 +979,17 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 	if c.index == nil {
 		return nil, nil
 	}
-	// Удалённые книги из выдачи исключаем: помеченные удалёнными куски
+	// Выдаются только живые книги реестра: помеченные удалёнными куски
 	// физически остаются до уплотнения.
-	if len(c.deleted) > 0 && len(opt.Docs) == 0 {
-		for _, d := range c.docs {
-			if !c.deleted[d.ID] && d.Kind == BookOK {
-				opt.Docs = append(opt.Docs, d.ID)
-			}
-		}
+	//
+	// **Отбор ставится всегда**, а не только при непустом deleted.ids, как
+	// было до 07.10.2026. Кроме удалённых, в хранилище бывают и ничьи куски —
+	// прежние версии книг, чью запись реестра заменила перечитанная (так делал
+	// --kb-sync до той же даты), и обрывки прерванной записи. Пометки у них
+	// нет, и в коллекции без единого удаления они находились поиском с пустыми
+	// названием и путём.
+	if len(opt.Docs) == 0 {
+		opt.docFilter = c.liveDocs()
 	}
 	hits, note, err := c.hybrid(ctx, query, opt, emb)
 	if err != nil {
@@ -1085,8 +1100,8 @@ func (c *Collection) semanticHits(ctx context.Context, query string, opt SearchO
 	if len(q) == 0 {
 		return nil, ""
 	}
-	var allow map[uint32]bool
-	if len(opt.Docs) > 0 {
+	allow := opt.docFilter
+	if allow == nil && len(opt.Docs) > 0 {
 		allow = make(map[uint32]bool, len(opt.Docs))
 		for _, d := range opt.Docs {
 			allow[d] = true
