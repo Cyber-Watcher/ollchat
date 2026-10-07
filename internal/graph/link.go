@@ -2,6 +2,7 @@ package graph
 
 import (
 	"bufio"
+	"container/heap"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -367,30 +368,59 @@ func (o LinkOpts) norm() LinkOpts {
 }
 
 // nearest — ближайшие по вектору понятия к запросу, лучшие первыми.
+//
+// Нужны только k лучших, а понятий — четверть миллиона: полная сортировка
+// всех на каждый вопрос была лишней работой (аудит 07.10.2026, 4.5). Куча
+// из k отобранных, на вершине которой худшее из них, даёт тот же набор и тот
+// же порядок: сравнение (близость, затем номер) полное, ничьих в нём нет.
 func (v *EntityVectors) nearest(query []int8, k int) []senseHit {
 	if v == nil || !v.Ready() || len(query) != v.Dim() || k <= 0 {
 		return nil
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	all := make([]senseHit, 0, v.meta.Count)
+	h := make(hitHeap, 0, min(k, v.meta.Count))
 	for id := 1; id <= v.meta.Count; id++ {
 		vec := v.at(uint32(id))
 		if len(vec) == 0 {
 			continue
 		}
-		all = append(all, senseHit{ID: uint32(id), Score: kb.Cosine(vec, query)})
-	}
-	sort.Slice(all, func(a, b int) bool {
-		if all[a].Score != all[b].Score {
-			return all[a].Score > all[b].Score
+		hit := senseHit{ID: uint32(id), Score: kb.Cosine(vec, query)}
+		switch {
+		case len(h) < k:
+			heap.Push(&h, hit)
+		case hitBefore(hit, h[0]):
+			h[0] = hit
+			heap.Fix(&h, 0)
 		}
-		return all[a].ID < all[b].ID
-	})
-	if len(all) > k {
-		all = all[:k]
 	}
-	return all
+	out := []senseHit(h)
+	sort.Slice(out, func(a, b int) bool { return hitBefore(out[a], out[b]) })
+	return out
+}
+
+// hitBefore — a идёт в выдаче раньше b: ближе к запросу, а при равной
+// близости — с меньшим номером.
+func hitBefore(a, b senseHit) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	return a.ID < b.ID
+}
+
+// hitHeap — куча отобранных, на вершине — худшее из них.
+type hitHeap []senseHit
+
+func (h hitHeap) Len() int           { return len(h) }
+func (h hitHeap) Less(i, j int) bool { return hitBefore(h[j], h[i]) }
+func (h hitHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *hitHeap) Push(x any)        { *h = append(*h, x.(senseHit)) }
+func (h *hitHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 // linkNew решает, есть ли у нового имени узел в графе. Возвращает (узел, true),

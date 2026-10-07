@@ -551,6 +551,10 @@ func (g *Graph) assembleFor(adj map[uint32]map[uint32]float64, order []uint32,
 
 	var out []Community
 	upper := map[uint32][]uint32{} // сообщество уровня 1 → его мелкие
+	// Сдвиг номеров верхнего уровня — один на всё разбиение (upperBase):
+	// считать его заново для каждой темы — квадрат от числа тем, около двух
+	// миллиардов шагов на 47 тысячах (аудит 07.10.2026, 4.5).
+	base := upperBase(ids)
 	for _, c := range ids {
 		list := members[c]
 		sort.Slice(list, func(i, j int) bool {
@@ -561,7 +565,7 @@ func (g *Graph) assembleFor(adj map[uint32]map[uint32]float64, order []uint32,
 		})
 		parent := -1
 		if p, ok := big[c]; ok {
-			parent = upperID(ids, p)
+			parent = base + int(p)
 			upper[p] = append(upper[p], c)
 		}
 		out = append(out, Community{
@@ -589,7 +593,7 @@ func (g *Graph) assembleFor(adj map[uint32]map[uint32]float64, order []uint32,
 			return all[i] < all[j]
 		})
 		out = append(out, Community{
-			ID: upperID(ids, p), Level: 1, Parent: -1,
+			ID: base + int(p), Level: 1, Parent: -1,
 			Members: all, Weight: inner(adj, all),
 		})
 	}
@@ -613,19 +617,19 @@ func inner(adj map[uint32]map[uint32]float64, list []uint32) float64 {
 	return sum / 2 // каждая связь посчитана с обоих концов
 }
 
-// upperID даёт объединению верхнего уровня номер, не совпадающий ни с одним
-// мелким сообществом.
+// upperBase — сдвиг номеров объединений верхнего уровня: объединение p
+// получает номер upperBase + p, не совпадающий ни с одним мелким сообществом.
 //
 // Оба уровня нумеруются с нуля независимо, и без сдвига номера накладываются:
 // «сообщество №5» означает разное на разных уровнях. Поймано на живом графе —
 // обзор выдал тему на 1 715 понятий при пределе в 200, подставив объединение
 // вместо мелкого сообщества с тем же номером.
-func upperID(small []uint32, p uint32) int {
+func upperBase(small []uint32) int {
 	var max uint32
 	for _, c := range small {
 		if c > max {
 			max = c
 		}
 	}
-	return int(max) + 1 + int(p)
+	return int(max) + 1
 }

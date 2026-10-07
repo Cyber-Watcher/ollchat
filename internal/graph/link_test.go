@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
@@ -268,5 +269,41 @@ func TestQueueDoubtsTSVQuotes(t *testing.T) {
 	}
 	if len(why) != 3 || why["Go"] != "\"Go\" шире, чем golang" || why["\"smart\" pointer"] != "кавычки в имени" {
 		t.Fatalf("очередь: %+v", why)
+	}
+}
+
+// Отбор k ближайших кучей даёт ровно то же, что полная сортировка: тот же
+// набор и тот же порядок, в том числе при равной близости (по номеру).
+func TestNearestMatchesFullSort(t *testing.T) {
+	const dim, n = 4, 300
+	data := make([]int8, n*dim)
+	for i := range data {
+		data[i] = int8((i*37 + i/7) % 5) // мало разных значений — много ничьих
+	}
+	v := &EntityVectors{dir: t.TempDir()}
+	must(t, v.save("проба", "", dim, data))
+	query := []int8{1, 2, 0, 3}
+
+	full := make([]senseHit, 0, n)
+	for id := 1; id <= n; id++ {
+		full = append(full, senseHit{ID: uint32(id), Score: kb.Cosine(data[(id-1)*dim:id*dim], query)})
+	}
+	sort.Slice(full, func(a, b int) bool {
+		if full[a].Score != full[b].Score {
+			return full[a].Score > full[b].Score
+		}
+		return full[a].ID < full[b].ID
+	})
+	for _, k := range []int{1, 2, 7, 50, n, n + 10} {
+		got := v.nearest(query, k)
+		want := full[:min(k, n)]
+		if len(got) != len(want) {
+			t.Fatalf("k=%d: отобрано %d, ожидалось %d", k, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("k=%d, место %d: %+v, ожидалось %+v", k, i, got[i], want[i])
+			}
+		}
 	}
 }
