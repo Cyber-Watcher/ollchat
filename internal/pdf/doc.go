@@ -38,7 +38,9 @@ type Document struct {
 
 	// crypt — расшифровка содержимого. Пусто у обычных документов;
 	// у зашифрованных с пустым паролем пользователя — см. crypt.go.
-	crypt *crypt
+	// encryptNum — номер объекта словаря /Encrypt: его строки не шифруются.
+	crypt      *crypt
+	encryptNum int
 
 	// work — остаток бюджета работы, overspent — бюджет исчерпан (budget.go).
 	work      int64
@@ -69,6 +71,13 @@ func Open(data []byte) (doc *Document, err error) {
 		if d.crypt = d.setupCrypt(); d.crypt == nil {
 			return nil, ErrEncrypted
 		}
+		d.encryptNum = -1
+		if ref, ok := d.trailer["Encrypt"].(Ref); ok {
+			d.encryptNum = ref.Num
+		}
+		// Объекты, разобранные до этого (поиск трейлера), хранят строки
+		// шифротекстом: пусть разберутся заново, уже с расшифровкой.
+		d.cache = map[int]Object{}
 	}
 	d.loadObjectStreams()
 	if d.overspent {
@@ -364,6 +373,12 @@ func (d *Document) object(num int) (result Object) {
 
 	if off, ok := d.offsets[num]; ok {
 		result = d.parseAt(off)
+		// Строки объекта из тела файла зашифрованы каждая сама по себе
+		// (crypt.strings) — кроме словаря /Encrypt и потока xref.
+		if s, ok := result.(*Stream); d.crypt != nil && num != d.encryptNum &&
+			(!ok || s.Dict["Type"] != Name("XRef")) {
+			result = d.crypt.strings(result, 0)
+		}
 	} else if body, ok := d.inStm[num]; ok {
 		p := newParser(body, d)
 		if obj, err := p.object(); err == nil {

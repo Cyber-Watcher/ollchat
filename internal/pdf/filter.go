@@ -22,12 +22,7 @@ func (d *Document) Decode(s *Stream) ([]byte, error) {
 	if s == nil {
 		return nil, errors.New("пустой поток")
 	}
-	data := s.Raw
-	// Расшифровка идёт до фильтров: в файле поток сначала сжат, потом
-	// зашифрован, и разворачивать надо в обратном порядке.
-	if d.crypt != nil && s.Dict["Type"] != Name("XRef") {
-		data = d.crypt.decrypt(data)
-	}
+	data := d.raw(s)
 	filters := asArray(d.Resolve(s.Dict["Filter"]))
 	parms := asArray(d.Resolve(s.Dict["DecodeParms"]))
 	if len(parms) == 0 {
@@ -50,6 +45,20 @@ func (d *Document) Decode(s *Stream) ([]byte, error) {
 		}
 	}
 	return data, nil
+}
+
+// raw — данные потока до фильтров, уже расшифрованные.
+//
+// Расшифровка идёт до фильтров: в файле поток сначала сжат, потом
+// зашифрован, и разворачивать надо в обратном порядке. Картинки JPEG и CCITT,
+// которые раскрываются мимо Decode, берут данные отсюда же: прежде они брались
+// прямо из Raw, и у зашифрованной книги модели уходил шифротекст под видом
+// JPEG. Поток xref не шифруется никогда.
+func (d *Document) raw(s *Stream) []byte {
+	if d.crypt != nil && s.Dict["Type"] != Name("XRef") {
+		return d.crypt.decrypt(s.Raw)
+	}
+	return s.Raw
 }
 
 func (d *Document) applyFilter(name Name, data []byte, parm Dict) ([]byte, error) {

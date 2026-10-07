@@ -117,7 +117,7 @@ func (d *Document) decodeImage(s *Stream) (image.Image, error) {
 	}
 	switch last {
 	case "DCTDecode", "CCITTFaxDecode":
-		data := s.Raw
+		data := d.raw(s)
 		for i := 0; i < len(filters)-1; i++ {
 			name, _ := d.Resolve(filters[i]).(Name)
 			var err error

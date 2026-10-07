@@ -169,7 +169,7 @@ func (d *Document) imageBytes(s *Stream) (string, []byte, error) {
 	switch last {
 	case "DCTDecode":
 		// JPEG уже готов: снимаем только обёртки, наложенные поверх него.
-		data := s.Raw
+		data := d.raw(s)
 		for i := 0; i < len(filters)-1; i++ {
 			name, _ := d.Resolve(filters[i]).(Name)
 			var err error
