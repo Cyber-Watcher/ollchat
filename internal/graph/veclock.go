@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // Замок на счёт векторов понятий.
@@ -53,26 +52,15 @@ func (e *VectorsLockedError) Error() string {
 // мёртвого процесса снимается и берётся себе.
 func lockVectors(dir string) (release func(), err error) {
 	path := filepath.Join(dir, vecLockFile)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if os.IsExist(err) {
-		owner := readLock(path)
-		if owner.alive() {
-			return nil, &VectorsLockedError{Path: path, PID: owner.PID, Since: owner.Since}
-		}
-		if rmErr := os.Remove(path); rmErr != nil {
-			return nil, fmt.Errorf("остался замок векторов от неживого процесса, "+
-				"и его не удалось убрать: %w", rmErr)
-		}
-		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	}
+	// Тот же захват, что у LOCK (acquireLock): та же запись, и readLock
+	// разбирает оба.
+	f, _, busy, err := acquireLock(path)
 	if err != nil {
-		if os.IsExist(err) {
-			return nil, &VectorsLockedError{Path: path}
-		}
 		return nil, err
 	}
-	// Тот же вид записи, что у LOCK: readLock разбирает оба.
-	fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+	if busy != nil {
+		return nil, &VectorsLockedError{Path: path, PID: busy.PID, Since: busy.Since}
+	}
 	f.Close()
 	return func() { os.Remove(path) }, nil
 }

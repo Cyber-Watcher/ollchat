@@ -35,8 +35,15 @@ func MarkWork(graphDir, what string) (release func(), err error) {
 		return nil, err
 	}
 	path := filepath.Join(graphDir, workPrefix+fmt.Sprint(os.Getpid()))
-	body := fmt.Sprintf("pid %d, начато %s, работа: %s\n",
-		os.Getpid(), time.Now().Format(time.RFC3339), what)
+	// Время старта процесса — в ту же строку, перед названием работы: прежние
+	// сборки программы берут название как всё после «работа: », а живость
+	// по нему сверяется без оглядки на имя программы (lockOwner.alive).
+	start := ""
+	if s, ok := procStart(os.Getpid()); ok {
+		start = lockStartMark + s + ", "
+	}
+	body := fmt.Sprintf("pid %d, начато %s, %sработа: %s\n",
+		os.Getpid(), time.Now().Format(time.RFC3339), start, what)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return nil, err
 	}

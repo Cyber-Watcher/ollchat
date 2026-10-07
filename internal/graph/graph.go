@@ -802,6 +802,29 @@ func (g *Graph) Lock() error {
 // держит его до Unlock, прочие закрывают сразу.
 func takeLock(dir string) (f *os.File, stale string, err error) {
 	path := filepath.Join(dir, lockFile)
+	f, stale, busy, err := acquireLock(path)
+	if err != nil {
+		return nil, "", err
+	}
+	if busy != nil {
+		return nil, "", &LockedError{Path: path, PID: busy.PID, Since: busy.Since}
+	}
+	return f, stale, nil
+}
+
+// acquireLock занимает признак path (LOCK, VEC-LOCK): файл с номером процесса,
+// созданный с O_EXCL. Признак неживого процесса снимается и занимается заново;
+// stale — что в нём было. Занят живым процессом — busy, файла нет.
+func acquireLock(path string) (f *os.File, stale string, busy *lockOwner, err error) {
+	// Снятие брошенного признака — «прочитать, убедиться, что хозяин мёртв,
+	// убрать, создать свой» — между процессами не атомарно: двое, разом
+	// нашедшие один брошенный признак, оба его снимали, и второй убирал уже
+	// свежий признак первого — замок оказывался у обоих (аудит 07.10.2026,
+	// 4.5, воспроизведено тестом). Теперь эта последовательность идёт под
+	// flock(2) на каталоге, и претенденты проходят её по одному.
+	release := lockDirFor(filepath.Dir(path))
+	defer release()
+
 	f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if os.IsExist(err) {
 		// Признак есть — но это ещё не значит, что сборка идёт. Прогон,
@@ -811,26 +834,70 @@ func takeLock(dir string) (f *os.File, stale string, err error) {
 		// что делать. Поэтому смотрим, жив ли записанный процесс.
 		owner := readLock(path)
 		if owner.alive() {
-			return nil, "", &LockedError{Path: path, PID: owner.PID, Since: owner.Since}
+			return nil, "", &owner, nil
 		}
 		// Хозяин мёртв — признак наш. Снимаем и берём себе.
 		stale = owner.describe()
-		if rmErr := os.Remove(path); rmErr != nil {
-			return nil, "", fmt.Errorf("остался признак сборки от неживого процесса, "+
-				"и его не удалось убрать: %w", rmErr)
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			return nil, "", nil, fmt.Errorf("остался признак %s от неживого процесса, "+
+				"и его не удалось убрать: %w", filepath.Base(path), rmErr)
 		}
 		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	}
 	if err != nil {
 		if os.IsExist(err) {
-			// Кто-то успел занять признак между нашей уборкой и попыткой:
-			// значит, сборка всё-таки идёт.
-			return nil, "", &LockedError{Path: path}
+			// Признак успел занять процесс прежней сборки программы, которая
+			// каталог не запирает: значит, работа всё-таки идёт.
+			owner := readLock(path)
+			return nil, "", &owner, nil
 		}
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	fmt.Fprintf(f, "pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
-	return f, stale, nil
+	if _, err := f.WriteString(lockBody()); err != nil {
+		f.Close()
+		os.Remove(path)
+		return nil, "", nil, err
+	}
+	return f, stale, nil, nil
+}
+
+// lockBody — что пишется в признак: «pid 12345, начато <время>» первой
+// строкой, как всегда (её разбирают и прежние сборки программы), и время
+// старта процесса второй — по нему живость проверяется без оглядки на имя
+// программы (lockOwner.alive).
+func lockBody() string {
+	body := fmt.Sprintf("pid %d, начато %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+	if start, ok := procStart(os.Getpid()); ok {
+		body += lockStartMark + start + "\n"
+	}
+	return body
+}
+
+// lockStartMark — метка времени старта процесса в признаке.
+const lockStartMark = "старт "
+
+// procStart — время старта процесса: 22-е поле /proc/PID/stat, в тиках
+// от загрузки системы. Вместе с номером оно однозначно называет процесс:
+// номер переиспользуется, время старта у нового процесса другое. Нет /proc —
+// не узнать (ok == false).
+func procStart(pid int) (string, bool) {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", false
+	}
+	// Имя процесса в скобках может содержать и пробелы, и скобки: поля
+	// считаются от последней закрывающей.
+	s := string(raw)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 {
+		return "", false
+	}
+	fields := strings.Fields(s[i+1:])
+	// После скобки идёт третье поле (состояние); время старта — двадцать второе.
+	if len(fields) < 20 {
+		return "", false
+	}
+	return fields[19], true
 }
 
 // OpenForBuild открывает граф для сборки — или заводит, если его ещё нет, —
@@ -941,6 +1008,9 @@ func (g *Graph) StaleLock() string { return g.staleLock }
 type lockOwner struct {
 	PID   int
 	Since string
+	// Start — время старта процесса-хозяина (procStart); пусто у признаков,
+	// поставленных до 07.10.2026, и там, где /proc нет.
+	Start string
 	Raw   string
 }
 
@@ -959,6 +1029,12 @@ func readLock(path string) lockOwner {
 	if _, err := fmt.Sscanf(o.Raw, "pid %d, начато %s", &o.PID, &o.Since); err != nil {
 		o.PID = -1
 	}
+	o.Since = strings.TrimSuffix(o.Since, ",") // у признака работы за временем идёт запятая
+	if i := strings.Index(o.Raw, lockStartMark); i >= 0 {
+		if f := strings.Fields(o.Raw[i+len(lockStartMark):]); len(f) > 0 {
+			o.Start = strings.TrimSuffix(f[0], ",")
+		}
+	}
 	return o
 }
 
@@ -966,8 +1042,14 @@ func readLock(path string) lockOwner {
 //
 // Сигнал 0 проверяет существование процесса, ничего ему не посылая. Одного
 // этого мало: номера процессов переиспользуются, и на месте упавшего прогона
-// может оказаться чужая программа. Поэтому там, где есть /proc, сверяется
-// ещё и имя: признак снимается только с нашего же ollchat.
+// может оказаться чужая программа.
+//
+// Признак с временем старта (Start) сверяется по нему: тот же номер и то же
+// время старта — тот самый процесс, как бы ни называлась программа. До
+// 07.10.2026 сверялось имя — подстрока «ollchat» в /proc/PID/cmdline, — и
+// живой признак переименованного бинаря снимался как брошенный (аудит, 4.5).
+// Признаки прежней записи, без времени старта, проверяются по-прежнему —
+// по имени.
 func (o lockOwner) alive() bool {
 	if o.PID <= 0 {
 		return true // не разобрали — считаем живым и не трогаем
@@ -979,7 +1061,19 @@ func (o lockOwner) alive() bool {
 	if err != nil {
 		return false
 	}
-	if err := p.Signal(syscall.Signal(0)); err != nil {
+	err = p.Signal(syscall.Signal(0))
+	if o.Start != "" {
+		// Чужой пользователь (EPERM) — процесс есть, решает время старта.
+		if err != nil && !errors.Is(err, syscall.EPERM) {
+			return false // процесса нет
+		}
+		start, ok := procStart(o.PID)
+		if !ok {
+			return true // /proc недоступен — не рискуем
+		}
+		return start == o.Start
+	}
+	if err != nil {
 		return false // процесса нет либо он чужой
 	}
 	// Процесс с таким номером есть. Наш ли это ollchat?
