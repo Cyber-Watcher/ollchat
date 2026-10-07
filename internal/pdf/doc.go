@@ -458,9 +458,17 @@ func (d *Document) pagesByScan() []Dict {
 }
 
 // contentOf собирает содержимое страницы из /Contents.
+//
+// Сумма потоков ограничена тем же maxDecoded, что и один поток: массив
+// /Contents из сотни ссылок на один поток в 256 МБ склеивался в 25 ГБ
+// на одной странице. У настоящей страницы содержимое — килобайты, редко
+// мегабайты.
 func (d *Document) contentOf(page Dict) []byte {
 	var out []byte
 	for _, item := range asArray(d.Resolve(page["Contents"])) {
+		if len(out) >= maxDecoded {
+			break
+		}
 		s, ok := d.Resolve(item).(*Stream)
 		if !ok {
 			continue
@@ -469,7 +477,7 @@ func (d *Document) contentOf(page Dict) []byte {
 		if err != nil && len(data) == 0 {
 			continue
 		}
-		out = append(out, data...)
+		out = append(out, data[:min(len(data), maxDecoded-len(out))]...)
 		out = append(out, '\n')
 	}
 	return out

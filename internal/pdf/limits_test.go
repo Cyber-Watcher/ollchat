@@ -281,6 +281,26 @@ func TestFilterChainBudget(t *testing.T) {
 	}
 }
 
+// Массив /Contents из сотни ссылок на один большой поток: до правки они
+// склеивались целиком, и страница требовала в сто раз больше предела потока.
+func TestContentsArrayBounded(t *testing.T) {
+	withBudget(t, 1<<20, 1<<40)
+	packed := zlibBytes(bytes.Repeat([]byte("q Q "), 256<<10)) // ровно 1 МБ
+	refs := strings.Repeat("4 0 R ", 100)
+	doc := build(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << >> /Contents ["+refs+"] >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(packed), packed))
+	d, err := Open(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(d.contentOf(d.Pages()[0])); n > maxDecoded+1 {
+		t.Errorf("содержимое страницы %d байт при пределе %d", n, maxDecoded)
+	}
+}
+
 // /N объектного потока берётся из файла: до правки под него заранее
 // выделялась память — полтора терабайта на файл в килобайт.
 func TestObjectStreamHugeCount(t *testing.T) {
