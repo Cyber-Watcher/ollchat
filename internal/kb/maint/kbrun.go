@@ -93,6 +93,13 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 		if sync {
 			return err
 		}
+		// Заводится только коллекция, которой нет. Та, что есть, но не открылась
+		// (испорченный индекс, нет прав), — это её ошибка, и показать надо её:
+		// прежде вместо неё приходил отказ Create «коллекция уже есть», и
+		// человек не узнавал, что с коллекцией на самом деле.
+		if _, serr := os.Stat(filepath.Join(base.CollectionDir(name), "meta.json")); serr == nil {
+			return err
+		}
 		if coll, err = base.Create(name, ""); err != nil {
 			return err
 		}
