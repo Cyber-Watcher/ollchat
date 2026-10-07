@@ -350,6 +350,10 @@ func TestMergeForceKeepsMainGraph(t *testing.T) {
 	}
 	sameGraph(t, coll.Dir(), graphDirName, files)
 	noWorkDirs(t, base)
+	// Копия замка, переехавшая с рабочим каталогом, снята вместе с уплотнением.
+	if _, err := os.Stat(filepath.Join(coll.Dir(), lockMark)); !os.IsNotExist(err) {
+		t.Fatalf("после уплотнения остался замок коллекции: %v", err)
+	}
 
 	// И новое открытие коллекции (а с ним recoverCompaction) граф не трогает.
 	base2, err := OpenBase(base.Dir())
@@ -409,6 +413,68 @@ func TestRecoverCompactionReturnsCarriedGraph(t *testing.T) {
 			noWorkDirs(t, base2)
 			if got := c2.Stats().Chunks; got != before {
 				t.Fatalf("после восстановления кусков %d, было %d", got, before)
+			}
+		})
+	}
+}
+
+// Открытие коллекции посреди идущего уплотнения его рабочие каталоги не трогает.
+//
+// Открывают коллекцию все — служба, интерфейс, соседние команды, — и до
+// 07.10.2026 каждое открытие сносило рабочий каталог уплотнения, не глядя
+// на замок: `--kb-merge` падал на подмене, едва кто-то спросил базу знаний.
+func TestOpenKeepsRunningCompaction(t *testing.T) {
+	for _, stage := range []string{"замок в коллекции", "замок в рабочем каталоге", "между переименованиями"} {
+		t.Run(stage, func(t *testing.T) {
+			base, coll, _ := mergeFixture(t)
+			dir := coll.Dir()
+			tmp := base.tempDir("compact-lib")
+			old := base.tempDir("old-lib")
+			if err := os.MkdirAll(tmp, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tmp, "chunks.idx"), []byte("работа уплотнения"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Замок живого процесса — нашего собственного: уплотнение идёт.
+			switch stage {
+			case "замок в коллекции":
+				if err := placeMarker(filepath.Join(dir, lockMark)); err != nil {
+					t.Fatal(err)
+				}
+			case "замок в рабочем каталоге":
+				if err := placeMarker(filepath.Join(tmp, lockMark)); err != nil {
+					t.Fatal(err)
+				}
+			case "между переименованиями":
+				if err := placeMarker(filepath.Join(dir, lockMark)); err != nil {
+					t.Fatal(err)
+				}
+				if err := placeMarker(filepath.Join(tmp, lockMark)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(dir, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			base2, err := OpenBase(base.Dir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer base2.Close()
+			base2.Open("lib") // ошибка «коллекции нет» между переименованиями — честный ответ
+
+			if got, err := os.ReadFile(filepath.Join(tmp, "chunks.idx")); err != nil || string(got) != "работа уплотнения" {
+				t.Fatalf("рабочий каталог идущего уплотнения тронут: %q, %v", got, err)
+			}
+			if stage == "между переименованиями" {
+				if _, err := os.Stat(old); err != nil {
+					t.Fatalf("отставленный каталог идущего уплотнения тронут: %v", err)
+				}
+				if _, err := os.Stat(dir); err == nil {
+					t.Fatal("открытие вернуло прежний каталог на место посреди чужой подмены")
+				}
 			}
 		})
 	}

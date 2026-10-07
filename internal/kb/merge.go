@@ -170,6 +170,13 @@ func (c *Collection) Merge(ctx context.Context, opt MergeOpts, report func(Progr
 	if err := ensureDir(tmp); err != nil {
 		return res, err
 	}
+	// Копия замка в рабочем каталоге: по ней открытие коллекции из соседнего
+	// процесса узнаёт идущее уплотнение и в мгновение между двумя
+	// переименованиями подмены, и после неё — в новом каталоге она и станет
+	// замком коллекции, который снимет unlock.
+	if err := placeMarker(filepath.Join(tmp, lockMark)); err != nil {
+		return res, err
+	}
 	// Недоделанный каталог за собой не оставляем: он не мешает работе,
 	// но занимает место и сбивает с толку. Чужое из него (графы, если подмена
 	// сорвалась после переноса) возвращается в коллекцию, а не стирается.
@@ -485,13 +492,27 @@ func retireDir(dir, live string) error {
 //
 // Рабочие каталоги убираются через retireDir, а не RemoveAll: в них может
 // лежать перенесённый граф (обрыв между carryOver и подменой).
+//
+// **Идущее уплотнение не трогается.** Зовётся это при каждом Base.Open, а
+// коллекцию открывают и служба, и интерфейс, и соседние команды. До 07.10.2026
+// замок не проверялся: открытие коллекции из ollchat или ollmcp посреди
+// `--kb-merge` сносило его рабочий каталог, и уплотнение падало на подмене.
+// Уплотнение держит замок и в каталоге коллекции, и в своём рабочем
+// (Merge кладёт туда копию), поэтому между двумя переименованиями, когда
+// каталога коллекции нет вовсе, живой замок виден в обоих отставленных.
 func recoverCompaction(base *Base, name, dir string) {
 	old := base.tempDir("old-" + name)
+	tmp := base.tempDir("compact-" + name)
+	for _, d := range []string{dir, old, tmp} {
+		if held, _ := markerState(filepath.Join(d, lockMark)); held {
+			return
+		}
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		if _, err := os.Stat(old); err == nil {
 			os.Rename(old, dir)
 		}
 	}
 	retireDir(old, dir)
-	retireDir(base.tempDir("compact-"+name), dir)
+	retireDir(tmp, dir)
 }
