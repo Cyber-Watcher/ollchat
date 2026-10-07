@@ -540,7 +540,9 @@ func TestPageStateBounded(t *testing.T) {
 				bounded(t, 20*time.Second, func() { text = pageText(t, doc) })
 			})
 			// Сам поток и его копии — около 70 МБ; сверх этого копиться нечему.
-			if n > 250<<20 {
+			// Под детектором гонок выделения раздуты инструментированием,
+			// и предел мерил бы уже его: там проверяется только текст.
+			if !raceEnabled && n > 250<<20 {
 				t.Errorf("выделено %d МБ на странице из 16 МБ содержимого", n>>20)
 			}
 			if !strings.Contains(text, c.want) {
