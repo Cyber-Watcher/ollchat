@@ -492,23 +492,3 @@ func (m *Model) graphRemove(arg string) tea.Cmd {
 		return graphRemovedMsg{name: name, size: size}
 	}
 }
-
-// openGraphFor открывает граф названной или выбранной коллекции.
-func (m *Model) openGraphFor(arg string) (*graph.Graph, *kb.Collection, error) {
-	name := strings.TrimSpace(arg)
-	if name == "" {
-		name = m.kb.use
-	}
-	if name == "" {
-		return nil, nil, fmt.Errorf("коллекция не выбрана: /kb use <имя>")
-	}
-	coll, err := m.kbCollection(name)
-	if err != nil {
-		return nil, nil, err
-	}
-	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), m.cfg.Graph.Rules())
-	if err != nil {
-		return nil, nil, fmt.Errorf("граф коллекции %s: %w", name, err)
-	}
-	return g, coll, nil
-}

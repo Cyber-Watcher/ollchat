@@ -56,8 +56,6 @@ var (
 	styUserPrefix = lipgloss.NewStyle().Foreground(colUser).Bold(true)
 	styUserText   = lipgloss.NewStyle().Foreground(colUserText)
 
-	styModelPrefix = lipgloss.NewStyle().Foreground(colModel).Bold(true)
-
 	styThinking = lipgloss.NewStyle().Foreground(colThink).Italic(true)
 
 	styTool       = lipgloss.NewStyle().Foreground(colTool)

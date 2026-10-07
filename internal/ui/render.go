@@ -128,13 +128,6 @@ func (r *renderer) setWidth(w int) {
 	r.glam = g
 }
 
-func (r *renderer) setMarkdown(on bool) {
-	r.markdown = on
-	w := r.width
-	r.width = 0 // заставляем пересоздать рендерер
-	r.setWidth(w)
-}
-
 // renderMarkdown форматирует текст ответа модели.
 func (r *renderer) renderMarkdown(s string) string {
 	if r.glam == nil || strings.TrimSpace(s) == "" {

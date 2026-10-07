@@ -63,15 +63,6 @@ func (m *Model) graphMemoryStatus() string {
 	return "GR: " + humanBytes(st.Heap)
 }
 
-// humanSeconds — время открытия словами человека: до минуты в секундах
-// с десятой долей, дальше в минутах.
-func humanSeconds(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%.1f с", d.Seconds())
-	}
-	return fmt.Sprintf("%d мин %d с", int(d.Minutes()), int(d.Seconds())%60)
-}
-
 // humanBytes — занятая память в мегабайтах или гигабайтах.
 func humanBytes(n uint64) string {
 	const mb = 1 << 20

@@ -78,8 +78,7 @@ type reviewPanel struct {
 	g      *graph.Graph
 	kbc    *kb.Collection // для выдержек по сторонам пары; nil — без них
 	items  []reviewItem
-	done   int    // решено за это открытие
-	last   string // последнее решение — для строки заголовка
+	done   int // решено за это открытие
 	rows   int
 	undo   []reviewItem // что убрано из списка последним решением (для u)
 	undoAt []int
