@@ -1,6 +1,8 @@
 package document
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,5 +89,25 @@ func TestYearNote(t *testing.T) {
 	}
 	if s := YearNote(0, now); s != "" {
 		t.Errorf("оговорка без года: %q", s)
+	}
+}
+
+// TestHeadOfDoesNotCopyBook: начало текста для поиска копирайта отрезается
+// без копии всей книги. Прежде весь текст превращался в []rune — по четыре
+// байта на букву: книга в 200 МБ текста просила 800 МБ ради шести тысяч букв.
+func TestHeadOfDoesNotCopyBook(t *testing.T) {
+	text := "Copyright © 2019 " + strings.Repeat("я", 10<<20)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	head := headOf(text)
+	runtime.ReadMemStats(&after)
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 1<<20 {
+		t.Errorf("отрезать начало стоило %d КБ", alloc>>10)
+	}
+	if want := string([]rune(text)[:6000]); head != want {
+		t.Errorf("начало текста другое: %d байт вместо %d", len(head), len(want))
+	}
+	if short := "Copyright 2001"; headOf(short) != short {
+		t.Error("короткий текст изменился")
 	}
 }

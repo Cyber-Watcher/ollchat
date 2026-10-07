@@ -107,9 +107,14 @@ func PickYear(path, head string, meta int) (int, YearSource) {
 // headOf отрезает начало текста для поиска копирайта.
 func headOf(text string) string {
 	const limit = 6000 // примерно первые три страницы
-	r := []rune(text)
-	if len(r) > limit {
-		return string(r[:limit])
+	// Буквы считаются проходом по строке: []rune всей книги стоил по четыре
+	// байта на букву, и книга в 200 МБ текста просила 800 МБ ради начала.
+	n := 0
+	for i := range text {
+		if n == limit {
+			return text[:i]
+		}
+		n++
 	}
 	return text
 }
