@@ -67,6 +67,12 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 	if !exists {
 		return fmt.Errorf("файл настроек %s не найден.\nСоздайте его командой: ollchat --init-config", path)
 	}
+	// Тот же файл настроек, что у ollchat, — те же замечания к нему. Служба
+	// живёт под systemd, и опечатка в ключе иначе так и осталась бы
+	// невидимой: stderr уходит в журнал службы, где её и найдут.
+	for _, msg := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "ollmcp: предупреждение: %s: %s\n", cfg.Path, msg)
+	}
 
 	// Порт службы открывается до сборки: отказ «без ключа — только петля»
 	// и занятый порт видны сразу, а не после прогрева графа.
