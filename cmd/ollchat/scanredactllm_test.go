@@ -16,9 +16,11 @@ import (
 // Утечка в итоге — код выхода 3 через main, а не os.Exit посреди прогона:
 // тот не ждал defer, и журнал шагов оставался незакрытым.
 func TestScanRedactVerdictExitCode(t *testing.T) {
+	// Сообщение — о том, куда делись файлы: под обычными именами их нет,
+	// они записаны с пометкой UNVERIFIED.
 	code, msg := exitStatus(scanRedactVerdict(scanRedactSummary{calls: 2, leak: true}))
-	if code != 3 || msg != "" {
-		t.Errorf("утечка: код %d, сообщение %q; ожидался код 3 без сообщения", code, msg)
+	if code != 3 || !strings.Contains(msg, "UNVERIFIED") {
+		t.Errorf("утечка: код %d, сообщение %q; ожидался код 3 и пометка UNVERIFIED", code, msg)
 	}
 	if code, _ := exitStatus(scanRedactVerdict(scanRedactSummary{calls: 1})); code != 0 {
 		t.Errorf("чистый итог: код %d", code)

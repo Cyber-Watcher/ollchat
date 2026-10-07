@@ -131,7 +131,10 @@ func scanRedactVerdict(sum scanRedactSummary) error {
 		return fmt.Errorf("модель не вызвала %s ни разу — файлов нет", tools.NameScanRedact)
 	}
 	if sum.leak {
-		return &exitCode{code: 3}
+		// Как у --scan-redact: код 3 — последний прогон нашёл скрытое в итоге.
+		// Сообщение объясняет, куда делись файлы: под обычными именами их нет.
+		return &exitCode{code: 3, msg: "проверка повторным распознаванием нашла скрытое в итоге: " +
+			"обезличенные файлы записаны с пометкой UNVERIFIED в имени"}
 	}
 	return nil
 }
