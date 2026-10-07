@@ -986,10 +986,51 @@ func (c *Collection) lastCommit() (StoreState, bool) {
 	// который подменило уплотнение.
 	var meta Meta
 	if err := readJSON(filepath.Join(c.dir, "meta.json"), &meta); err == nil &&
-		(meta.State.Dat > 0 || meta.State.Idx > 0) {
+		(meta.State.Dat > 0 || meta.State.Idx > 0) && c.onlyTornTailAfter(meta.State) {
 		return meta.State, true
 	}
 	return StoreState{}, false
+}
+
+// onlyTornTailAfter сообщает, что состояние st из паспорта годится в отметку
+// отката: файлы хранилища не короче его, а за ним лежат только куски книг,
+// которых нет в реестре, — обрывок прерванной книги.
+//
+// **Зачем сверка.** Состояние в meta.json при пустом журнале — отметка
+// уплотнения, но не всегда. Сборки до 07.10.2026 после уплотнения держали
+// в памяти прежний паспорт, и первая же его запись (AddRoots, новый сегмент)
+// возвращала на диск состояние хранилища до уплотнения. Откат к такому
+// состоянию упёрся бы в отказ Rollback и остановил бы всякую доливку, а будь
+// оно короче — отрезал бы куски книг, которые в реестре есть. Для такой
+// коллекции отката нет вовсе, как и было до 07.10.2026.
+func (c *Collection) onlyTornTailAfter(st StoreState) bool {
+	if st.Dat <= 0 || st.Idx < 0 || st.Idx%chunkRecSize != 0 || int64(st.Count)*chunkRecSize != st.Idx {
+		return false
+	}
+	if info, err := os.Stat(filepath.Join(c.dir, "chunks.dat")); err != nil || info.Size() < st.Dat {
+		return false
+	}
+	f, err := os.Open(filepath.Join(c.dir, "chunks.idx"))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() < st.Idx {
+		return false
+	}
+	tail := make([]byte, info.Size()-st.Idx)
+	if n, _ := f.ReadAt(tail, st.Idx); n < len(tail) {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for off := 0; off+chunkRecSize <= len(tail); off += chunkRecSize {
+		if _, known := c.book(decodeRec(tail[off:]).Doc); known {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Collection) saveMeta() error {

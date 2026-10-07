@@ -242,6 +242,72 @@ func TestTornTailAfterMergeRolledBack(t *testing.T) {
 	}
 }
 
+// Состояние хранилища в паспорте, оставленное сборкой до 07.10.2026, отметкой
+// отката не считается.
+//
+// Прежнее уплотнение держало в памяти паспорт до подмены, и первая его запись
+// возвращала на диск прежнее состояние — при пустом журнале. Откат к нему
+// останавливал бы всякую доливку (файлы короче отметки), а к более короткому —
+// отрезал бы куски книг, которые есть в реестре.
+func TestStaleMetaStateIsNotRollbackMark(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stale func(StoreState) StoreState
+	}{
+		{"длиннее хранилища", func(st StoreState) StoreState {
+			return StoreState{Dat: st.Dat + 4096, Idx: st.Idx + 10*chunkRecSize, Count: st.Count + 10}
+		}},
+		{"короче, а за ним книги реестра", func(st StoreState) StoreState {
+			return StoreState{Dat: st.Dat / 2, Idx: chunkRecSize, Count: 1}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, coll, drop := mergeFixture(t)
+			if _, err := coll.Merge(context.Background(), MergeOpts{}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(drop); err != nil {
+				t.Fatal(err)
+			}
+			// Паспорт, каким его оставляла прежняя сборка: журнал пуст,
+			// а состояние хранилища в нём — не нынешнее.
+			path := filepath.Join(coll.Dir(), "meta.json")
+			var meta Meta
+			if err := readJSON(path, &meta); err != nil {
+				t.Fatal(err)
+			}
+			if meta.State.Count < 2 {
+				t.Fatalf("после уплотнения кусков %d — проверять нечего", meta.State.Count)
+			}
+			meta.State = tc.stale(meta.State)
+			if err := writeJSON(path, meta); err != nil {
+				t.Fatal(err)
+			}
+			before := texts0(t, coll)
+
+			books := filepath.Join(filepath.Dir(base.Dir()), "books", "books")
+			makeBook(t, books, "fresh.pdf", longPage("freshword new material"))
+			res, err := coll.Add(context.Background(), []string{books}, IndexOpts{}, nil)
+			if err != nil {
+				t.Fatalf("доливка остановилась на чужом состоянии в паспорте: %v", err)
+			}
+			if res.Added != 1 {
+				t.Fatalf("добавлено книг %d, ожидалась одна", res.Added)
+			}
+			after := texts0(t, coll)
+			if len(after) != len(before)+int(res.Chunks) {
+				t.Fatalf("кусков %d, ожидалось %d: откат отрезал куски книг из реестра",
+					len(after), len(before)+int(res.Chunks))
+			}
+			for i := range before {
+				if after[i] != before[i] {
+					t.Fatalf("кусок %d после доливки другой: %.40q вместо %.40q", i, after[i], before[i])
+				}
+			}
+		})
+	}
+}
+
 // Прерванная переиндексация не теряет книгу.
 //
 // Reindex помечал книгу удалённой до доливки, и Esc, занятый замок или сбой
