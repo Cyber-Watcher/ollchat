@@ -516,7 +516,8 @@ type Collection struct {
 
 	// Отображение «книга и номер куска → сквозной номер». Строится лениво,
 	// при первом обращении из ChunkByRef: нужно только графу понятий, и платить
-	// за него при каждом открытии коллекции незачем.
+	// за него при каждом открытии коллекции незачем. Подмена индекса (setIndex)
+	// его сбрасывает: оно годится только для того хранилища, по которому собрано.
 	refOnce sync.Once
 	byRef   map[uint64]int
 
@@ -647,6 +648,13 @@ func openIndexFiles(dir string) (indexFiles, error) {
 func (c *Collection) setIndex(f indexFiles) indexFiles {
 	old := indexFiles{store: c.store, segs: c.segs, index: c.index, vectors: c.vectors}
 	c.store, c.segs, c.index, c.vectors = f.store, f.segs, f.index, f.vectors
+	// Отображение ссылок «книга, номер → сквозной номер» построено по прежнему
+	// хранилищу и с новым не сходится: после доливки в нём нет новых книг,
+	// после уплотнения сквозные номера сдвинуты, и ChunkByRef отдавал бы
+	// кусок чужой книги. До 07.10.2026 оно строилось один раз на всю жизнь
+	// объекта; теперь — заново при первом обращении после подмены.
+	c.refOnce = sync.Once{}
+	c.byRef = nil
 	return old
 }
 
