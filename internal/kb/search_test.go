@@ -419,6 +419,59 @@ func TestOpenStoreChecksMagic(t *testing.T) {
 	}
 }
 
+// Хранилище без заголовка, у которого и указатели начинаются с нуля, — формат
+// без заголовка вовсе, а не порча: оно открывается и читается, как прежде.
+// Отказ здесь стоил бы коллекции, которую нечем пересобрать.
+func TestOpenStoreWithoutHeaderStillOpens(t *testing.T) {
+	src := t.TempDir()
+	w, err := CreateWriter(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Append(1, chunksOf("первая книга, первый кусок"))
+	w.Append(2, chunksOf("вторая книга"))
+	w.Commit()
+	w.Close()
+
+	// Та же коллекция без заголовка: блоки с нуля, указатели сдвинуты.
+	head := int64(len(storeMagic) + 1)
+	dat, err := os.ReadFile(filepath.Join(src, "chunks.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := os.ReadFile(filepath.Join(src, "chunks.idx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len(idx); i += chunkRecSize {
+		rec := decodeRec(idx[i:])
+		rec.BlockOff -= uint64(head)
+		rec.encode(idx[i:])
+	}
+	old := t.TempDir()
+	if err := os.WriteFile(filepath.Join(old, "chunks.dat"), dat[head:], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "chunks.idx"), idx, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenStore(old)
+	if err != nil {
+		t.Fatalf("хранилище без заголовка перестало открываться: %v", err)
+	}
+	defer s.Close()
+	want, _ := OpenStore(src)
+	defer want.Close()
+	for i := 0; i < want.Count(); i++ {
+		got, err := s.Text(i)
+		exp, _ := want.Text(i)
+		if err != nil || got != exp {
+			t.Fatalf("кусок %d: %q (%v), ожидалось %q", i, got, err, exp)
+		}
+	}
+}
+
 // TestUnfinishedSegmentIgnored — сегмент без seg.meta остался от прерванной
 // работы и не должен участвовать в поиске.
 func TestUnfinishedSegmentIgnored(t *testing.T) {
