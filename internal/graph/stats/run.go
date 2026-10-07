@@ -923,12 +923,24 @@ func pprStats(g *graph.Graph, path string) {
 // Возвращает узлы по убыванию веса, не больше limit. Обход ограничен тремя
 // шагами: дальше вес размазывается по всему графу и порядок перестаёт зависеть
 // от вопроса.
+//
+// Порядок повторяем от запуска к запуску: узлы обходятся по возрастанию
+// номера, равный вес решается номером. До 07.10.2026 обход шёл по карте —
+// порядок сложения дробей менял младшие разряды сумм, а равные веса
+// (соседи звезды получают поровну) расставлялись как выпадет, и места
+// в замере A4 «в топ-5» и «ср. место» плясали между прогонами.
 func personalRank(g *graph.Graph, seed uint32, steps int, damp float64, limit int) []uint32 {
 	cur := map[uint32]float64{seed: 1}
 	acc := map[uint32]float64{}
 	for s := 0; s < steps; s++ {
 		next := map[uint32]float64{}
-		for id, w := range cur {
+		ids := make([]uint32, 0, len(cur))
+		for id := range cur {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		for _, id := range ids {
+			w := cur[id]
 			ns := g.Edges().Neighbors(id)
 			if len(ns) == 0 {
 				continue
@@ -946,7 +958,12 @@ func personalRank(g *graph.Graph, seed uint32, steps int, damp float64, limit in
 	for id := range acc {
 		order = append(order, id)
 	}
-	sort.Slice(order, func(i, j int) bool { return acc[order[i]] > acc[order[j]] })
+	sort.Slice(order, func(i, j int) bool {
+		if acc[order[i]] != acc[order[j]] {
+			return acc[order[i]] > acc[order[j]]
+		}
+		return order[i] < order[j]
+	})
 	if len(order) > limit {
 		order = order[:limit]
 	}
