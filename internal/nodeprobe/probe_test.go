@@ -2,7 +2,9 @@ package nodeprobe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -253,6 +255,83 @@ func TestSnapshotSessions(t *testing.T) {
 	rep = Snapshot(context.Background(), Opts{Run: f.run, Want: Sections{Sessions: true}})
 	if len(rep.Sessions) != 1 {
 		t.Errorf("чужой сеанс не замечен: %+v", rep.Sessions)
+	}
+}
+
+// В снимок попадают только переменные Ollama и видеокарт, а похожие на секрет
+// скрыты. Раньше наружу уходил весь Environment= юнита: ключи облака, пароли
+// прокси, токены соседних служб.
+func TestSnapshotEnvWhitelist(t *testing.T) {
+	f := baseRun()
+	f.out["systemctl show"] = "ActiveState=active\nMainPID=12345\n" +
+		`Environment=OLLAMA_NUM_PARALLEL=4 OLLAMA_MODELS=/srv/models CUDA_VISIBLE_DEVICES=0 ` +
+		`OLLAMA_API_KEY=ключ-олламы OLLAMA_HOST=http://user:пароль-прокси@proxy:3128 ` +
+		`AWS_SECRET_ACCESS_KEY=ключ-облака HOME=/home/секретный OLLNODE_TOKEN=токен-соседа` + "\n"
+	rep := Snapshot(context.Background(), Opts{Run: f.run, Want: Sections{Service: true}})
+
+	want := map[string]string{
+		"OLLAMA_NUM_PARALLEL": "4", "OLLAMA_MODELS": "/srv/models", "CUDA_VISIBLE_DEVICES": "0",
+		"OLLAMA_API_KEY": hiddenValue, "OLLAMA_HOST": hiddenValue,
+	}
+	if !reflect.DeepEqual(rep.Service.Env, want) {
+		t.Errorf("переменные службы:\n получено %v\n ожидалось %v", rep.Service.Env, want)
+	}
+	if rep.Service.Slots() != 4 {
+		t.Errorf("слоты потеряны: %d", rep.Service.Slots())
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"ключ-олламы", "пароль-прокси", "ключ-облака", "секретный", "токен-соседа", "AWS_", "HOME"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("в снимок утекло %q: %s", leak, b)
+		}
+	}
+}
+
+// Переменные у службы есть, но ни одной нужной: это не «переменные не видны»
+// (EnvironmentFile), а «не заданы», и пометки быть не должно.
+func TestSnapshotEnvOnlyForeign(t *testing.T) {
+	f := baseRun()
+	f.out["systemctl show"] = "ActiveState=active\nMainPID=12345\nEnvironment=HOME=/root PATH=/usr/bin\n"
+	rep := Snapshot(context.Background(), Opts{Run: f.run, Want: Sections{Service: true}})
+	if rep.Service.Env != nil {
+		t.Errorf("чужие переменные попали в снимок: %v", rep.Service.Env)
+	}
+	if !rep.Has("service_env") {
+		t.Errorf("видимые переменные объявлены невидимыми: %+v", rep.Missing)
+	}
+}
+
+// По сети уходит только число чужих сеансов: имена, адреса и команды — нет.
+// Строки остаются тому, кто снимает снимок у себя (ночной прогон).
+func TestSessionsLeaveOnlyCount(t *testing.T) {
+	f := baseRun()
+	f.out["w -h"] = "ivanov   pts/1    192.0.2.7    10:00   1.00s  python train.py\n" +
+		"admin    pts/0    10:00    1.00s  ollama ps\n"
+	t.Setenv("USER", "admin")
+	rep := Snapshot(context.Background(), Opts{Run: f.run, Want: Sections{Sessions: true}})
+	if rep.SessionCount != 1 || len(rep.Sessions) != 1 {
+		t.Fatalf("чужих сеансов %d, строк %d; ожидалось по одному", rep.SessionCount, len(rep.Sessions))
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"ivanov", "192.0.2.7", "train.py"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("в снимок для сети утекло %q: %s", leak, b)
+		}
+	}
+	if !strings.Contains(string(b), `"sessions_count":1`) {
+		t.Errorf("числа сеансов в снимке нет: %s", b)
+	}
+
+	// Снимок прежнего ollnode со строками сеансов новый клиент разбирает.
+	var old Report
+	if err := json.Unmarshal([]byte(`{"service":{"name":"ollama"},"sessions":["ivanov pts/1"]}`), &old); err != nil {
+		t.Errorf("снимок прежней версии не разобрался: %v", err)
 	}
 }
 

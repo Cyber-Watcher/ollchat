@@ -145,7 +145,7 @@ type Service struct {
 	State       string            `json:"state,omitempty"` // active, inactive, failed
 	MainPID     int               `json:"main_pid,omitempty"`
 	ActiveSince string            `json:"active_since,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
+	Env         map[string]string `json:"env,omitempty"` // только Ollama и карты, секреты скрыты (publicEnv)
 }
 
 // Slots — сколько запросов служба обрабатывает разом по своим настройкам.
@@ -233,8 +233,13 @@ type Report struct {
 	// Requests — сколько запросов `POST /api/` пришло к службе за окно
 	// журнала. Сами строки о запросах в Journal не идут: их тысячи, а нужно
 	// от них одно число — была ли у службы чужая работа только что.
-	Requests int      `json:"requests,omitempty"`
-	Sessions []string `json:"sessions,omitempty"`
+	Requests int `json:"requests,omitempty"`
+	// Sessions — строки `w -h` о чужих сеансах: кто, откуда, что запустил.
+	// Только для того, кто снимает снимок у себя (ночной прогон пишет их в свой
+	// журнал); по сети не уходят — это имена, адреса и команды чужих людей,
+	// а ollnode отдавал их каждому, у кого есть токен. Наружу — только число.
+	Sessions     []string `json:"-"`
+	SessionCount int      `json:"sessions_count,omitempty"`
 
 	// Missing — что не удалось собрать. Пустой раздел без причины —
 	// это утверждение «там ничего нет», и оно должно быть правдой.
@@ -467,6 +472,7 @@ func (r *Report) collectSessions(ctx context.Context, o Opts) {
 		}
 		r.Sessions = append(r.Sessions, line)
 	}
+	r.SessionCount = len(r.Sessions)
 }
 
 // currentUser — под кем идёт процесс. Сначала окружение, затем учётная
