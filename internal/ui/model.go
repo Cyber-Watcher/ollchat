@@ -295,8 +295,10 @@ type Model struct {
 	// archive — идущий архив коллекции с графом, см. archive.go.
 	archive *archiveJob
 	// archiveErrShown — какой отказ планового архива уже показан: один и тот
-	// же каждые пять минут приучил бы не читать ленту.
+	// же каждые пять минут приучил бы не читать ленту. archiveErrHeld — отказ,
+	// придержанный до конца ответа и ещё не показанный.
 	archiveErrShown string
+	archiveErrHeld  string
 	// heldNotes — заметки, придержанные до конца ответа модели.
 	heldNotes []block
 	// heldAttach — файлы /add, дочитанные посреди хода: в историю они лягут,
@@ -1022,17 +1024,6 @@ func (m *Model) stopStreaming() {
 // finishTurn завершает обмен: пишет ответ в журнал и сбрасывает состояние.
 func (m *Model) finishTurn() {
 	m.streaming = false
-	// Придержанное сообщение о состоянии графа показываем теперь: в середину
-	// ответа влезать нельзя, а забывать о беде — тем более.
-	if m.healthWaiting {
-		m.healthWaiting = false
-		if text := healthHintText(m.healthAdvice, m.kb.use); text != "" && text != m.healthShown {
-			defer func() {
-				m.addBlock(block{kind: blockHint, text: text})
-				m.healthShown = text
-			}()
-		}
-	}
 	m.events = nil
 	if m.cancel != nil {
 		m.cancel()
@@ -1068,6 +1059,9 @@ func (m *Model) finishTurn() {
 	// Файлы, дочитанные посреди хода, — теперь, когда историю никто
 	// не дописывает.
 	m.flushHeldAttach()
+	// Придержанные заметки об архиве и о состоянии графа — теперь: в середину
+	// ответа влезать нельзя, а забывать о беде — тем более.
+	m.flushHeldNotes()
 }
 
 // stampTurn помечает блоки ответа завершившегося хода временем и моделью.
