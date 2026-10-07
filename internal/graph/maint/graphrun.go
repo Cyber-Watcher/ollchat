@@ -2075,8 +2075,12 @@ func writeResolveTSV(g *graph.Graph, pairs []graph.ResolvePair, path string) err
 // **Склейка снимается целиком** ключом `--graph-merge-drop`: решения лежат
 // отдельным журналом и надеваются на граф при чтении. Это единственная защита
 // от неверного решения, потому что по смыслу склейка необратима.
+//
+// dry — только показать (`--graph-merge-dry` или `--kb-dry-run`): ни журнал,
+// ни признак работы не пишутся. yes — не спрашивать подтверждения снятия
+// (`--kb-yes`, для скриптов).
 func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCosSame float64,
-	drop, dry bool) error {
+	drop, dry, yes bool) error {
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		return err
@@ -2092,19 +2096,9 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 		return err
 	}
 	defer g.Close()
-	unmark, err := markWork(g, "склейка двойников")
-	if err != nil {
-		return err
-	}
-	defer unmark()
 
 	if drop {
-		had := g.Merges().Count()
-		if err := g.DropMerges(); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "склейки сняты: было поглощено %d понятий, граф вернулся в прежний вид\n", had)
-		return nil
+		return dropMerges(stdout, g, name, dry, yes)
 	}
 
 	if file == "" {
@@ -2159,6 +2153,19 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 		return nil
 	}
 
+	// Признак работы и замок сборки — только у настоящей записи. Сборка
+	// со связыванием (--graph-link-new) сама дописывает склейки в этот журнал,
+	// и две записи разом перемешали бы его; отказ под сборкой дешевле.
+	unmark, err := markWork(g, "склейка двойников")
+	if err != nil {
+		return err
+	}
+	defer unmark()
+	if err := g.Lock(); err != nil {
+		return err
+	}
+	defer g.Unlock()
+
 	before := g.Entities().Live()
 	n, err := g.Merges().Add(recs)
 	if err != nil {
@@ -2168,6 +2175,119 @@ func Merge(stdout io.Writer, cfg *config.Config, name, file, level string, minCo
 	fmt.Fprintf(stdout, "понятий было %d, стало %d\n", len(before), len(before)-n)
 	fmt.Fprintln(stdout, "снять всё: ollchat --graph-merge "+name+" --graph-merge-drop")
 	return nil
+}
+
+// mergesJournal — журнал склеек в каталоге графа (graph/merge.go).
+const mergesJournal = "merges.jsonl"
+
+// dropMerges снимает все склейки разом — ветка `--graph-merge-drop`.
+//
+// **Журнал не удаляется, а уходит в копию** `merges.jsonl.bak-<время>`,
+// как у `--graph-unmerge`. До 07.10.2026 здесь стоял os.Remove, и стоял
+// раньше проверки сухого прогона: кто хотел только посмотреть, что снимет
+// drop, терял журнал вердиктов арбитра — около 22 тысяч склеек — без копии,
+// без вопроса и не глядя на идущую сборку. Теперь сухой прогон только
+// показывает; снятие идёт под замком сборки, спрашивает набранное ДА
+// (в скрипте — --kb-yes) и оставляет копию, из которой журнал возвращается
+// переименованием.
+func dropMerges(stdout io.Writer, g *graph.Graph, name string, dry, yes bool) error {
+	path := filepath.Join(g.Dir(), mergesJournal)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(stdout, "коллекция %s: журнала склеек нет — снимать нечего\n", name)
+			return nil
+		}
+		return err
+	}
+	recs := g.Merges().Records()
+	gone := g.Merges().Count()
+	fmt.Fprintf(stdout, "коллекция %s: снять ВСЕ склейки — поглощено понятий %d, решений в журнале %d\n",
+		name, gone, len(recs))
+	for i, r := range recs {
+		if i >= 10 {
+			fmt.Fprintf(stdout, "  …и ещё %d\n", len(recs)-10)
+			break
+		}
+		from, _ := g.Entities().RawEntity(r.From)
+		to, _ := g.Entities().RawEntity(r.To)
+		fmt.Fprintf(stdout, "  %s ⇠ отделится от ⇢ %s  (cos %.3f)\n", cutName(from.Name, 34), cutName(to.Name, 34), r.Cos)
+	}
+	if dry {
+		fmt.Fprintf(stdout, "сухой прогон: ничего не тронуто; без него журнал ушёл бы в копию %s.bak-<время>\n", mergesJournal)
+		return nil
+	}
+
+	unmark, err := markWork(g, "снятие всех склеек")
+	if err != nil {
+		return err
+	}
+	defer unmark()
+	// Замок — до вопроса: незачем спрашивать человека, если под идущей сборкой
+	// снятие всё равно не пойдёт, и между ответом и переименованием сборка
+	// не должна успеть начаться.
+	if err := g.Lock(); err != nil {
+		return err
+	}
+	defer g.Unlock()
+	if err := confirmDropMerges(stdout, name, gone, yes); err != nil {
+		return err
+	}
+	backup, err := asideName(path, time.Now())
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(path, backup); err != nil {
+		return fmt.Errorf("журнал склеек не отложен в копию: %w", err)
+	}
+	fmt.Fprintf(stdout, "склейки сняты: было поглощено %d понятий, граф вернулся в прежний вид\n", gone)
+	fmt.Fprintf(stdout, "прежний журнал: %s\n", backup)
+	fmt.Fprintf(stdout, "вернуть, пока не склеено заново: mv %s %s\n", shellQuote(backup), shellQuote(path))
+	fmt.Fprintf(stdout, "дальше: ollchat --graph-embed-stale %s (векторы выживших), "+
+		"ollchat --graph-communities %s (темы вернувшихся понятий), ollchat --graph-doctor %s\n", name, name, name)
+	return nil
+}
+
+// confirmDropMerges — подтверждение словом, как у восстановления из архива
+// (confirmRestore): снятие всех склеек — действие намеренное, и согласия
+// одним нажатием для него мало.
+func confirmDropMerges(w io.Writer, name string, gone int, yes bool) error {
+	if yes {
+		fmt.Fprintln(w, "--kb-yes: подтверждение пропущено.")
+		return nil
+	}
+	if !isTTY(os.Stdin) {
+		return fmt.Errorf("снятие всех склеек требует подтверждения, а ввод не с терминала;\n" +
+			"посмотреть, что снимется, — --graph-merge-dry; в скрипте добавьте --kb-yes, если действительно этого хотите")
+	}
+	fmt.Fprintf(w, "\nСнять все склейки коллекции %s (поглощено понятий: %d)? Журнал уйдёт в копию рядом.\n"+
+		"Напишите ДА (заглавными) и нажмите Enter: ", name, gone)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("подтверждение не получено: %w", err)
+	}
+	if strings.TrimSpace(line) != "ДА" {
+		return fmt.Errorf("снятие склеек отменено: журнал остался на месте")
+	}
+	return nil
+}
+
+// asideName — свободное имя копии `<файл>.bak-<время>` рядом с файлом, тем же
+// образцом, что у --graph-unmerge и чисток графа. Занятое имя не затирается:
+// две правки в одну секунду иначе оставили бы одну копию из двух, и
+// os.Rename молча заменил бы прежнюю.
+func asideName(path string, now time.Time) (string, error) {
+	base := path + ".bak-" + now.Format("20060102-150405")
+	name := base
+	for i := 1; ; i++ {
+		_, err := os.Lstat(name)
+		if os.IsNotExist(err) {
+			return name, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		name = fmt.Sprintf("%s-%d", base, i)
+	}
 }
 
 // verdictPair — пара из файла разбора, уже с выбранным главным.

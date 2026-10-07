@@ -3,6 +3,7 @@ package maint
 import (
 	"os"
 	"strings"
+	"unicode"
 
 	"golang.org/x/term"
 )
@@ -30,6 +31,29 @@ func dashes(n int) string {
 // необратимого действия — гораздо дороже. Поймано своим же тестом 30.08.2026.
 func isTTY(f *os.File) bool {
 	return term.IsTerminal(int(f.Fd()))
+}
+
+// shellQuote берёт слово в одинарные кавычки, если без них оболочка его
+// разрежет или истолкует: команды, которые печатают доктор и чистки,
+// копируют в терминал как есть, и путь «/Machine Learning» без кавычек
+// превращался в два довода, а «(корень)» — в синтаксическую ошибку bash.
+// Буквы любого алфавита и обычные знаки пути кавычек не требуют.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("/._-+,:@%=", r) {
+			continue
+		}
+		safe = false
+		break
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // bar рисует полосу заполнения.

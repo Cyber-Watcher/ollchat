@@ -270,8 +270,8 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-merge: уплотнить, даже если по коллекции собран граф;\n"+
 			"граф после этого не откроется, и собирать его придётся заново")
 	f.kbYes = flag.Bool("kb-yes", false,
-		"с --kb-merge: не спрашивать подтверждений (для скриптов);\n"+
-			"без него уплотнение дважды переспрашивает и требует ответа ДА")
+		"с --kb-merge и --graph-merge-drop: не спрашивать подтверждений (для скриптов);\n"+
+			"без него уплотнение дважды переспрашивает и требует ответа ДА, снятие склеек — один раз")
 	f.kbRetitle = flag.String("kb-retitle", "",
 		"починить технические названия книг из метаданных: --kb-retitle books (с --kb-dry-run — только показать)")
 	f.kbEmbed = flag.String("kb-embed", "", "посчитать векторы(смыслы) коллекции (эмбеддинги) без запуска интерфейса")
@@ -451,7 +451,8 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphMergeMinSame = flag.Float64("graph-merge-min-cos-same", 0,
 		"с --graph-merge: отдельный порог близости для пар внутри одного языка (0 — не применять)")
 	f.graphMergeDrop = flag.Bool("graph-merge-drop", false,
-		"с --graph-merge: снять все склейки, вернув граф в прежний вид")
+		"с --graph-merge: снять все склейки, вернув граф в прежний вид; журнал уходит в копию merges.jsonl.bak-<время>,\n"+
+			"нужен ответ ДА (в скрипте — --kb-yes); с --graph-merge-dry или --kb-dry-run — только показать")
 	f.graphBook = flag.String("graph-book", "",
 		"показать вклад книги в граф: --graph-book books --graph-book-name <часть имени>")
 	f.graphDocsFile = flag.String("graph-docs-file", "",
@@ -809,7 +810,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 
 	case *f.graphMerge != "":
 		return true, gmaint.Merge(os.Stdout, cfg, *f.graphMerge, *f.graphMergeFile, *f.graphMergeLevel,
-			*f.graphMergeMinSame, *f.graphMergeDrop, *f.graphMergeDry)
+			*f.graphMergeMinSame, *f.graphMergeDrop, *f.graphMergeDry || *f.kbDry, *f.kbYes)
 	case *f.graphResolve != "":
 		return true, gmaint.Resolve(os.Stdout, cfg, *f.graphResolve, *f.graphResolveMinCos, *f.graphResolveMinCosMut, *f.graphResolveFull,
 			*f.graphResolveCross, *f.graphResolveNormKey, *f.graphResolveShow, *f.graphResolveOut)
