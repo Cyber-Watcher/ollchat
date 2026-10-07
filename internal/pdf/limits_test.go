@@ -3,6 +3,7 @@ package pdf
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -125,6 +126,80 @@ func TestToUnicodeRangeAtTop(t *testing.T) {
 			t.Errorf("получено %d байт: %.40q…", len(got), got)
 		}
 	})
+}
+
+// ttfWithCmap собирает файл шрифта из одной таблицы cmap с одной подтаблицей.
+func ttfWithCmap(sub []byte) []byte {
+	be := binary.BigEndian
+	cmap := make([]byte, 12, 12+len(sub))
+	be.PutUint16(cmap[2:], 1)   // одна подтаблица
+	be.PutUint16(cmap[4:], 3)   // Windows
+	be.PutUint16(cmap[6:], 10)  // Unicode полный
+	be.PutUint32(cmap[8:], 12)  // смещение подтаблицы
+	cmap = append(cmap, sub...) //
+	font := make([]byte, 28, 28+len(cmap))
+	be.PutUint32(font[0:], 0x00010000)
+	be.PutUint16(font[4:], 1) // одна таблица
+	copy(font[12:], "cmap")
+	be.PutUint32(font[20:], 28)
+	be.PutUint32(font[24:], uint32(len(cmap)))
+	return append(font, cmap...)
+}
+
+// cmapFormat12 — подтаблица формата 12 из групп {начало, конец, первый глиф}.
+func cmapFormat12(groups ...[3]uint32) []byte {
+	be := binary.BigEndian
+	sub := make([]byte, 16+12*len(groups))
+	be.PutUint16(sub[0:], 12)
+	be.PutUint32(sub[4:], uint32(len(sub)))
+	be.PutUint32(sub[12:], uint32(len(groups)))
+	for i, g := range groups {
+		be.PutUint32(sub[16+12*i:], g[0])
+		be.PutUint32(sub[20+12*i:], g[1])
+		be.PutUint32(sub[24+12*i:], g[2])
+	}
+	return sub
+}
+
+// Таблица cmap из встроенного шрифта: формат 12 в PDF на 2 КБ давал
+// 26 миллионов записей, группа у верхней границы uint32 зацикливала счёт,
+// а пересекающиеся сегменты формата 4 давали 2³¹ витков. Обычная таблица
+// разбирается как прежде.
+func TestTrueTypeCmapBounded(t *testing.T) {
+	var groups [][3]uint32
+	for i := uint32(0); i < 400; i++ {
+		groups = append(groups, [3]uint32{i * 0x10000, i*0x10000 + 0xFFFF, i * 0x10000})
+	}
+	groups = append(groups, [3]uint32{0xFFFF0000, 0xFFFFFFFF, 1})
+	hostile := ttfWithCmap(cmapFormat12(groups...))
+
+	// Формат 4: 2000 сегментов во всю ширину BMP, idDelta = 1.
+	const seg = 2000
+	be := binary.BigEndian
+	f4 := make([]byte, 16+seg*8)
+	be.PutUint16(f4[0:], 4)
+	be.PutUint16(f4[6:], seg*2)
+	for i := 0; i < seg; i++ {
+		be.PutUint16(f4[14+i*2:], 0xFFFE)          // конец сегмента
+		be.PutUint16(f4[16+seg*2+i*2:], 1)         // начало
+		be.PutUint16(f4[16+seg*4+i*2:], uint16(i)) // сдвиг номера глифа
+	}
+	overlapping := ttfWithCmap(f4)
+
+	bounded(t, 10*time.Second, func() {
+		if n := len(parseTrueTypeCmap(hostile)); n > maxGlyphID {
+			t.Errorf("формат 12: записей %d при глифах до %d", n, maxGlyphID)
+		}
+		if n := len(parseTrueTypeCmap(overlapping)); n > maxGlyphID {
+			t.Errorf("формат 4: записей %d", n)
+		}
+	})
+
+	// Обычная группа: коды A–Z на глифы 3–28.
+	normal := parseTrueTypeCmap(ttfWithCmap(cmapFormat12([3]uint32{'A', 'Z', 3})))
+	if len(normal) != 26 || normal[3] != 'A' || normal[28] != 'Z' {
+		t.Errorf("обычная таблица разобрана неверно: %d записей, %q %q", len(normal), normal[3], normal[28])
+	}
 }
 
 // /N объектного потока берётся из файла: до правки под него заранее
