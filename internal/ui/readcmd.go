@@ -66,7 +66,7 @@ func (m *Model) readCmd(arg string) tea.Cmd {
 	var b strings.Builder
 	for i, h := range hits {
 		e := find.Excerpt{
-			ID: h.ID, Book: h.Book, Author: h.Author, Year: h.Year,
+			ID: h.ID, Book: h.Book, Rel: h.Rel, Author: h.Author, Year: h.Year,
 			Unit: h.Unit, From: h.UnitFrom, To: h.UnitTo,
 		}
 		if i > 0 {

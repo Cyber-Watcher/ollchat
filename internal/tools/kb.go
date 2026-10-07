@@ -286,16 +286,28 @@ func (t *kbReadTool) run(id string, around int) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	head := parts[0]
-	fmt.Fprintf(&b, "%s", head.Book)
-	if head.Author != "" {
-		fmt.Fprintf(&b, " · %s", head.Author)
-	}
-	fmt.Fprintf(&b, " · фрагменты %d\n\n", len(parts))
+	b.WriteString(readHeader(parts))
 	for _, p := range parts {
 		fmt.Fprintf(&b, "── %s %d · id=%s ──\n%s\n\n", p.Unit, p.UnitFrom, p.ID, strings.TrimSpace(p.Text))
 	}
 	return t.opts.truncate(b.String()), nil
+}
+
+// readHeader — первая строка ответа kb_read: название, автор, число фрагментов.
+//
+// Заголовок тот же, что у выдачи поиска (`formatHit`, `find.Line`): у
+// текстового файла после названия идёт путь от корня коллекции, у книги
+// название как есть. Отдельная функция, а не строки внутри run, — чтобы
+// тест проверял именно заголовок, без индекса и коллекции.
+func readHeader(parts []kb.Result) string {
+	head := parts[0]
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s", kb.TitleWithPath(head.Book, head.Rel))
+	if head.Author != "" {
+		fmt.Fprintf(&b, " · %s", head.Author)
+	}
+	fmt.Fprintf(&b, " · фрагменты %d\n\n", len(parts))
+	return b.String()
 }
 
 // collection выбирает коллекцию: названную явно, иначе выбранную пользователем.
