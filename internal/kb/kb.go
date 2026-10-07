@@ -862,10 +862,15 @@ func (c *Collection) Breakdown() []FolderStat {
 //
 // Книга может лежать и вне записанных корней — например, если корень потом
 // убрали. Тогда честнее показать имя её каталога, чем прятать её в «прочее».
+//
+// «Вне корня» — это «..» целым элементом пути, как в relToRoots, а не любое
+// начало на две точки: каталог «..заметки» под корнем лежит внутри него,
+// и до 07.10.2026 книги из него приписывались своему подкаталогу, а при
+// нескольких корнях — и чужому корню.
 func topFolder(path string, roots []string) string {
 	for _, root := range roots {
 		rel, err := filepath.Rel(root, path)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
 		if i := strings.IndexByte(rel, filepath.Separator); i > 0 {
