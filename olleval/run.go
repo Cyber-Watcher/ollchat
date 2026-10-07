@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
@@ -30,7 +31,56 @@ type Night struct {
 	// после конца окна. nil — не следить (ручной прогон с явным пределом).
 	Watch func() (time.Time, bool)
 
+	// HeartbeatEvery — как часто идущий прогон обновляет отметку жизни;
+	// 0 — heartbeatEvery.
+	HeartbeatEvery time.Duration
+
 	failStreak int // сорванных попыток подряд — по ним лечим сервер
+
+	beatMu sync.Mutex
+	beat   Heartbeat // чем прогон занят сейчас — это и пишется в отметку
+}
+
+// heartbeatEvery — как часто идущий прогон обновляет отметку жизни.
+//
+// Отметка писалась раз на попытку, а попытка — это генерация до run.timeout
+// (20 минут) и проверка до verify.timeout (10 минут). Служба возврата сочла
+// бы прогон мёртвым через 15 минут тишины и посреди долгой генерации открыла
+// бы сервер людям с перезапуском Ollama — замер испорчен, стенд открыт.
+// Поэтому отметку обновляет тикер всё время прогона, а попытка лишь
+// меняет в ней модель и задачу.
+const heartbeatEvery = time.Minute
+
+// mark записывает в отметку, чем прогон занят, и сразу её обновляет.
+func (n *Night) mark(model, task string) {
+	n.beatMu.Lock()
+	defer n.beatMu.Unlock()
+	if n.beat.Started.IsZero() {
+		n.beat = Heartbeat{PID: os.Getpid(), Night: n.Store.Night, Started: time.Now()}
+	}
+	n.beat.Model, n.beat.Task = model, task
+	_ = WriteHeartbeat(n.Store.Root, n.beat)
+}
+
+// keepAlive обновляет отметку на каждый тик, пока прогон не кончится.
+// Вернувшаяся функция останавливает тикер и ждёт последней записи:
+// после неё отметку можно снимать, не боясь, что тикер вернёт её обратно.
+func (n *Night) keepAlive(tick <-chan time.Time) (stop func()) {
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick:
+				n.beatMu.Lock()
+				_ = WriteHeartbeat(n.Store.Root, n.beat)
+				n.beatMu.Unlock()
+			}
+		}
+	}()
+	return func() { close(done); <-exited }
 }
 
 // SelectModels решает, кто участвует в прогоне. Список берётся с сервера,
@@ -78,6 +128,18 @@ func shortDigest(d string) string {
 // свой набор. Перекладывать задачи между моделями нельзя: перезагрузка
 // `qwen3.5:122b` с диска стоит минут, и на них ушла бы половина ночи.
 func (n *Night) Run(ctx context.Context) (int, error) {
+	n.mark("", "")
+	every := n.HeartbeatEvery
+	if every <= 0 {
+		every = heartbeatEvery
+	}
+	tick := time.NewTicker(every)
+	stop := n.keepAlive(tick.C)
+	defer func() {
+		stop()
+		tick.Stop()
+	}()
+
 	var done int
 	for _, card := range n.Models {
 		if card.Skipped != "" {
@@ -191,11 +253,10 @@ func (n *Night) attempt(ctx context.Context, card ModelCard, suite *Suite, task 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	// Отметка «прогон жив» обновляется на каждой попытке: по ней служба возврата
-	// отличает работающий прогон от умершего посреди окна.
-	_ = WriteHeartbeat(n.Store.Root, Heartbeat{
-		PID: os.Getpid(), Night: n.Store.Night, Model: card.Name, Task: task.ID,
-	})
+	// Отметка «прогон жив»: по ней служба возврата отличает работающий прогон
+	// от умершего посреди окна. Свежей её держит тикер (keepAlive), а здесь
+	// в неё пишется, какая попытка идёт.
+	n.mark(card.Name, task.ID)
 	a := Attempt{Model: card.Name, Task: task, Suite: suite.Name, Repeat: rep, Dir: dir}
 
 	m, err := n.Runner.Run(ctx, a)

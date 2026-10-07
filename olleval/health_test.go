@@ -140,6 +140,65 @@ func TestRunFilesReplacedWhole(t *testing.T) {
 	}
 }
 
+// Отметку обновляет тикер, а не только начало попытки: попытка длится
+// до получаса, и раньше отметка за это время протухала.
+func TestHeartbeatRefreshedDuringAttempt(t *testing.T) {
+	store, err := NewStore(t.TempDir(), "2026-10-07")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &Night{Store: store}
+	n.mark("qwen3.5:122b", "go-u1")
+	tick := make(chan time.Time)
+	stop := n.keepAlive(tick)
+	// Отметку сносят, тикер обязан вернуть её — с той же попыткой.
+	if err := ClearHeartbeat(store.Root); err != nil {
+		t.Fatal(err)
+	}
+	tick <- time.Now()
+	stop()
+	hb, alive := LiveRun(store.Root, time.Minute)
+	if !alive || hb.Model != "qwen3.5:122b" || hb.Task != "go-u1" || hb.Started.IsZero() {
+		t.Errorf("тикер не обновил отметку: %+v, жив %v", hb, alive)
+	}
+	// После остановки тикер отметку не трогает: её снимают в конце прогона.
+	if err := ClearHeartbeat(store.Root); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case tick <- time.Now():
+		t.Error("тикер работает после остановки")
+	default:
+	}
+}
+
+// Порог «прогон мёртв» больше самой долгой попытки: прежние 15 минут были
+// короче одной генерации, и служба возврата открывала сервер посреди неё.
+func TestStaleExceedsLongestAttempt(t *testing.T) {
+	cfg := DefaultConfig()
+	longest := time.Duration(cfg.Run.Timeout) + time.Duration(cfg.Verify.Timeout)
+	if got := staleAfter(cfg); got <= longest {
+		t.Errorf("порог %s не больше попытки %s", got, longest)
+	}
+	cfg.Run.Timeout = Duration(time.Hour)
+	if got := staleAfter(cfg); got <= time.Hour+time.Duration(cfg.Verify.Timeout) {
+		t.Errorf("порог не вырос с run.timeout: %s", got)
+	}
+
+	// Отметка двадцатипятиминутной давности у живого процесса — прогон жив.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(HeartbeatPath(root)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(Heartbeat{PID: os.Getpid(), Night: "n", Updated: time.Now().Add(-25 * time.Minute)})
+	if err := os.WriteFile(HeartbeatPath(root), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, alive := LiveRun(root, staleAfter(DefaultConfig())); !alive {
+		t.Error("прогон посреди долгой генерации признан мёртвым")
+	}
+}
+
 // Отметка от умершего процесса не должна удерживать сервер закрытым.
 func TestHeartbeatDeadProcess(t *testing.T) {
 	root := t.TempDir()

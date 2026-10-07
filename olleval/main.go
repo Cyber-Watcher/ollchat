@@ -792,6 +792,22 @@ func cmdWindow(args []string) error {
 
 // ── running ──────────────────────────────────────────────────────────────────
 
+// staleAfter — после какого молчания отметки прогон считается мёртвым.
+//
+// Живой прогон обновляет отметку раз в минуту (heartbeatEvery), но запись
+// может и не пройти — диск полон, каталог недоступен, — и тогда порог
+// остаётся последним рубежом. Он не меньше самой долгой попытки: генерация
+// (run.timeout) плюс проверка (verify.timeout) с запасом. Прежние
+// 15 минут были короче одной генерации, и служба возврата открывала сервер
+// с перезапуском Ollama посреди живого прогона.
+func staleAfter(c Config) time.Duration {
+	d := c.Run.Timeout.Get(20*time.Minute) + c.Verify.Timeout.Get(10*time.Minute) + 5*time.Minute
+	if d < 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	return d
+}
+
 // cmdRunning отвечает, идёт ли прогон прямо сейчас. Нужна службе возврата
 // сервера: закрытый стенд при живом прогоне — норма, при мёртвом — беда.
 func cmdRunning(args []string) error {
@@ -799,7 +815,7 @@ func cmdRunning(args []string) error {
 	if err != nil {
 		return err
 	}
-	stale := f.fs.Duration("stale", 15*time.Minute, "после какого молчания считать прогон мёртвым")
+	stale := f.fs.Duration("stale", staleAfter(f.cfg), "после какого молчания считать прогон мёртвым")
 	quiet := f.fs.Bool("quiet", false, "молча, только код возврата")
 	_ = f.fs.Parse(args)
 
