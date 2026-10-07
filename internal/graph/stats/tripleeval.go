@@ -3,6 +3,7 @@ package stats
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -20,7 +21,9 @@ import (
 //
 // Для каждой пары набора: есть ли в графе прямая связь (только такие находимы),
 // стоит ли она первой среди ближайших троек, входит ли в пятёрку; и медиана
-// близости найденной связи против медианы первой тройки у пар, где связи нет.
+// близости найденной связи против медианы первой тройки у пар, где связи
+// среди ближайших нет. Медианы до 07.10.2026 были только обещаны этим
+// описанием: места собирались в список, который никто не читал.
 func tripleEval(cfg *config.Config, c *kb.Collection, g *graph.Graph, path string, k int) {
 	var set struct {
 		Case []struct {
@@ -40,7 +43,9 @@ func tripleEval(cfg *config.Config, c *kb.Collection, g *graph.Graph, path strin
 	m := g.Merges()
 
 	var unknown, direct, top1, topK, noVec int
-	var ranks []int
+	// Близость найденной связи и близость первой тройки там, где связи среди
+	// ближайших нет: разрыв между ними и говорит, держит ли индекс связь.
+	var found, missFirst []float64
 	fmt.Printf("\nСвязь по вектору вопроса среди ближайших %d троек (%s, пар %d)\n", k, path, len(set.Case))
 	for _, cs := range set.Case {
 		a, okA := g.Entities().Lookup(cs.ConceptA)
@@ -80,7 +85,9 @@ func tripleEval(cfg *config.Config, c *kb.Collection, g *graph.Graph, path strin
 			topK++
 		}
 		if rank > 0 {
-			ranks = append(ranks, rank)
+			found = append(found, hits[rank-1].Score)
+		} else if len(hits) > 0 {
+			missFirst = append(missFirst, hits[0].Score)
 		}
 		mark := "—"
 		if rank > 0 {
@@ -100,5 +107,31 @@ func tripleEval(cfg *config.Config, c *kb.Collection, g *graph.Graph, path strin
 	if checked := direct - noVec; checked > 0 {
 		fmt.Printf("  проверено пар %d; связь первой тройкой: %d (%.1f%%); в первых %d: %d (%.1f%%)\n",
 			checked, top1, pct(top1, checked), k, topK, pct(topK, checked))
+		fmt.Printf("  медиана близости: найденной связи %s (пар %d), первой тройки там, где связи среди ближайших нет, %s (пар %d)\n",
+			medianText(found), len(found), medianText(missFirst), len(missFirst))
 	}
+}
+
+// median — медиана выборки; при чётном числе — среднее двух серединных.
+// Выборка не меняется: сортируется копия.
+func median(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
+}
+
+// medianText — медиана для печати; у пустой выборки медианы нет, и ноль
+// на её месте читался бы как замер.
+func medianText(xs []float64) string {
+	if len(xs) == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.3f", median(xs))
 }
