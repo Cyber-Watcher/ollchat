@@ -592,8 +592,10 @@ func parseFlagsWith(args []string) *cliFlags {
 //
 // Список перечисляет запрещённое, а не разрешённое, намеренно: новая команда
 // чтения должна работать на читателе сразу, а новая команда записи — быть
-// внесена сюда сознательно (тест TestReaderForbidsWritingFlags следит за тем,
-// чтобы список не расходился с набором ключей).
+// внесена сюда сознательно. Тест TestEveryFlagClassified держит каждый ключ
+// в одном из трёх списков — пишет, читает, уточняет: --kb-hash и --kb-retitle
+// правят паспорта книг, а сюда не попали, и до 07.10.2026 читатель мог ими
+// писать в коллекцию.
 //
 // Что читателю ОСТАЁТСЯ: чат и поиск, `--graph-doctor`, `--kb-doctor`,
 // `--kb-list`, `--graph-status`, `--graph-find`, `--graph-book`,
@@ -611,6 +613,8 @@ func writingFlags(f *cliFlags) map[string]func() bool {
 		"--kb-merge":              notEmpty(f.kbMerge),
 		"--kb-embed":              notEmpty(f.kbEmbed),
 		"--kb-years":              notEmpty(f.kbYears),
+		"--kb-hash":               notEmpty(f.kbHash),
+		"--kb-retitle":            notEmpty(f.kbRetitle),
 		"--kb-reanalyze":          notEmpty(f.kbReanalyze),
 		"--kb-flag-toc":           notEmpty(f.kbFlagTOC),
 		"--graph-build":           notEmpty(f.graphBuild),
