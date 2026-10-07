@@ -205,6 +205,21 @@ func LoadSuites(dir string) ([]*Suite, error) {
 	// Устойчивая сортировка поверх алфавитной: наборы с одинаковым order
 	// сохраняют порядок имён файлов.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Order < out[j].Order })
+
+	// Идентификатор задачи уникален на все наборы, а не только внутри своего:
+	// каталог попытки (Store.AttemptDir) — модель/задача/повтор, без набора.
+	// Две задачи с одним идентификатором в разных наборах делили бы каталог,
+	// и вторая считалась бы сделанной по метрикам первой — молча, навсегда.
+	owner := map[string]string{}
+	for _, s := range out {
+		for _, t := range s.Tasks {
+			if prev, dup := owner[t.ID]; dup {
+				return nil, fmt.Errorf("задача %q есть и в %s, и в %s: каталог попытки у них был бы один "+
+					"на двоих — переименуйте одну", t.ID, prev, s.path)
+			}
+			owner[t.ID] = s.path
+		}
+	}
 	return out, nil
 }
 

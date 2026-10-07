@@ -62,6 +62,33 @@ score = 0.7
 	}
 }
 
+// Одна задача в двух наборах — отказ при загрузке: у попыток обеих был бы
+// один каталог, и вторая молча считалась бы сделанной по метрикам первой.
+func TestLoadSuitesRejectsDuplicateIDsAcrossSuites(t *testing.T) {
+	dir := t.TempDir()
+	task := "[[task]]\nid = \"%s\"\nlevel = 1\nprompt = \"а\"\n"
+	for file, id := range map[string]string{"go.toml": "общая", "devops.toml": "общая", "ai.toml": "своя"} {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(fmt.Sprintf(task, id)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := LoadSuites(dir)
+	if err == nil {
+		t.Fatal("одна задача в двух наборах принята")
+	}
+	for _, want := range []string{"общая", "go.toml", "devops.toml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("в отказе нет %q: %v", want, err)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "devops.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSuites(dir); err != nil {
+		t.Errorf("без повтора наборы не читаются: %v", err)
+	}
+}
+
 // SuiteValidate отвергает плохое.
 func TestSuiteValidateRejectsBad(t *testing.T) {
 	cases := map[string]string{
