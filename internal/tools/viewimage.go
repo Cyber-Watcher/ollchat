@@ -30,6 +30,21 @@ import (
 // и занимает контекстное окно.
 const maxViewImages = 4
 
+// Предел извлечения. **Почему он нужен отдельно от показа.** Показ резал
+// готовый список, а извлекалось всё: каждая картинка документа — распакованная
+// и пересобранная в PNG — лежала в памяти ради того, чтобы четыре из них
+// показать, а двадцать меток перечислить. Документ на сотни крупных картинок
+// стоил гигабайты и минуты на один вызов. Теперь извлечение останавливается,
+// как только набрано нужное.
+const (
+	maxListedImages = 20 // сколько меток назвать, объясняя, почему показывать нечего
+	maxFigureIndex  = 64 // дальше этого номера рисунка на одной странице не ищем
+)
+
+// documentImages достаёт картинки документа. Переменная — шов для теста:
+// проверить предел извлечения без документа на сотни картинок.
+var documentImages = document.Images
+
 type viewImageTool struct {
 	opts Options
 
@@ -113,16 +128,21 @@ func (t *viewImageTool) run(abs, rel, figure string, page, limit int) (string, e
 		limit = maxViewImages
 	}
 
-	opt := document.ImageOptions{MinWidth: 200, MinHeight: 200}
+	opt := document.ImageOptions{MinWidth: 200, MinHeight: 200, MaxCount: limit}
 	// Метка «4.1» означает первый рисунок со страницы 4 — так их нумерует
 	// извлечение текста, и именно это модель видит в документе.
-	if unit, _, ok := parseFigure(figure); ok {
+	if unit, index, ok := parseFigure(figure); ok {
 		opt.First, opt.Count = unit, 1
+		if index > 0 {
+			// Рисунок «4.3» — не дальше третьей картинки страницы: номер
+			// считает все её картинки, а в выдачу идут только крупные.
+			opt.MaxCount = min(index, maxFigureIndex)
+		}
 	} else if page > 0 {
 		opt.First, opt.Count = page, 1
 	}
 
-	imgs, err := document.Images(abs, t.opts.Sandbox.MaxPDFBytes(), opt)
+	imgs, err := documentImages(abs, t.opts.Sandbox.MaxPDFBytes(), opt)
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +169,9 @@ func (t *viewImageTool) run(abs, rel, figure string, page, limit int) (string, e
 // explainEmpty объясняет, почему показывать нечего: молчание модель толкует
 // как сбой инструмента и начинает искать обходные пути.
 func (t *viewImageTool) explainEmpty(abs, rel, figure string, page int) (string, error) {
-	all, err := document.Images(abs, t.opts.Sandbox.MaxPDFBytes(), document.ImageOptions{MinWidth: 200, MinHeight: 200})
+	// Одна лишняя сверх перечисляемых — чтобы знать, ставить ли «…».
+	all, err := documentImages(abs, t.opts.Sandbox.MaxPDFBytes(),
+		document.ImageOptions{MinWidth: 200, MinHeight: 200, MaxCount: maxListedImages + 1})
 	if err != nil {
 		return "", err
 	}
@@ -159,7 +181,7 @@ func (t *viewImageTool) explainEmpty(abs, rel, figure string, page int) (string,
 	}
 	labels := make([]string, 0, len(all))
 	for i, im := range all {
-		if i >= 20 {
+		if i >= maxListedImages {
 			labels = append(labels, "…")
 			break
 		}
