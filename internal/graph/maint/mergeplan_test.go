@@ -41,7 +41,8 @@ func TestPlanMergesAgreesWithAdd(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for iter := 0; iter < 300; iter++ {
+	var seen mergePlan // сколько раз сработала каждая ветка отбора
+	for iter := 0; iter < 120; iter++ {
 		var journal bytes.Buffer
 		for _, r := range randomMerges(rng, rng.Intn(10)) {
 			b, _ := json.Marshal(r)
@@ -76,6 +77,16 @@ func TestPlanMergesAgreesWithAdd(t *testing.T) {
 		if sum := len(plan.fresh) + plan.done + plan.opposite + plan.invalid; sum != len(batch) {
 			t.Fatalf("план разобрал %d решений из %d", sum, len(batch))
 		}
+		seen.fresh = append(seen.fresh, plan.fresh...)
+		seen.done += plan.done
+		seen.opposite += plan.opposite
+		seen.invalid += plan.invalid
+	}
+	// Случайные журналы обязаны задеть каждую ветку, иначе сверка ничего
+	// не доказывает.
+	if len(seen.fresh) == 0 || seen.done == 0 || seen.opposite == 0 || seen.invalid == 0 {
+		t.Fatalf("ветки отбора задеты не все: записано %d, уже склеено %d, встречных %d, без пары %d",
+			len(seen.fresh), seen.done, seen.opposite, seen.invalid)
 	}
 }
 
