@@ -133,6 +133,11 @@ port_taken() {
 # этой строки инструмент web_search получит вёрстку вместо данных.
 write_settings() {
     local secret=$1
+    # Файл с ключом подписи создаётся сразу закрытым: под umask root (022)
+    # cat создавал его 0644, и до chmod в конце ключ мог прочитать любой
+    # пользователь машины.
+    (
+    umask 077
     cat > "$INSTALL_DIR/settings.yml" <<EOF
 # Настройки SearXNG для ollchat. Создано $SCRIPT_NAME.
 use_default_settings: true
@@ -158,6 +163,7 @@ outgoing:
   pool_connections: 100
   pool_maxsize: 20
 EOF
+    )
     chmod 0640 "$INSTALL_DIR/settings.yml"
 }
 
@@ -300,9 +306,13 @@ do_restore() {
     require_root
     [ -n "$RESTORE_DIR" ] || die "укажите каталог резервной копии"
     [ -f "$RESTORE_DIR/settings.yml" ] || die "в $RESTORE_DIR нет settings.yml"
+    # Ссылка вместо файла заставила бы root прочитать чужой файл.
+    [ ! -L "$RESTORE_DIR/settings.yml" ] || die "в $RESTORE_DIR settings.yml — ссылка, а не файл"
     step "Восстановление настроек"
     mkdir -p "$INSTALL_DIR"
-    cp -a "$RESTORE_DIR/settings.yml" "$INSTALL_DIR/settings.yml"
+    # Как при установке: root, 0640. cp -a переносил владельца копии, и
+    # настройки службы с ключом подписи оставались правимыми пользователем.
+    install -o root -g root -m 0640 "$RESTORE_DIR/settings.yml" "$INSTALL_DIR/settings.yml"
     ok "настройки восстановлены"
     if systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then
         systemctl restart "$SERVICE"
