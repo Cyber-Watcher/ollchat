@@ -68,6 +68,24 @@ func TestIdentifierPartsIndexed(t *testing.T) {
 	}
 }
 
+// StemWord приводит слово к той же основе, что и индекс, — в том числе
+// с буквой «ё»: индекс сводит её к «е», а StemWord до 07.10.2026 нет,
+// и «ёмкость» из вопроса не совпадала с понятием «емкость».
+func TestStemWordFoldsYo(t *testing.T) {
+	for _, w := range []string{"ёмкостями", "Ёлками", "чёрный"} {
+		toks := Tokens(w, nil)
+		if len(toks) == 0 {
+			t.Fatalf("%q: индекс не дал терма", w)
+		}
+		if got := StemWord(w); got != toks[0].Term {
+			t.Errorf("%q: StemWord %q, а в индексе %q", w, got, toks[0].Term)
+		}
+	}
+	if StemWord("ёмкость") != StemWord("емкость") {
+		t.Error("«ё» и «е» дали разные основы")
+	}
+}
+
 // TestCamelCaseNotSplit — тест-факт: имя в camelCase не режется по границам
 // регистра, `HTTPClient` лежит в индексе одним термом.
 //

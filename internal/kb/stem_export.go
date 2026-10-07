@@ -21,9 +21,12 @@ func StemWord(word string) string {
 	for _, r := range word {
 		flags |= classify(r)
 	}
-	s := stem(strings.ToLower(word), flags)
+	// «ё» сводится к «е», как в индексе (normalize): иначе «ёмкость» в вопросе
+	// и «емкость» в книге — разные основы, хотя индекс их не различает.
+	lower := strings.ReplaceAll(strings.ToLower(word), "ё", "е")
+	s := stem(lower, flags)
 	if s == "" {
-		return strings.ToLower(word)
+		return lower
 	}
 	return s
 }
