@@ -352,6 +352,13 @@ func cmdRun(ctx context.Context, args []string) error {
 		OllamaVersion: srvVersion, NumCtx: *numCtx, Repeats: *repeats,
 		Deadline: deadline, Suites: suiteList, Models: cards, Note: *note,
 	}
+	// Заход в начатую ночь паспорт не переписывает, а дополняет.
+	switch prev, err := store.LoadPassport(); {
+	case err == nil:
+		passport = resumePassport(prev, passport)
+	case !errors.Is(err, os.ErrNotExist):
+		waitLog("паспорт ночи не читается (" + err.Error() + ") — пишу новый")
+	}
 	if err := store.SavePassport(passport); err != nil {
 		return err
 	}
