@@ -90,7 +90,9 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 	if permissions.IsCompound(command) {
 		cmd = exec.Command("sh", "-c", command)
 	} else {
-		argv, err := shellSplit(command)
+		// Разбивка та же, что у сверки с запретами: проверяется ровно то,
+		// что запустится.
+		argv, err := permissions.SplitWords(command)
 		if err != nil {
 			return "", err
 		}
@@ -240,51 +242,6 @@ func waitOrKill(ctx context.Context, cmd *exec.Cmd) (err error, killed bool) {
 		// Дальше ждать нельзя: интерфейс не должен оставаться заблокированным.
 	}
 	return nil, true
-}
-
-// shellSplit разбирает командную строку на аргументы, учитывая кавычки.
-// Подстановки и операторы здесь не поддерживаются намеренно: такие команды
-// определяются как составные и идут через оболочку после подтверждения.
-func shellSplit(s string) ([]string, error) {
-	var (
-		args     []string
-		cur      strings.Builder
-		hasToken bool
-		inSingle bool
-		inDouble bool
-	)
-	runes := []rune(s)
-	for i := 0; i < len(runes); i++ {
-		c := runes[i]
-		switch {
-		case c == '\\' && !inSingle && i+1 < len(runes):
-			i++
-			cur.WriteRune(runes[i])
-			hasToken = true
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-			hasToken = true
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-			hasToken = true
-		case (c == ' ' || c == '\t') && !inSingle && !inDouble:
-			if hasToken {
-				args = append(args, cur.String())
-				cur.Reset()
-				hasToken = false
-			}
-		default:
-			cur.WriteRune(c)
-			hasToken = true
-		}
-	}
-	if inSingle || inDouble {
-		return nil, errors.New("незакрытая кавычка в команде")
-	}
-	if hasToken {
-		args = append(args, cur.String())
-	}
-	return args, nil
 }
 
 // refuseToolAsCommand отклоняет попытку запустить инструмент приложения через
