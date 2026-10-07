@@ -451,6 +451,16 @@ type Sandbox struct {
 	FollowSymlinks bool   `toml:"follow_symlinks"`
 	MaxFileKB      int    `toml:"max_file_kb"`
 	MaxPDFMB       int    `toml:"max_pdf_mb"`
+
+	// Isolation — изоляция команд bash средствами ОС: "" — выключена,
+	// "bwrap" — bubblewrap (только Linux). Зачем и что она даёт — в шаблоне
+	// конфига и в sandbox.go.
+	Isolation string `toml:"isolation"`
+	// IsolationNetwork — оставить командам сеть внутри изоляции.
+	IsolationNetwork bool `toml:"isolation_network"`
+	// IsolationHide — что спрятать от команд пустым каталогом (файл —
+	// пустым файлом). Пути раскрываются при проверке конфига.
+	IsolationHide []string `toml:"isolation_hide"`
 }
 
 // KB — база знаний по книгам.
@@ -1452,6 +1462,11 @@ func Default() *Config {
 			FollowSymlinks: false,
 			MaxFileKB:      512,
 			MaxPDFMB:       64,
+			// Изоляция выключена: включается сознательно, она меняет среду
+			// команд (всё вне корня — только чтение, /tmp свой).
+			Isolation:        "",
+			IsolationNetwork: true,
+			IsolationHide:    []string{"~/.ssh", "~/.gnupg", "~/.aws", "~/.config/ollchat"},
 		},
 		Servers: []Server{{
 			Name:      "local",
@@ -2158,6 +2173,9 @@ func (c *Config) finalize() error {
 	}
 	if c.Sandbox.MaxFileKB <= 0 {
 		c.Sandbox.MaxFileKB = 512
+	}
+	if err := c.Sandbox.validate(); err != nil {
+		return err
 	}
 
 	if len(c.Servers) == 0 {

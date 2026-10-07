@@ -77,7 +77,9 @@ const (
 //
 // Простая команда запускается напрямую, без оболочки: так подстановки и
 // перенаправления не могут появиться неожиданно. Составная команда требует
-// оболочки, но она в любом случае проходит через подтверждение пользователя.
+// оболочки; запреты проверены по каждой её части ещё до запуска.
+// С включённой изоляцией (Options.Isolation) та же строка запуска уходит
+// в bubblewrap, а не найти или не запустить его — отказ, а не запуск без неё.
 //
 // Функция обязана возвращать управление всегда: по завершении команды,
 // по таймауту или по отмене. Наивная реализация через exec.CommandContext
@@ -86,35 +88,51 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
+	isolated := opts.Isolation.Kind != ""
+	var argv []string
 	if permissions.IsCompound(command) {
-		cmd = exec.Command("sh", "-c", command)
+		sh := "sh"
+		if isolated {
+			sh = "/bin/sh"
+		}
+		argv = []string{sh, "-c", command}
 	} else {
 		// Разбивка та же, что у сверки с запретами: проверяется ровно то,
 		// что запустится.
-		argv, err := permissions.SplitWords(command)
+		words, err := permissions.SplitWords(command)
 		if err != nil {
 			return "", err
 		}
-		if len(argv) == 0 {
+		if len(words) == 0 {
 			return "", errors.New("пустая команда")
 		}
-		bin, err := exec.LookPath(argv[0])
+		bin, err := exec.LookPath(words[0])
 		if err != nil {
-			return "", fmt.Errorf("команда %q не найдена: %w", argv[0], err)
+			return "", fmt.Errorf("команда %q не найдена: %w", words[0], err)
 		}
-		cmd = exec.Command(bin, argv[1:]...)
+		argv = append([]string{bin}, words[1:]...)
 	}
-
-	cmd.Dir = opts.Sandbox.Root()
-	// Окружение наследуется: без PATH и HOME большинство инструментов разработки
-	// не работает. Отключаем интерактивность и снимаем секреты (commandEnv).
-	cmd.Env = append(commandEnv(os.Environ()),
+	env := append(commandEnv(os.Environ()),
 		"TERM=dumb",
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 		"OLLCHAT=1",
 	)
+	if isolated {
+		var err error
+		if argv, err = isolate(opts.Isolation, opts.Sandbox.RealRoot(), argv); err != nil {
+			return "", err
+		}
+		// /tmp внутри изоляции свой и пустой: TMPDIR, указывающий на
+		// каталог снаружи, вёл бы в никуда.
+		env = append(env, "TMPDIR=/tmp")
+	}
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = opts.Sandbox.Root()
+	// Окружение наследуется: без PATH и HOME большинство инструментов разработки
+	// не работает. Отключаем интерактивность и снимаем секреты (commandEnv).
+	cmd.Env = env
 	cmd.Stdin = nil
 	setProcessGroup(cmd)
 
@@ -194,6 +212,11 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 	if runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
+			if isolated && bwrapFailed(ee.ExitCode(), text) {
+				return opts.truncate(text), fmt.Errorf("bwrap не смог запустить команду в изоляции, "+
+					"она не выполнялась (без изоляции команды не запускаются): %s",
+					strings.TrimSpace(strings.SplitN(text, "\n", 2)[0]))
+			}
 			header = fmt.Sprintf("Код возврата: %d (за %s)\n\n", ee.ExitCode(), elapsed.Round(time.Millisecond))
 		} else {
 			return opts.truncate(text), runErr

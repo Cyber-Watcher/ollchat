@@ -597,6 +597,14 @@ xclip -selection clipboard -t TARGETS -o         # при картинке в б
 **Песочница.** Выход за пределы рабочего каталога, `../` и символические ссылки наружу
 отклоняются. Настраивается разделом `[sandbox]`.
 
+**Изоляция команд (Linux).** Правила видят строку команды, но не то, что сделает запущенная
+программа. `[sandbox] isolation = "bwrap"` запускает каждую команду `bash` в bubblewrap (пакет
+`bubblewrap`): вся система только для чтения, писать можно лишь в рабочий каталог и в свой пустой
+`/tmp`, пути из `isolation_hide` (по умолчанию `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/ollchat`)
+пусты, `isolation_network = false` отнимает сеть. Нет `bwrap` или он не запустился — команда не
+выполняется вовсе, без изоляции она не идёт. По умолчанию выключена: кэши в домашнем каталоге
+(`go build`, `npm`) внутри неё не пишутся, их каталог надо перенести в рабочий.
+
 **Секреты окружения командам не достаются.** `bash` передаёт команде окружение ollchat без
 переменных, имя которых выдаёт секрет: `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`,
 `*PASSPHRASE*`, `*API_KEY*`, `*APIKEY*`, `*ACCESS_KEY*`, `*PRIVATE_KEY*`, `*CREDENTIAL*` (без учёта
@@ -4205,7 +4213,7 @@ tmux set -s escape-time 10
 | `[log]` | журнал чата |
 | `[agent]` | `enabled`, `tools`, `max_iterations`, `max_retries`, `bash_timeout`, `max_output_kb` |
 | `[permissions]` | `allow`, `ask`, `deny` |
-| `[sandbox]` | `root`, `allow_outside`, `follow_symlinks`, `max_file_kb`, `max_pdf_mb` |
+| `[sandbox]` | `root`, `allow_outside`, `follow_symlinks`, `max_file_kb`, `max_pdf_mb`; `isolation`, `isolation_network`, `isolation_hide` — изоляция команд `bash` (Linux) |
 | `[web]` | `searxng_url`, `timeout` — поиск в сети |
 | `[kb]` | база знаний, см. таблицу выше; `embed_check` — как часто проверять модель эмбеддингов |
 | `[graph]` | граф понятий: модель извлечения, темы, `neighbor_sense_weight`, `neighbor_pool`, `relation_snippet`; `[[graph.nodes]]` — несколько серверов Ollama на сборку |

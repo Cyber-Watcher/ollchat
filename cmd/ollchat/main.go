@@ -1035,6 +1035,7 @@ func run() error {
 		Live:                 live,
 		Library:              libraryOrNil(library),
 		Sandbox:              sandbox,
+		Isolation:            tools.Isolation{Kind: cfg.Sandbox.Isolation, Network: cfg.Sandbox.IsolationNetwork, Hide: cfg.Sandbox.IsolationHide},
 		BashTimeout:          cfg.Agent.BashTimeoutDuration(),
 		MaxOutputKB:          cfg.Agent.MaxOutputKB,
 		KB:                   base,
