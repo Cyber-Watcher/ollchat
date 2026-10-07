@@ -176,6 +176,20 @@ func (m *Mentions) index(ent uint32, key uint64) {
 	m.count++
 }
 
+// maxEntity — наибольший номер понятия в журнале, не больше limit
+// (maxIDSlack: номер дальше — мусор сдвига, а не ссылка).
+func (m *Mentions) maxEntity(limit uint32) uint32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out uint32
+	for id := range m.byEntity {
+		if id > out && id <= limit {
+			out = id
+		}
+	}
+	return out
+}
+
 // Add записывает упоминание сущности в куске.
 // useMerges надевает журнал склеек на упоминания.
 func (m *Mentions) useMerges(mg *Merges) { m.merges = mg }
@@ -396,6 +410,22 @@ func (e *Edges) index(ed Edge) {
 	e.bySrc[ed.Src] = append(e.bySrc[ed.Src], ed)
 	e.byDst[ed.Dst] = append(e.byDst[ed.Dst], ed)
 	e.count++
+}
+
+// maxEntity — наибольший номер понятия на концах связей, не больше limit
+// (см. Mentions.maxEntity).
+func (e *Edges) maxEntity(limit uint32) uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var out uint32
+	for _, by := range []map[uint32][]Edge{e.bySrc, e.byDst} {
+		for id := range by {
+			if id > out && id <= limit {
+				out = id
+			}
+		}
+	}
+	return out
 }
 
 func decodeEdge(b []byte) Edge {

@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
@@ -140,6 +141,10 @@ type Entities struct {
 
 	list  []Entity          // по номеру: list[id-1]
 	byKey map[string]uint32 // нормализованное имя или синоним → номер
+
+	// floor — наибольший номер понятия, о котором известно, что он занят, хотя
+	// записи в реестре может и не быть; новые номера выдаются выше (reserve).
+	floor uint32
 
 	// byStem — то же, но по основам слов: «переранжирование» и
 	// «переранжировать» дают один ключ. Нужен входу в граф: вопрос задают
@@ -808,7 +813,7 @@ func (e *Entities) Add(name, typ string, aliases ...string) (uint32, bool, error
 	// человек при разборе, а не сборка вслепую.
 
 	ent := Entity{
-		ID:      uint32(len(e.list) + 1),
+		ID:      e.nextID(),
 		Name:    strings.TrimSpace(name),
 		Norm:    norm,
 		Type:    NormalizeType(typ),
@@ -820,6 +825,109 @@ func (e *Entities) Add(name, typ string, aliases ...string) (uint32, bool, error
 	}
 	e.put(ent)
 	return ent.ID, true, nil
+}
+
+// Номера понятий не выдаются повторно.
+//
+// **Беда.** Номер нового понятия был `len(list)+1`, то есть «следующий после
+// последней записи реестра». Уплотнение с выбрасыванием мёртвых понятий
+// (--graph-compact-drop-dead) убирает и записи с хвоста — и их номера
+// выдавались снова: новое понятие наследовало упоминания, вектор, синонимы
+// формата 2, описание и запреты синонимов прежнего, на которые всё это
+// записано по номеру (аудит 07.10.2026, №12). Так же вёл бы себя номер
+// записи, оборванной вместе с хвостом реестра, когда её упоминания успели
+// лечь на диск.
+//
+// **Решение.** Номер берётся выше наибольшего занятого. Занятым считается
+// всё, на что ссылается граф: реестр, упоминания, связи, синонимы формата 2,
+// склейки, запреты, описания, векторы — и отметка уплотнения (entMaxIDFile),
+// которое записывает наибольший номер перед тем, как выбросить понятия.
+// Отметки может не быть (граф уплотняли прежней сборкой программы) — тогда
+// граница выводится из данных; формат файлов при этом не меняется.
+
+// entMaxIDFile — наибольший номер понятия, когда-либо выданный реестром.
+// Пишется уплотнением перед выбрасыванием понятий (compact.go).
+const entMaxIDFile = "entities.maxid"
+
+type maxIDRec struct {
+	MaxID uint32 `json:"max_id"`
+	At    int64  `json:"at"`
+}
+
+// loadMaxID читает отметку наибольшего номера; нет файла или он не читается —
+// ноль, то есть граница выводится из данных.
+func loadMaxID(dir string) uint32 {
+	raw, err := os.ReadFile(filepath.Join(dir, entMaxIDFile))
+	if err != nil {
+		return 0
+	}
+	var r maxIDRec
+	if json.Unmarshal(raw, &r) != nil {
+		return 0
+	}
+	return r.MaxID
+}
+
+// saveMaxID записывает отметку наибольшего номера; меньшая прежней не пишется.
+func saveMaxID(dir string, id uint32) error {
+	if have := loadMaxID(dir); have >= id {
+		return nil
+	}
+	raw, err := json.Marshal(maxIDRec{MaxID: id, At: time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	return fsx.WriteFileAtomic(filepath.Join(dir, entMaxIDFile), append(raw, '\n'), 0o644)
+}
+
+// maxIDSlack — насколько далеко за последней записью реестра ссылка на номер
+// понятия ещё считается настоящей.
+//
+// Журнал, дописанный после обрывка до 07.10.2026 (journal.go), читается
+// со сдвигом, и в номерах понятий у него мусор вроде 117 млн: поверить ему —
+// значит раздуть реестр под такой номер до гигабайтов. Настоящий разрыв мал:
+// это записи реестра, не дошедшие до диска при обрыве (буфер — единицы
+// килобайт), и понятия, выброшенные уплотнением с хвоста, — тысячи.
+const maxIDSlack = 1 << 16
+
+// reserve отмечает номер занятым: новые понятия получат номера выше.
+func (e *Entities) reserve(id uint32) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.floor = max(e.floor, id)
+}
+
+// nextID — номер для нового понятия: следующий после последней записи
+// реестра и после всего занятого. Под замком реестра.
+func (e *Entities) nextID() uint32 {
+	id := uint32(len(e.list)) + 1
+	if id <= e.floor {
+		id = e.floor + 1
+	}
+	return id
+}
+
+// idSpace — сколько номеров занято: записи реестра и всё, что выше них
+// отмечено занятым (reserve). Векторы лежат по номерам, и пространство номеров
+// для них — именно это число, а не номер последней живой записи.
+func (e *Entities) idSpace() uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return max(uint32(len(e.list)), e.floor)
+}
+
+// maxDenied — наибольший номер понятия в журнале запретов, не больше limit
+// (см. Mentions.maxEntity).
+func (e *Entities) maxDenied(limit uint32) uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var out uint32
+	for id := range e.deny {
+		if id > out && id <= limit {
+			out = id
+		}
+	}
+	return out
 }
 
 // mergeAliases дописывает синонимы к уже известной сущности.

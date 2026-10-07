@@ -261,6 +261,25 @@ func (m *Merges) leadsTo(id, target uint32) bool {
 	return false
 }
 
+// maxEntity — наибольший номер понятия в журнале склеек, не больше limit
+// (см. Mentions.maxEntity).
+func (m *Merges) maxEntity(limit uint32) uint32 {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out uint32
+	for _, r := range m.recs {
+		for _, id := range []uint32{r.From, r.To} {
+			if id > out && id <= limit {
+				out = id
+			}
+		}
+	}
+	return out
+}
+
 // Records отдаёт журнал целиком: он нужен, чтобы показать человеку, на каком
 // основании принято каждое решение.
 func (m *Merges) Records() []MergeRec {

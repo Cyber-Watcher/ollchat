@@ -616,6 +616,17 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 	if g.groups, err = openGroups(dir); err != nil {
 		return nil, err
 	}
+	// Номера, на которые ссылается граф, заняты, даже если записи о понятии
+	// в реестре нет: новое понятие не должно унаследовать чужие упоминания,
+	// вектор, описание или запреты (см. Entities.nextID). Отметке уплотнения
+	// и числу векторов (оно сверено с размером файла) верим как есть, прочим
+	// ссылкам — не дальше maxIDSlack за ними.
+	trusted := max(loadMaxID(dir), uint32(g.vecs.Count()))
+	limit := max(g.ents.idSpace(), trusted) + maxIDSlack
+	g.ents.reserve(max(trusted,
+		g.ment.maxEntity(limit), g.edge.maxEntity(limit), g.alias.maxEntity(limit),
+		g.merges.maxEntity(limit), g.desc.maxEntity(limit), g.ents.maxDenied(limit)))
+
 	// Склейки надеваются на реестр и на связи: поиск обязан вести к выжившему,
 	// а его окружение — включать окружение поглощённых.
 	g.ents.useMerges(g.merges)

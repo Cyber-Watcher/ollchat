@@ -168,6 +168,23 @@ func (a *Aliases) Add(entity uint32, chunk ChunkKey, alias string) (uint32, erro
 	return a.index(AliasRec{Entity: entity, Chunk: chunk, Norm: norm}), nil
 }
 
+// maxEntity — наибольший номер понятия в журнале, не больше limit
+// (см. Mentions.maxEntity). У графа формата 1 журнала нет — ноль.
+func (a *Aliases) maxEntity(limit uint32) uint32 {
+	if a == nil {
+		return 0
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	var out uint32
+	for id := range a.byEntity {
+		if id > out && id <= limit {
+			out = id
+		}
+	}
+	return out
+}
+
 // prepare приводит хвост журнала в порядок перед дозаписью (journal.go).
 // У графа формата 1 журнала нет — и править нечего.
 func (a *Aliases) prepare() error {
