@@ -21,8 +21,10 @@ func RunCLI(stdout, stderr io.Writer, path string, args []string) error {
 	formats := fs.String("formats", DefaultFormats, "что сделать — "+FormatsHelp)
 	outPDF := fs.String("out-pdf", "", "куда записать PDF с замазанными данными; по умолчанию <имя>.redacted.pdf рядом с исходным")
 	outMD := fs.String("out-md", "", "куда записать .md без персональных данных; по умолчанию <имя>.redacted.md рядом с исходным")
-	outOCRPDF := fs.String("out-ocr-pdf", "", "куда записать текстовый PDF распознанного (с персональными данными); по умолчанию <имя>.ocr.pdf")
-	outOCRMD := fs.String("out-ocr-md", "", "куда записать .md распознанного (с персональными данными); по умолчанию <имя>.ocr.md")
+	outOCRPDF := fs.String("out-ocr-pdf", "", "куда записать текстовый PDF распознанного (с персональными данными), "+
+		"если он заказан в -formats; по умолчанию <имя>.ocr.pdf")
+	outOCRMD := fs.String("out-ocr-md", "", "куда записать .md распознанного (с персональными данными), "+
+		"если он заказан в -formats; по умолчанию <имя>.ocr.md")
 	lang := fs.String("lang", "", "языки tesseract: eng, rus, eng+rus; по умолчанию решают первые листы — английский документ читается одним eng, прочие eng+rus")
 	clients := fs.String("clients", "", "имена клиентов сверх найденного, через «;»")
 	doctors := fs.String("doctors", "", "имена врачей сверх найденного, через «;»")

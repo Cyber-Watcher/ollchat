@@ -455,7 +455,7 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphStatus = flag.String("graph-status", "", "показать состояние графа коллекции (\"all\" — всех)")
 	f.graphStats = flag.String("graph-stats", "", "исследовательские счёты по графу коллекции (бывший graphstats): --graph-stats books -- -hubs; свои ключи после «--», список: --graph-stats books -- -h")
 	f.docProbe = flag.String("doc-probe", "", "что наш разбор достаёт из файла книги (бывшие docprobe и pagedump): --doc-probe «книга.pdf» -- -unit 120 | -page 40")
-	f.scanRedact = flag.String("scan-redact", "", "обезличить скан PDF без модели (то же, что инструмент scan_redact): замазанный PDF, .md без персональных данных и распознанные копии .ocr.md и .ocr.pdf: --scan-redact «скан.pdf» -- -formats pdf,md; ключи: --scan-redact x -- -h")
+	f.scanRedact = flag.String("scan-redact", "", "обезличить скан PDF без модели (то же, что инструмент scan_redact): замазанный PDF и .md без персональных данных; распознанные копии со всеми данными .ocr.md и .ocr.pdf — только по просьбе: --scan-redact «скан.pdf» -- -formats all; ключи: --scan-redact x -- -h")
 	f.scanRedactLLM = flag.String("scan-redact-llm", "", "обезличить скан PDF С МОДЕЛЬЮ, как в диалоге: модель зовёт scan_redact и дозамазывает оставшиеся имена; ЗАНИМАЕТ КАРТУ: --scan-redact-llm «скан.pdf» -- -formats all; ключи: --scan-redact-llm x -- -h")
 	f.census = flag.String("census", "", "перепись состояния коллекции и графа: --census books -- -only toc; список режимов: --census books -- -h")
 	f.probes = flag.String("probes", "", "замеры извлечения (КАРТА у режимов stability и seq): --probes books -- -only stability -axis temp; список: --probes books -- -h")

@@ -39,16 +39,18 @@ import (
 //
 // ЗАНИМАЕТ КАРТУ сервера на время ответа модели.
 
-// scanRedactAsk — просьба к модели, как её пишут пользователи.
-const scanRedactAsk = "Обработай скан %s: сделай PDF с замазанными персональными данными, " +
-	".md без персональных данных и распознанные копии — .md и текстовый PDF с таблицами."
+// scanRedactAsk — просьба к модели, как её пишут пользователи. Распознанные
+// копии со всеми данными в ней не просятся: они делаются только по явной
+// просьбе (слово владельца 07.10.2026) — ключом -formats или своей -ask.
+const scanRedactAsk = "Обработай скан %s: сделай PDF с замазанными персональными данными " +
+	"и .md без персональных данных."
 
 func runScanRedactLLM(cfg *config.Config, srv *config.Server, model string, sandbox *permissions.Sandbox,
 	guard *permissions.Guard, path string, args []string) error {
 	fs := flag.NewFlagSet("scan-redact-llm", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	formats := fs.String("formats", "", "какие файлы просить — "+redact.FormatsHelp+
-		"; пусто — модель берёт умолчание инструмента (все четыре)")
+		"; пусто — модель берёт умолчание инструмента ("+redact.DefaultFormats+")")
 	ask := fs.String("ask", "", "своя просьба к модели вместо стандартной; %s в ней заменяется путём к скану")
 	if err := fs.Parse(args); err != nil {
 		return err
