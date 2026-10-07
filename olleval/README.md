@@ -134,6 +134,65 @@ tmux: клиент `tmux new-session -d` завершается сразу, от
 секундой, сессии tmux нет, каталог ночи не создан, `logs/nights.log` пуст. Замерено
 на стенде 22.08.2026.
 
+### Закрытие сервера и права sudo
+
+`olleval-isolate.sh on` закрывает сервер не правкой `override.conf`, а отдельным drop-in:
+ссылкой `zz-olleval-localhost.conf` на заранее положенный root-файл с
+`OLLAMA_HOST=127.0.0.1:11434`. `off` убирает ссылку, и служба поднимается ровно с тем
+адресом, что стоял до прогона. После каждого перезапуска скрипт проверяет, на каком адресе
+порт слушают на самом деле (`ss -ltn`), и при расхождении отказывает: «закрыто» на словах
+при открытом сокете хуже честной ошибки.
+
+Ночью пароль sudo вводить некому, поэтому sudo нужен без пароля — но только на несколько
+команд с **неизменными доводами**. Разрешать программу целиком нельзя: `NOPASSWD` на `sed`
+или `cp` равносилен root — sed умеет запускать команды, а cp переписывает любой файл.
+
+Один раз, от root:
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/olleval
+printf '[Service]\nEnvironment="OLLAMA_HOST=127.0.0.1:11434"\n' |
+  sudo tee /etc/olleval/ollama-localhost.conf >/dev/null
+sudo chmod 0644 /etc/olleval/ollama-localhost.conf
+sudo visudo -f /etc/sudoers.d/olleval
+```
+
+Содержимое `/etc/sudoers.d/olleval` (`OLLEVAL_USER` — учётка прогонов; пути сверьте
+с `command -v ln rm systemctl journalctl`):
+
+```
+Cmnd_Alias OLLEVAL_CMDS = \
+    /usr/bin/ln -sfn /etc/olleval/ollama-localhost.conf /etc/systemd/system/ollama.service.d/zz-olleval-localhost.conf, \
+    /usr/bin/rm -f /etc/systemd/system/ollama.service.d/zz-olleval-localhost.conf, \
+    /usr/bin/systemctl daemon-reload, \
+    /usr/bin/systemctl restart ollama, \
+    /usr/bin/systemctl start ollama, \
+    /usr/bin/journalctl -u ollama --since -15 min --no-pager -q
+OLLEVAL_USER ALL=(root) NOPASSWD: OLLEVAL_CMDS
+```
+
+| Строка | Кто зовёт |
+|---|---|
+| `ln -sfn …`, `rm -f …` | `olleval-isolate.sh on` и `off` |
+| `systemctl daemon-reload`, `restart ollama` | `olleval-isolate.sh`; `restart` — ещё и лечение зависшего сервера (`health.restart_after_errors`) |
+| `systemctl start ollama` | `olleval guard --start-service`: подъём забытой службы, имя — `guard.service` |
+| `journalctl …` | свежие запросы к Ollama перед стартом; `-15 min` — это `guard.journal_window` |
+
+Поменяли `guard.service` или `guard.journal_window` — поправьте и строку. Все вызовы идут
+с `sudo -n`: без правила sudo сразу отказывает, а не ждёт в tmux пароля до утра, и отказ
+виден в журнале как сбой.
+
+**Переход со старой схемы.** Прежний скрипт правил `override.conf` sed'ом и хранил копию
+в `~/ollevals/state/override.conf.orig`. Если сервер закрыт по-старому, `olleval-isolate.sh off`
+об этом скажет; тогда один раз, проверив копию, верните адрес руками и уберите старые
+правила sudo на `sed`, `cp` и `grep`:
+
+```bash
+sudo cp ~/ollevals/state/override.conf.orig /etc/systemd/system/ollama.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+rm ~/ollevals/state/override.conf.orig
+```
+
 ## Здоровье прогона
 
 Две беды тихие, и обе обесценивают ночь:
