@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Сборка страницы из кусков текста.
@@ -109,6 +110,15 @@ func joinLine(line []frag, originX, unit, wordGap float64) string {
 
 	var b strings.Builder
 	var prevEnd, prevSize float64
+	// cur — длина собранного в символах. Считается по ходу, а не заново на
+	// каждом куске: пересчёт всей строки давал квадрат, и строка из двухсот
+	// тысяч кусков (форма, нарисованная на одном месте тысячи раз) собиралась
+	// минутами.
+	cur := 0
+	pad := func(n int) {
+		b.WriteString(strings.Repeat(" ", n))
+		cur += n
+	}
 	for _, f := range line {
 		if f.text == "" {
 			continue
@@ -121,12 +131,11 @@ func joinLine(line []frag, originX, unit, wordGap float64) string {
 		// просит петабайт памяти и валит программу. Найдено обстрелом
 		// испорченных книг.
 		want := min(max(int((f.x-originX)/unit+0.5), 0), maxCols)
-		cur := runeLen(b.String())
 		gap := f.x - prevEnd
 
 		switch {
 		case cur == 0:
-			b.WriteString(strings.Repeat(" ", max(0, want)))
+			pad(max(0, want))
 		case gap < wordGap*glyphSize(prevSize, f.size, unit*2):
 			// Разрыва нет: это одно слово, разрезанное кернингом или сменой
 			// шрифта. Ставить пробел по одной лишь арифметике колонок нельзя —
@@ -136,9 +145,10 @@ func joinLine(line []frag, originX, unit, wordGap float64) string {
 		default:
 			// Разрыв есть: тянем кусок к его колонке, но не меньше пробела,
 			// иначе соседние столбцы слипаются в «array of-».
-			b.WriteString(strings.Repeat(" ", max(1, want-cur)))
+			pad(max(1, want-cur))
 		}
 		b.WriteString(f.text)
+		cur += utf8.RuneCountInString(f.text)
 		prevEnd, prevSize = f.x+f.w, f.size
 	}
 	return strings.TrimRight(b.String(), " ")
@@ -233,10 +243,6 @@ func glyphSize(prev, cur, fallback float64) float64 {
 	}
 	return size
 }
-
-// runeLen считает длину в символах: столбцы меряются символами, а кириллица
-// в UTF-8 занимает по два байта.
-func runeLen(s string) int { return len([]rune(s)) }
 
 // medianSize возвращает средний кегль страницы — по нему меряются допуски.
 func medianSize(frags []frag) float64 {
