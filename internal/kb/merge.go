@@ -82,17 +82,42 @@ func (c *Collection) NeedsMerge() (bool, string) {
 // коллекции, и знать его здесь законно.
 const graphDirName = "graph"
 
-// HasGraph сообщает, собран ли по коллекции граф понятий.
-func (c *Collection) HasGraph() bool {
-	_, err := os.Stat(filepath.Join(c.dir, graphDirName, "graph.meta"))
-	return err == nil
+// GraphDirs перечисляет каталоги графов понятий внутри коллекции: рабочий
+// `graph` и именованные `graph-<имя>` (graph.DirFor), по алфавиту.
+//
+// **Любой такой каталог, а не только с паспортом.** До 07.10.2026 граф
+// узнавался по одному `graph/graph.meta`, и именованный граф `graph-lab`
+// уплотнение не замечало вовсе: оно шло без `--kb-merge-force` и без единого
+// предупреждения. Ложная тревога здесь стоит одного ключа, пропуск — недель
+// работы видеокарты, поэтому граф — всё, что так названо.
+func (c *Collection) GraphDirs() []string { return graphDirs(c.dir) }
+
+func graphDirs(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		if n := e.Name(); n == graphDirName || strings.HasPrefix(n, graphDirName+"-") {
+			out = append(out, n)
+		}
+	}
+	return out
 }
+
+// HasGraph сообщает, есть ли в коллекции граф понятий — рабочий или именованный.
+func (c *Collection) HasGraph() bool { return len(c.GraphDirs()) > 0 }
 
 // MergeOpts — как уплотнять.
 type MergeOpts struct {
 	// Force разрешает уплотнение коллекции, по которой собран граф.
-	// По умолчанию это отказ: граф после уплотнения не открывается вовсе,
-	// а стоит он часов работы видеокарты.
+	// По умолчанию это отказ: каталоги графов уплотнение сохраняет, но граф,
+	// у коллекции которого стало меньше кусков, открываться отказывается
+	// (graph.ErrCompacted), а стоит он часов работы видеокарты.
 	Force bool
 }
 
@@ -101,18 +126,24 @@ func (c *Collection) Merge(ctx context.Context, opt MergeOpts, report func(Progr
 	start := time.Now()
 
 	// Граф ссылается на куски парой «книга, номер внутри книги» и уплотнение
-	// пережил бы, но сквозная нумерация меняется, и граф отказывается
-	// открываться вовсе (graph.ErrCompacted) — предохранитель против тихого
-	// неверного ответа. Цена ошибки несимметрична: уплотнение освобождает
-	// десятки мегабайт, а пересборка графа стоит часов работы видеокарты.
-	// Поэтому здесь отказ, а не предупреждение, и обходится он только явно.
-	if c.HasGraph() && !opt.Force {
+	// пережил бы, но кусков становится меньше, и граф отказывается открываться
+	// (graph.ErrCompacted) — предохранитель против тихого неверного ответа.
+	// Цена ошибки несимметрична: уплотнение освобождает десятки мегабайт,
+	// а пересборка графа стоит часов работы видеокарты. Поэтому здесь отказ,
+	// а не предупреждение, и обходится он только явно.
+	//
+	// Сами каталоги графов уплотнение не трогает и с ключом: они переезжают
+	// в новый каталог коллекции как есть (swapIn). До 07.10.2026 они стирались
+	// вместе с прежним каталогом — с ключом и рабочий граф, и без ключа любой
+	// именованный.
+	if graphs := c.GraphDirs(); len(graphs) > 0 && !opt.Force {
 		return res, fmt.Errorf(
-			"по коллекции %s собран граф понятий, и уплотнение сделает его нечитаемым.\n"+
-				"Граф лежит в %s и стоит часов работы видеокарты.\n"+
+			"по коллекции %s собран граф понятий (%s), и после уплотнения он перестанет открываться.\n"+
+				"Граф лежит в %s и стоит часов работы видеокарты; уплотнение его не удалит,\n"+
+				"но кусков станет меньше, и открыть его будет нельзя.\n"+
 				"Если он больше не нужен — уберите каталог и повторите; "+
 				"если нужен — уплотнять нельзя",
-			c.name, filepath.Join(c.dir, graphDirName))
+			c.name, strings.Join(graphs, ", "), c.dir)
 	}
 
 	if err := c.lock(); err != nil {
@@ -131,17 +162,20 @@ func (c *Collection) Merge(ctx context.Context, opt MergeOpts, report func(Progr
 	res.BytesBefore = dirSize(c.dir)
 
 	tmp := c.base.tempDir("compact-" + c.name)
-	if err := os.RemoveAll(tmp); err != nil {
+	// Остаток прошлой попытки убирается так же бережно, как при открытии:
+	// в нём могут лежать перенесённые каталоги графов.
+	if err := retireDir(tmp, c.dir); err != nil {
 		return res, err
 	}
 	if err := ensureDir(tmp); err != nil {
 		return res, err
 	}
 	// Недоделанный каталог за собой не оставляем: он не мешает работе,
-	// но занимает место и сбивает с толку.
+	// но занимает место и сбивает с толку. Чужое из него (графы, если подмена
+	// сорвалась после переноса) возвращается в коллекцию, а не стирается.
 	defer func() {
 		if err != nil || res.Canceled {
-			os.RemoveAll(tmp)
+			retireDir(tmp, c.dir)
 		}
 	}()
 
@@ -176,6 +210,9 @@ func (c *Collection) Merge(ctx context.Context, opt MergeOpts, report func(Progr
 	}
 
 	if err := c.swapIn(tmp); err != nil {
+		// Подмена не состоялась, а файлы прежнего индекса уже закрыты:
+		// открываем их снова, иначе поиск в этом процессе молча опустеет.
+		c.reopenIndex()
 		return res, err
 	}
 	if err := c.load(); err != nil {
@@ -312,21 +349,132 @@ func (c *Collection) writeCompacted(tmp string, kept []BookRec, chunks int, stat
 // Два переименования вместо копирования: переименование каталога в пределах
 // файловой системы неделимо, поэтому оборваться можно только между ними —
 // и это состояние распознаётся при следующем открытии базы.
+//
+// **Перед подменой в новый каталог переезжает всё чужое** — то, чего kb
+// не пишет сам (kbOwned): каталоги графов понятий `graph` и `graph-<имя>`,
+// файлы человека. Переименованием, без копирования: тот же каталог базы,
+// та же файловая система. До 07.10.2026 этого шага не было, и прежний
+// каталог уходил в RemoveAll вместе с графами — неделями работы видеокарты.
 func (c *Collection) swapIn(tmp string) error {
-	c.closeFiles()
 	old := c.base.tempDir("old-" + c.name)
-	if err := os.RemoveAll(old); err != nil {
+	if err := retireDir(old, c.dir); err != nil {
 		return err
 	}
+	if err := carryOver(c.dir, tmp); err != nil {
+		return err
+	}
+	c.closeFiles()
 	if err := os.Rename(c.dir, old); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, c.dir); err != nil {
 		// Возврат к прежнему состоянию: коллекция должна остаться рабочей.
+		// Перенесённое чужое вернёт из tmp отложенная уборка Merge.
 		os.Rename(old, c.dir)
 		return err
 	}
-	return os.RemoveAll(old)
+	// Прежний каталог убирается тем же бережным способом: чужое, появившееся
+	// в нём уже после переноса, возвращается, а не стирается.
+	retireDir(old, c.dir)
+	return nil
+}
+
+// kbOwned сообщает, что запись каталога коллекции пишет сам kb и при подмене
+// каталога её заменяет новая. Всё остальное — чужое, и уплотнение обязано его
+// сохранить: каталоги графов, заметки человека, что угодно ещё.
+//
+// Список закрытый намеренно. Открытый («графы — это graph*») однажды пропустил
+// бы новый вид данных, а цена пропуска — их потеря; лишняя запись в списке
+// чужого стоит только места.
+func kbOwned(name string) bool {
+	switch name {
+	case "meta.json", "docs.jsonl", "docs.jsonl.new", "deleted.ids", "journal.log",
+		"chunks.dat", "chunks.idx", "vectors.dat", "vectors.meta",
+		lockMark, archiveMark, reanalyzeMark:
+		return true
+	}
+	for _, prefix := range []string{"seg-", newSegPrefix, deadSegPrefix} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	// Временные файлы атомарной записи (fsx.WriteFileAtomic): «.<имя>.<число>.tmp».
+	if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp") {
+		for _, own := range []string{"meta.json", "docs.jsonl", "chunks.idx", "vectors.meta", reanalyzeMark} {
+			if strings.HasPrefix(name, "."+own+".") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// carryOver переносит чужие записи каталога from в каталог to.
+//
+// Сорвался перенос одной записи — уже перенесённые возвращаются назад: граф
+// не должен остаться в рабочем каталоге уплотнения, который потом уберут.
+func carryOver(from, to string) error {
+	entries, err := os.ReadDir(from)
+	if err != nil {
+		return err
+	}
+	var moved []string
+	for _, e := range entries {
+		name := e.Name()
+		if kbOwned(name) {
+			continue
+		}
+		if err := os.Rename(filepath.Join(from, name), filepath.Join(to, name)); err != nil {
+			for _, m := range moved {
+				os.Rename(filepath.Join(to, m), filepath.Join(from, m))
+			}
+			return fmt.Errorf("перенос %s в новый каталог коллекции: %w", name, err)
+		}
+		moved = append(moved, name)
+	}
+	return nil
+}
+
+// retireDir убирает рабочий каталог уплотнения (`.compact-…` или `.old-…`),
+// ничего чужого не теряя: всё, чего kb не пишет сам, сперва возвращается
+// в каталог коллекции live, а удаляются только файлы kb.
+//
+// Вернуть не вышло (каталога коллекции нет, или в нём уже есть запись с тем же
+// именем) — каталог остаётся на месте вместе с чужим, и об этом говорит ошибка.
+// Каталоги с точкой Names() не показывает, так что коллекцией он не прикинется,
+// а разобраться с ним человек сможет руками.
+func retireDir(dir, live string) error {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var kept []string
+	for _, e := range entries {
+		name := e.Name()
+		path := filepath.Join(dir, name)
+		if kbOwned(name) {
+			if err := os.RemoveAll(path); err != nil {
+				return err
+			}
+			continue
+		}
+		target := filepath.Join(live, name)
+		if _, err := os.Lstat(target); err == nil {
+			kept = append(kept, name)
+			continue
+		}
+		if err := os.Rename(path, target); err != nil {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) > 0 {
+		return fmt.Errorf("в %s остались записи, которые не удалось вернуть в коллекцию (%s): "+
+			"каталог не удалён, разберите его вручную", dir, strings.Join(kept, ", "))
+	}
+	return os.Remove(dir)
 }
 
 // recoverCompaction доводит до конца прерванное уплотнение.
@@ -334,6 +482,9 @@ func (c *Collection) swapIn(tmp string) error {
 // Оборваться можно только между двумя переименованиями: прежний каталог уже
 // отставлен в сторону, нового ещё нет. Тогда возвращаем прежний — потерять
 // работу уплотнения не жалко, потерять коллекцию нельзя.
+//
+// Рабочие каталоги убираются через retireDir, а не RemoveAll: в них может
+// лежать перенесённый граф (обрыв между carryOver и подменой).
 func recoverCompaction(base *Base, name, dir string) {
 	old := base.tempDir("old-" + name)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -341,6 +492,6 @@ func recoverCompaction(base *Base, name, dir string) {
 			os.Rename(old, dir)
 		}
 	}
-	os.RemoveAll(old)
-	os.RemoveAll(base.tempDir("compact-" + name))
+	retireDir(old, dir)
+	retireDir(base.tempDir("compact-"+name), dir)
 }

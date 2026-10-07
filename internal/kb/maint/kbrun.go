@@ -1226,7 +1226,13 @@ type mergeInfo struct {
 	bytes       int64
 	segments    int
 	hasGraph    bool
-	graph       graph.Meta // паспорт графа: читается даром, граф не открывается
+	graphs      []namedGraph // каталоги графов коллекции: рабочий и именованные
+}
+
+// namedGraph — каталог графа и его паспорт: читается даром, граф не открывается.
+type namedGraph struct {
+	dir  string
+	meta graph.Meta
 }
 
 func mergePreview(c *kb.Collection) mergeInfo {
@@ -1248,13 +1254,17 @@ func mergePreview(c *kb.Collection) mergeInfo {
 	if o := mi.physical - mi.liveChunks - mi.delChunks; o > 0 {
 		mi.orphanChunk = o
 	}
-	mi.hasGraph = c.HasGraph()
-	if mi.hasGraph {
+	// Все графы коллекции, а не один рабочий: именованный граф (`graph-lab`)
+	// стоит той же работы видеокарты, а до 07.10.2026 предупреждение о нём
+	// молчало.
+	for _, dir := range c.GraphDirs() {
 		// Ошибку глотаем намеренно: паспорт не прочитался — предупреждение
 		// станет короче, но не пропадёт. Отказываться уплотнять из-за этого
 		// не за что, а падать посреди объяснения — тем более.
-		mi.graph, _ = graph.Stat(filepath.Join(c.Dir(), "graph"))
+		m, _ := graph.Stat(filepath.Join(c.Dir(), dir))
+		mi.graphs = append(mi.graphs, namedGraph{dir: dir, meta: m})
 	}
+	mi.hasGraph = len(mi.graphs) > 0
 	return mi
 }
 
@@ -1297,12 +1307,29 @@ func (mi mergeInfo) explain(name string) string {
 	b.WriteString("    вида «" + name + "/12#37» станут указывать не туда;\n")
 	if mi.hasGraph {
 		b.WriteString("  · ГРАФ ПОНЯТИЙ ПЕРЕСТАНЕТ ОТКРЫВАТЬСЯ. Он опирается на эту нумерацию.\n")
+		// Граф уплотнение не стирает: каталоги переезжают в новый каталог
+		// коллекции как есть. Но кусков становится меньше, и граф отказывается
+		// открываться (graph.ErrCompacted) — пользоваться им будет нельзя.
+		names := make([]string, 0, len(mi.graphs))
+		for _, g := range mi.graphs {
+			names = append(names, g.dir)
+		}
+		if len(names) > 0 {
+			fmt.Fprintf(&b, "    Каталоги графов (%s) останутся на месте, но открыть их будет нельзя.\n",
+				strings.Join(names, ", "))
+		}
 		// Числа, а не слово «дорого». «Десятки часов» человек пролистывает,
 		// «116801 понятие и 587644 связи» — нет. Берутся даром из паспорта
 		// графа: открывать его ради предупреждения значило бы ждать 16 секунд.
-		if g := mi.graph; g.Entities > 0 {
-			fmt.Fprintf(&b, "    Потеряется: %d понятий, %d связей, %d упоминаний.\n",
-				g.Entities, g.Edges, g.Mentions)
+		counted := false
+		for _, ng := range mi.graphs {
+			g := ng.meta
+			if g.Entities == 0 {
+				continue
+			}
+			counted = true
+			fmt.Fprintf(&b, "    %s: недоступными станут %d понятий, %d связей, %d упоминаний.\n",
+				ng.dir, g.Entities, g.Edges, g.Mentions)
 			fmt.Fprintf(&b, "    Собрать заново — прогнать %d кусков через %s:\n",
 				g.Covered, g.Model)
 			if g.BuildSeconds > 0 {
@@ -1311,7 +1338,8 @@ func (mi mergeInfo) explain(name string) string {
 			} else {
 				b.WriteString("    ровно столько же работы видеокарты, сколько уже потрачено.\n")
 			}
-		} else {
+		}
+		if !counted {
 			b.WriteString("    Собрать его заново — десятки часов работы видеокарты.\n")
 		}
 	}
@@ -1331,7 +1359,7 @@ func confirmMerge(name string, mi mergeInfo, force, yes bool) error {
 	// Отказ по графу остаётся отказом: подтверждение словом его не снимает.
 	// Снимает только явный ключ — он и означает «я знаю, что теряю».
 	if mi.hasGraph && !force {
-		return fmt.Errorf("по коллекции %s собран граф понятий, и уплотнение сделает его нечитаемым;\n"+
+		return fmt.Errorf("по коллекции %s собран граф понятий, и после уплотнения он перестанет открываться;\n"+
 			"если граф нужен — уплотнять нельзя; если нет — повторите с --kb-merge-force", name)
 	}
 	if yes {

@@ -254,6 +254,166 @@ func TestMergeRefusedWhenGraphExists(t *testing.T) {
 	}
 }
 
+// fakeGraph кладёт в коллекцию каталог графа с паспортом и журналом.
+// Содержимое возвращается: по нему проверяется, что граф пережил уплотнение
+// байт в байт.
+func fakeGraph(t *testing.T, collDir, name string) map[string]string {
+	t.Helper()
+	dir := filepath.Join(collDir, name)
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"graph.meta":     `{"version":2,"chunks":7}`,
+		"edges.log":      "связи, которые стоили недель работы видеокарты",
+		"sub/notes.json": `{"kept":true}`,
+	}
+	for rel, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return files
+}
+
+// sameGraph проверяет, что каталог графа цел: все файлы на месте, байт в байт.
+func sameGraph(t *testing.T, collDir, name string, files map[string]string) {
+	t.Helper()
+	for rel, want := range files {
+		got, err := os.ReadFile(filepath.Join(collDir, name, rel))
+		if err != nil {
+			t.Fatalf("после уплотнения пропал %s/%s: %v", name, rel, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s/%s изменился: %q вместо %q", name, rel, got, want)
+		}
+	}
+}
+
+// noWorkDirs проверяет, что рабочих каталогов уплотнения не осталось.
+func noWorkDirs(t *testing.T, base *Base) {
+	t.Helper()
+	entries, _ := os.ReadDir(base.CollectionsDir())
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Fatalf("остался рабочий каталог %s", e.Name())
+		}
+	}
+}
+
+// Именованный граф (`graph-lab`) — тоже граф: уплотнение без ключа его
+// замечает и отказывает, а с ключом переносит в новый каталог нетронутым.
+//
+// До 07.10.2026 граф узнавался только по `graph/graph.meta`: именованный
+// уплотнение не видело, шло без ключа и стирало его вместе с прежним каталогом.
+func TestMergeKeepsNamedGraph(t *testing.T) {
+	base, coll, _ := mergeFixture(t)
+	files := fakeGraph(t, coll.Dir(), "graph-lab")
+	// Чужой файл в корне коллекции — тоже не наш, и терять его нельзя.
+	if err := os.WriteFile(filepath.Join(coll.Dir(), "README.local"), []byte("заметки"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !coll.HasGraph() {
+		t.Fatal("именованный граф не распознан")
+	}
+	_, err := coll.Merge(context.Background(), MergeOpts{}, nil)
+	if err == nil {
+		t.Fatal("уплотнение при именованном графе прошло без --kb-merge-force")
+	}
+	if !strings.Contains(err.Error(), "graph-lab") {
+		t.Errorf("в отказе не назван каталог графа: %v", err)
+	}
+	sameGraph(t, coll.Dir(), "graph-lab", files)
+
+	if _, err := coll.Merge(context.Background(), MergeOpts{Force: true}, nil); err != nil {
+		t.Fatalf("уплотнение с ключом: %v", err)
+	}
+	sameGraph(t, coll.Dir(), "graph-lab", files)
+	if got, err := os.ReadFile(filepath.Join(coll.Dir(), "README.local")); err != nil || string(got) != "заметки" {
+		t.Fatalf("чужой файл коллекции не пережил уплотнение: %q, %v", got, err)
+	}
+	noWorkDirs(t, base)
+	if !found(t, coll, "goroutines") {
+		t.Fatal("после уплотнения коллекция перестала искать")
+	}
+}
+
+// С ключом --kb-merge-force рабочий граф не стирается: ключ разрешает
+// уплотнение, а не удаление графа.
+func TestMergeForceKeepsMainGraph(t *testing.T) {
+	base, coll, _ := mergeFixture(t)
+	files := fakeGraph(t, coll.Dir(), graphDirName)
+
+	if _, err := coll.Merge(context.Background(), MergeOpts{Force: true}, nil); err != nil {
+		t.Fatalf("уплотнение с ключом: %v", err)
+	}
+	sameGraph(t, coll.Dir(), graphDirName, files)
+	noWorkDirs(t, base)
+
+	// И новое открытие коллекции (а с ним recoverCompaction) граф не трогает.
+	base2, err := OpenBase(base.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base2.Close()
+	if _, err := base2.Open("lib"); err != nil {
+		t.Fatal(err)
+	}
+	sameGraph(t, coll.Dir(), graphDirName, files)
+}
+
+// Обрыв посреди подмены не теряет перенесённый граф: открытие коллекции
+// возвращает его из рабочего каталога, а не стирает вместе с ним.
+func TestRecoverCompactionReturnsCarriedGraph(t *testing.T) {
+	for _, between := range []bool{false, true} {
+		name := "после переноса"
+		if between {
+			name = "между переименованиями"
+		}
+		t.Run(name, func(t *testing.T) {
+			base, coll, _ := mergeFixture(t)
+			dir := coll.Dir()
+			files := fakeGraph(t, dir, "graph-lab")
+			before := coll.Stats().Chunks
+			base.Close()
+
+			// Готовый рабочий каталог уплотнения: файлы kb и перенесённый граф.
+			tmp := base.tempDir("compact-lib")
+			if err := os.MkdirAll(tmp, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tmp, "meta.json"), []byte(`{"name":"lib"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(dir, "graph-lab"), filepath.Join(tmp, "graph-lab")); err != nil {
+				t.Fatal(err)
+			}
+			if between {
+				// Прежний каталог уже отставлен, новый ещё не встал.
+				if err := os.Rename(dir, base.tempDir("old-lib")); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			base2, err := OpenBase(base.Dir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer base2.Close()
+			c2, err := base2.Open("lib")
+			if err != nil {
+				t.Fatalf("коллекция не открылась после обрыва: %v", err)
+			}
+			sameGraph(t, dir, "graph-lab", files)
+			noWorkDirs(t, base2)
+			if got := c2.Stats().Chunks; got != before {
+				t.Fatalf("после восстановления кусков %d, было %d", got, before)
+			}
+		})
+	}
+}
+
 // Без графа уплотнение идёт как прежде — предохранитель не мешает обычной работе.
 func TestMergeAllowedWithoutGraph(t *testing.T) {
 	base, coll, _ := mergeFixture(t)
