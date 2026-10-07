@@ -108,8 +108,8 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 
 	cmd.Dir = opts.Sandbox.Root()
 	// Окружение наследуется: без PATH и HOME большинство инструментов разработки
-	// не работает. Отключаем только интерактивность.
-	cmd.Env = append(os.Environ(),
+	// не работает. Отключаем интерактивность и снимаем секреты (commandEnv).
+	cmd.Env = append(commandEnv(os.Environ()),
 		"TERM=dumb",
 		"GIT_PAGER=cat",
 		"PAGER=cat",
@@ -206,6 +206,46 @@ func runCommand(ctx context.Context, command string, opts Options, timeout time.
 		text = "(команда не вывела ничего)"
 	}
 	return opts.truncate(header + text), nil
+}
+
+// secretMarks — части имён переменных окружения, по которым видно секрет.
+var secretMarks = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE",
+	"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL"}
+
+// commandEnv — окружение для команд модели без секретов.
+//
+// **Почему.** Команду выбирает модель, а модель читает чужой текст: страницу
+// из сети, документ, выдачу поиска. Раньше команды наследовали всё окружение
+// ollchat — ключи API, токены (в том числе OLLMCP_TOKEN службы), учётные
+// данные облака, — и внедрённой инструкции хватало одного `env` или
+// `curl -d "$GITHUB_TOKEN" …`, чтобы унести их наружу.
+//
+// Белый список здесь не годится: инструментам разработки нужны десятки
+// переменных (PATH, HOME, LANG, GOPATH, прокси, настройки сборки), и он
+// ломал бы их молча. Снимаются переменные, имя которых выдаёт секрет,
+// без учёта регистра, и всё облачное AWS_*; остальное проходит как было.
+func commandEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if !secretName(name) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func secretName(name string) bool {
+	up := strings.ToUpper(name)
+	if up == "OLLMCP_TOKEN" || strings.HasPrefix(up, "AWS_") {
+		return true
+	}
+	for _, m := range secretMarks {
+		if strings.Contains(up, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // waitOrKill ждёт завершения команды, а по отмене или таймауту снимает всё
