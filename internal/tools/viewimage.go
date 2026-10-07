@@ -64,7 +64,7 @@ func (t *viewImageTool) Spec() ollama.Tool {
 }
 
 func (t *viewImageTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "path")
+	raw, err := requireText(args, "path")
 	if err != nil {
 		return nil, err
 	}

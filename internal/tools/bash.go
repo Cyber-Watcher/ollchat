@@ -37,7 +37,7 @@ func (t *bashTool) Spec() ollama.Tool {
 }
 
 func (t *bashTool) Plan(args map[string]any) (*Plan, error) {
-	cmd, err := requireString(args, "command")
+	cmd, err := requireText(args, "command")
 	if err != nil {
 		return nil, err
 	}

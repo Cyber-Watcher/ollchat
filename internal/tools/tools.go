@@ -491,6 +491,52 @@ func requireString(args map[string]any, key string) (string, error) {
 	return s, nil
 }
 
+// argText — аргумент-цель действия (путь, команда, адрес): только строка.
+//
+// **Почему не argString.** Та приводит к строке что угодно через %v, и путь
+// `["a","b"]` становился файлом «[a b]», а объект — файлом «map[…]»: модель
+// ошиблась в типе, а инструмент молча читал или писал не то, и окно
+// подтверждения показывало человеку цель, о которой никто не просил.
+// Ошибка же называет тип, и модель исправляет вызов сама.
+func argText(args map[string]any, key string) (string, bool, error) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", false, fmt.Errorf("параметр %q должен быть строкой, а получен %s", key, jsonKind(v))
+	}
+	return s, true, nil
+}
+
+// requireText — обязательный argText.
+func requireText(args map[string]any, key string) (string, error) {
+	s, ok, err := argText(args, key)
+	if err != nil {
+		return "", err
+	}
+	if !ok || strings.TrimSpace(s) == "" {
+		return "", fmt.Errorf("не указан обязательный параметр %q", key)
+	}
+	return s, nil
+}
+
+// jsonKind называет тип значения из аргументов модели словами JSON.
+func jsonKind(v any) string {
+	switch v.(type) {
+	case float64, float32, int, int64:
+		return "число"
+	case bool:
+		return "true/false"
+	case []any:
+		return "список"
+	case map[string]any:
+		return "объект"
+	}
+	return fmt.Sprintf("%T", v)
+}
+
 func argInt(args map[string]any, key string, def int) int {
 	v, ok := args[key]
 	if !ok || v == nil {

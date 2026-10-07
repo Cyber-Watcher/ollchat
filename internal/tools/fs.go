@@ -49,7 +49,7 @@ func (t *readFileTool) Spec() ollama.Tool {
 }
 
 func (t *readFileTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "path")
+	raw, err := requireText(args, "path")
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,10 @@ func (t *listDirTool) Spec() ollama.Tool {
 }
 
 func (t *listDirTool) Plan(args map[string]any) (*Plan, error) {
-	raw, ok := argString(args, "path")
+	raw, ok, err := argText(args, "path")
+	if err != nil {
+		return nil, err
+	}
 	if !ok || strings.TrimSpace(raw) == "" {
 		raw = "."
 	}
@@ -286,7 +289,7 @@ func (t *writeFileTool) Spec() ollama.Tool {
 }
 
 func (t *writeFileTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "path")
+	raw, err := requireText(args, "path")
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +379,7 @@ func (t *editFileTool) Spec() ollama.Tool {
 }
 
 func (t *editFileTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "path")
+	raw, err := requireText(args, "path")
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +499,10 @@ func (t *grepTool) Plan(args map[string]any) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, ok := argString(args, "path")
+	raw, ok, err := argText(args, "path")
+	if err != nil {
+		return nil, err
+	}
 	if !ok || strings.TrimSpace(raw) == "" {
 		raw = "."
 	}

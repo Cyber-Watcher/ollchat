@@ -38,7 +38,7 @@ func (t *httpFetchTool) Spec() ollama.Tool {
 }
 
 func (t *httpFetchTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "url")
+	raw, err := requireText(args, "url")
 	if err != nil {
 		return nil, err
 	}

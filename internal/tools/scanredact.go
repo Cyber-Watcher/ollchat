@@ -78,7 +78,7 @@ func (t *scanRedactTool) SafeArgs(args map[string]any) string {
 }
 
 func (t *scanRedactTool) Plan(args map[string]any) (*Plan, error) {
-	raw, err := requireString(args, "path")
+	raw, err := requireText(args, "path")
 	if err != nil {
 		return nil, err
 	}
