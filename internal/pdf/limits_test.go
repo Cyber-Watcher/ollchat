@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -297,8 +298,9 @@ func TestContentsArrayBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(d.contentOf(d.Pages()[0])); n > maxDecoded+1 {
-		t.Errorf("содержимое страницы %d байт при пределе %d", n, maxDecoded)
+	content, cut := d.contentOf(d.Pages()[0])
+	if n := len(content); n > maxDecoded+1 || !cut {
+		t.Errorf("содержимое страницы %d байт при пределе %d, обрезка отмечена: %v", n, maxDecoded, cut)
 	}
 }
 
@@ -488,6 +490,94 @@ func TestLengthChainDoesNotExhaustStack(t *testing.T) {
 			t.Errorf("первый поток: %#v", d.object(1))
 		}
 	})
+}
+
+// pageWithContent — страница с содержимым content, сжатым FlateDecode,
+// шрифтом F1 (font), картинкой Im0 и разделом Properties с ActualText.
+func pageWithContent(content []byte, font string, extra ...string) []byte {
+	packed := zlibBytes(content)
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> " +
+			"/Properties << /P0 << /ActualText (" + strings.Repeat("x", 1000) + ") >> >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(packed), packed),
+		font,
+		stream("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>", "x"),
+	}
+	return build(append(objs, extra...)...)
+}
+
+// allocated — сколько байт выделил f.
+func allocated(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// Каждый «q» откладывал матрицу, каждый «BMC» — блок, каждый «Do» — запись
+// о картинке, и поток содержимого из одних таких операторов требовал на
+// страницу сотни мегабайт сверх самого потока. Теперь сверх пределов они
+// не копятся.
+func TestPageStateBounded(t *testing.T) {
+	cases := []struct{ name, op, want string }{
+		{"q без Q", "q ", "end"},
+		{"BMC без EMC", "BMC ", "end"},
+		// Текст внутри незакрытого блока с ActualText заменяется ею.
+		{"BDC с длинной заменой", "/Span /P0 BDC ", "xxxxxxxxxx"},
+		{"картинки", "/Im0 Do ", "end"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			content := bytes.Repeat([]byte(c.op), (16<<20)/len(c.op))
+			doc := pageWithContent(append(content, "BT /F1 12 Tf 72 720 Td (end) Tj ET"...), helvetica)
+			var text string
+			n := allocated(func() {
+				bounded(t, 20*time.Second, func() { text = pageText(t, doc) })
+			})
+			// Сам поток и его копии — около 70 МБ; сверх этого копиться нечему.
+			if n > 250<<20 {
+				t.Errorf("выделено %d МБ на странице из 16 МБ содержимого", n>>20)
+			}
+			if !strings.Contains(text, c.want) {
+				t.Errorf("текст после операторов потерян: %.80q", text)
+			}
+		})
+	}
+}
+
+// Код глифа по /ToUnicode разворачивается в строку до 256 знаков: строка
+// содержимого в мегабайт давала больше сотни мегабайт текста одной страницы.
+// Теперь текст страницы ограничен, а обрезка отмечена в тексте.
+func TestPageTextBounded(t *testing.T) {
+	old := maxPageText
+	maxPageText = 1 << 20
+	t.Cleanup(func() { maxPageText = old })
+	long := "<" + strings.Repeat("0041", 256) + ">"
+	codes := "<" + strings.Repeat("0001", 512<<10) + "> Tj"
+	doc := pageWithContent([]byte("BT /F1 12 Tf 72 720 Td "+codes+" ET"),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /ToUnicode 7 0 R >>",
+		stream("", "begincmap\n1 beginbfchar\n<0001> "+long+"\nendbfchar\nendcmap"))
+	var text string
+	bounded(t, 20*time.Second, func() { text = pageText(t, doc) })
+	if len(text) > 2<<20 {
+		t.Errorf("текст страницы %d МБ при пределе 1 МБ", len(text)>>20)
+	}
+	if !strings.Contains(text, pageCutMark) {
+		t.Error("обрезка страницы не отмечена в тексте")
+	}
+
+	// Кусков на страницу тоже не больше предела.
+	oldFrags := maxPageFrags
+	maxPageFrags = 1000
+	t.Cleanup(func() { maxPageFrags = oldFrags })
+	doc = pageWithContent([]byte("BT /F1 12 Tf 72 720 Td "+strings.Repeat("(a) ' ", 100000)+" ET"), helvetica)
+	bounded(t, 20*time.Second, func() { text = pageText(t, doc) })
+	if n := strings.Count(text, "a"); n > 1000 || !strings.Contains(text, pageCutMark) {
+		t.Errorf("кусков %d при пределе 1000, обрезка отмечена: %v", n, strings.Contains(text, pageCutMark))
+	}
 }
 
 // /N объектного потока берётся из файла: до правки под него заранее

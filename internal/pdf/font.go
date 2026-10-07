@@ -90,7 +90,8 @@ type shown struct {
 	unmapped int     // сколько кодов не удалось сопоставить
 	width    float64 // ширина в тысячных долях кегля
 	glyphs   int
-	spaces   int // однобайтовые пробелы, к ним применяется словный интервал
+	spaces   int  // однобайтовые пробелы, к ним применяется словный интервал
+	cut      bool // текст обрезан по пределу limit (см. decode)
 }
 
 // width возвращает ширину глифа в тысячных долях кегля.
@@ -113,12 +114,23 @@ func (f *font) widthOf(code uint32) float64 {
 // decode переводит строку из содержимого страницы в текст и считает, насколько
 // сдвинется перо: без ширины глифов не отличить конец слова от простого сдвига,
 // и текст рассыпается на буквы через пробел.
-func (f *font) decode(b []byte) shown {
+//
+// Текста выходит не больше limit байт: код глифа по /ToUnicode разворачивается
+// в строку до 256 знаков, и одна строка содержимого в мегабайт давала бы
+// сотни мегабайт текста раньше, чем их успели бы проверить снаружи.
+func (f *font) decode(b []byte, limit int) shown {
 	var sb strings.Builder
 	var out shown
+	full := func() bool {
+		out.cut = sb.Len() >= limit
+		return out.cut
+	}
 	if f == nil {
 		// Шрифт не объявлен: считаем однобайтовой латиницей.
 		for _, c := range b {
+			if full() {
+				break
+			}
 			sb.WriteRune(winAnsi[c])
 			out.width += 500
 			out.glyphs++
@@ -127,7 +139,7 @@ func (f *font) decode(b []byte) shown {
 		return out
 	}
 	if f.twoByte {
-		for i := 0; i+1 < len(b); i += 2 {
+		for i := 0; i+1 < len(b) && !full(); i += 2 {
 			code := uint32(b[i])<<8 | uint32(b[i+1])
 			out.width += f.widthOf(code)
 			out.glyphs++
@@ -141,6 +153,9 @@ func (f *font) decode(b []byte) shown {
 		return out
 	}
 	for _, c := range b {
+		if full() {
+			break
+		}
 		code := uint32(c)
 		out.width += f.widthOf(code)
 		out.glyphs++

@@ -49,7 +49,10 @@ type mcSpan struct {
 // openSpan открывает блок. props — словарь свойств BDC или nil у BMC.
 func (e *extractor) openSpan(props Dict) {
 	sp := mcSpan{}
-	if s, ok := e.doc.Resolve(props["ActualText"]).(String); ok && props != nil {
+	// Расшифровка замены списывается с бюджета документа: одна длинная
+	// замена из раздела Properties, открытая миллион раз, иначе стоила бы
+	// терабайт работы.
+	if s, ok := e.doc.Resolve(props["ActualText"]).(String); ok && props != nil && e.doc.spend(len(s)) {
 		sp.actual = true
 		raw := decodeTextString(s)
 		sp.rawLen = len(raw)
@@ -101,7 +104,7 @@ func (e *extractor) closeSpan() {
 			sp.text += " "
 		}
 	}
-	if sp.text == "" {
+	if sp.text == "" || !e.room(len(sp.text)) {
 		return
 	}
 	w := sp.endX - sp.x
