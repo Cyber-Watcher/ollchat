@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
@@ -19,12 +20,14 @@ import (
 // Умеет отвечать медленно и умеет отказывать — этим проверяются раздача
 // по освобождению слота и выключение мёртвого узла.
 type fakeNode struct {
-	srv    *httptest.Server
-	calls  int32 // сколько кусков разобрано
-	fail   int32 // 1 — отвечать 503 на чат
-	delay  time.Duration
-	digest string
-	quant  string
+	srv     *httptest.Server
+	calls   int32 // сколько кусков разобрано
+	fail    int32 // 1 — отвечать 503 на чат
+	empty   int32 // 1 — модель отвечает пустотой
+	missing int32 // 1 — на чат 404: модели на узле нет
+	delay   time.Duration
+	digest  string
+	quant   string
 }
 
 func newFakeNode(t *testing.T, delay time.Duration) *fakeNode {
@@ -52,10 +55,19 @@ func newFakeNode(t *testing.T, delay time.Duration) *fakeNode {
 			if n.delay > 0 {
 				time.Sleep(n.delay)
 			}
+			if atomic.LoadInt32(&n.missing) == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"model 'проба' not found"}`))
+				return
+			}
 			atomic.AddInt32(&n.calls, 1)
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			enc := json.NewEncoder(w)
-			_ = enc.Encode(map[string]any{"message": map[string]any{"role": "assistant", "content": "{}"}, "done": false})
+			content := "{}"
+			if atomic.LoadInt32(&n.empty) == 1 {
+				content = ""
+			}
+			_ = enc.Encode(map[string]any{"message": map[string]any{"role": "assistant", "content": content}, "done": false})
 			_ = enc.Encode(map[string]any{"done": true})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -267,6 +279,75 @@ func TestPoolCheck(t *testing.T) {
 	err := p2.Check(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "молчун") {
 		t.Errorf("недоступный узел не назван по имени: %v", err)
+	}
+}
+
+// statOf — срез по узлу с именем name.
+func statOf(t *testing.T, p *Pool, name string) NodeStat {
+	t.Helper()
+	for _, s := range p.Stats() {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("узла %s нет в пуле", name)
+	return NodeStat{}
+}
+
+// Пустой ответ модели — не разобранный кусок и не беда узла: в число
+// разобранных не идёт, узел остаётся в строю. Прежде он засчитывался узлу
+// как удача.
+func TestPoolEmptyAnswerIsNotSuccess(t *testing.T) {
+	n := newFakeNode(t, 0)
+	atomic.StoreInt32(&n.empty, 1)
+	p := pool(t, Node{Name: "один", URL: n.srv.URL, Workers: 1})
+
+	if _, err := p.Extract(context.Background(), "с", "в"); !errors.Is(err, graph.ErrEmptyAnswer) {
+		t.Fatalf("ожидался пустой ответ, получено %v", err)
+	}
+	if s := statOf(t, p, "один"); s.Done != 0 || s.Errs != 0 || s.Off {
+		t.Errorf("пустой ответ: разобрано %d, ошибок %d, выключен %v — ожидалось 0, 0, нет", s.Done, s.Errs, s.Off)
+	}
+}
+
+// Неповторяемая ошибка узла (на нём нет модели — 404) — неудача узла,
+// а не удача. В пуле из нескольких узлов кусок уходит другому, и сборка
+// не останавливается из-за одного сервера.
+func TestPoolNodeErrorGoesToOtherNode(t *testing.T) {
+	bad := newFakeNode(t, 0)
+	atomic.StoreInt32(&bad.missing, 1)
+	good := newFakeNode(t, 0)
+	// Плохой узел первым: его слот достаётся первому же куску.
+	p := pool(t,
+		Node{Name: "без модели", URL: bad.srv.URL, Workers: 1},
+		Node{Name: "живой", URL: good.srv.URL, Workers: 1})
+
+	for i := 0; i < 5; i++ {
+		if _, err := p.Extract(context.Background(), "с", "в"); err != nil {
+			t.Fatalf("кусок %d: %v", i, err)
+		}
+	}
+	if s := statOf(t, p, "без модели"); s.Done != 0 || s.Errs == 0 {
+		t.Errorf("узел без модели: разобрано %d, ошибок %d — ошибка засчитана как удача", s.Done, s.Errs)
+	}
+	if got := atomic.LoadInt32(&good.calls); got != 5 {
+		t.Errorf("живой узел разобрал %d кусков из 5", got)
+	}
+}
+
+// В пуле из одного узла неповторяемую ошибку отдать некому: она уходит
+// наверх сразу, без кругов повторов, но удачей узла не считается.
+func TestPoolOfOneNodeReturnsNodeError(t *testing.T) {
+	n := newFakeNode(t, 0)
+	atomic.StoreInt32(&n.missing, 1)
+	p := pool(t, Node{Name: "один", URL: n.srv.URL, Workers: 1})
+
+	_, err := p.Extract(context.Background(), "с", "в")
+	if err == nil || ollama.Retryable(err) || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("ожидалась неповторяемая ошибка узла, получено %v", err)
+	}
+	if s := statOf(t, p, "один"); s.Done != 0 || s.Errs != 1 {
+		t.Errorf("разобрано %d, ошибок %d — ожидалось 0 и 1", s.Done, s.Errs)
 	}
 }
 

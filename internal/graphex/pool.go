@@ -2,12 +2,14 @@ package graphex
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/nodeprobe"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
@@ -335,14 +337,24 @@ func (p *Pool) Extract(ctx context.Context, system, user string) (string, error)
 			p.release(n)
 			return "", err
 		}
-		// Пустой или неразбираемый ответ — вина модели, а не сервера:
-		// такой кусок сборка пометит пропущенным, а узел остаётся в строю.
-		if !ollama.Retryable(err) {
-			p.ok(n, time.Since(started))
+		// Пустой ответ — отказ модели на этом куске, а не беда узла: сервер
+		// ответил как положено. Сборка пометит кусок пустым или пропущенным,
+		// узел остаётся в строю, но и разобранным кусок не считается.
+		if errors.Is(err, graph.ErrEmptyAnswer) {
+			p.answered(n)
 			return "", err
 		}
+		// Всё прочее — беда узла или запроса. Неповторяемая (4xx: на узле нет
+		// модели, запрос не принят) прежде засчитывалась узлу как удача
+		// и уходила наверх, где на ней останавливалась вся сборка. Теперь это
+		// неудача узла, и в пуле из нескольких узлов кусок уходит другому:
+		// модели может не оказаться на одном сервере. В пуле из одного узла
+		// отдать кусок некому — ошибка уходит наверх сразу, как прежде.
 		last = err
 		p.fail(n, err)
+		if !ollama.Retryable(err) && len(p.nodes) == 1 {
+			return "", err
+		}
 		if fails++; fails >= limit {
 			return "", fmt.Errorf("кусок не разобран за %d попыток на узлах: %w", fails, last)
 		}
@@ -381,6 +393,22 @@ func (p *Pool) ok(n *poolNode, spent time.Duration) {
 	n.done++
 	n.fails = 0
 	n.spent += spent
+	idle := n.off
+	if idle {
+		p.drop(n)
+	}
+	p.mu.Unlock()
+	if !idle {
+		p.slots <- n
+	}
+}
+
+// answered возвращает слот узла, который ответил, но разобранного куска
+// не дал (пустой ответ модели): узел жив — счёт неудач подряд сбрасывается,
+// а в число разобранных кусок не идёт.
+func (p *Pool) answered(n *poolNode) {
+	p.mu.Lock()
+	n.fails = 0
 	idle := n.off
 	if idle {
 		p.drop(n)
