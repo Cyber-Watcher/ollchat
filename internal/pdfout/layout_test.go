@@ -1,8 +1,11 @@
 package pdfout
 
 import (
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // newTestPainter готовит рисовальщика для проверки арифметики раскладки.
@@ -72,6 +75,59 @@ func TestSplitLongWordFitsColumn(t *testing.T) {
 	// Ни один символ не должен потеряться — иначе пропажу не заметить.
 	if got := strings.Join(parts, ""); got != long {
 		t.Errorf("текст изменился при разрезании:\nбыло:  %q\nстало: %q", long, got)
+	}
+}
+
+// TestSplitLongLinear: слово в 100 000 букв без пробела (склеенные данные,
+// base64) режется за один проход. Прежде двоичный поиск мерил весь остаток
+// слова на каждом шаге и клал каждую мерку в кеш: 3 с и 1,5 ГБ памяти.
+func TestSplitLongLinear(t *testing.T) {
+	p := newTestPainter(t)
+	const width = 300.0
+	long := strings.Repeat("абвгдежзик", 10_000)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	parts := p.splitLong(long, 0, p.th.textSize, width)
+	runtime.ReadMemStats(&after)
+
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 32<<20 {
+		t.Errorf("разрезание слова в 100 000 букв заняло %d МБ", alloc>>20)
+	}
+	if n := len(p.wcache); n > 100 {
+		t.Errorf("в кеше ширин %d записей после одного слова", n)
+	}
+	if got := strings.Join(parts, ""); got != long {
+		t.Fatal("текст изменился при разрезании")
+	}
+	for i, part := range parts {
+		if w := p.measure(part, 0, p.th.textSize); w > width+0.01 {
+			t.Fatalf("кусок %d шире колонки: %.1f при пределе %.1f", i, w, width)
+		}
+		// Жадно: следующая буква в кусок уже не влезала.
+		if i+1 < len(parts) {
+			next, _ := utf8.DecodeRuneInString(parts[i+1])
+			if w := p.measure(part+string(next), 0, p.th.textSize); w <= width {
+				t.Fatalf("кусок %d короче возможного: с ещё одной буквой %.1f", i, w)
+			}
+		}
+	}
+}
+
+// TestMeasureCacheBounded: кеш ширин не растёт без предела — ни от длинных
+// строк, ни от множества разных слов.
+func TestMeasureCacheBounded(t *testing.T) {
+	p := newTestPainter(t)
+	long := strings.Repeat("ж", maxCachedText)
+	p.measure(long, 0, p.th.textSize)
+	if _, ok := p.wcache[wkey{text: long, size: p.th.textSize}]; ok {
+		t.Errorf("длинная строка попала в кеш")
+	}
+	for i := range maxCachedWidths + 10 {
+		p.measure(strconv.Itoa(i), 0, p.th.textSize)
+	}
+	if n := len(p.wcache); n > maxCachedWidths {
+		t.Errorf("в кеше %d записей при пределе %d", n, maxCachedWidths)
 	}
 }
 

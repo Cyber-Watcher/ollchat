@@ -169,9 +169,22 @@ func (p *painter) measure(s string, style runStyle, size float64) float64 {
 	for _, piece := range p.split(s, style) {
 		w += p.measurePiece(piece.text, style, piece.fb, size)
 	}
-	p.wcache[k] = w
+	if len(s) <= maxCachedText {
+		if len(p.wcache) >= maxCachedWidths {
+			clear(p.wcache)
+		}
+		p.wcache[k] = w
+	}
 	return w
 }
+
+// Кеш ширин держит только короткие строки и не больше maxCachedWidths
+// записей: длинная строка почти не повторяется, а без предела документ из
+// сотен тысяч разных слов держал бы в кеше их все до конца печати.
+const (
+	maxCachedText   = 256 // байт
+	maxCachedWidths = 1 << 16
+)
 
 // measurePiece меряет кусок, целиком печатаемый одним шрифтом.
 func (p *painter) measurePiece(s string, style runStyle, fb bool, size float64) float64 {
@@ -321,22 +334,30 @@ func (p *painter) wrapTokens(tokens []token, width, size float64) [][]token {
 //
 // Такое приходит с длинными ссылками и склеенными идентификаторами.
 // Обрезать молча нельзя — потеря текста незаметна и потому опасна.
+//
+// Ширина копится по буквам за один проход: gopdf меряет строку суммой
+// ширин глифов без кернинга, и сумма по буквам — та же ширина. Прежний
+// двоичный поиск мерил весь остаток слова на каждом шаге и клал каждую
+// мерку в кеш: слово в 100 000 букв — секунды и гигабайты памяти.
 func (p *painter) splitLong(s string, style runStyle, size, width float64) []string {
 	var out []string
-	runes := []rune(s)
-	for len(runes) > 0 {
-		// Двоичный поиск самого длинного куска, влезающего в ширину.
-		lo, hi := 1, len(runes)
-		for lo < hi {
-			mid := (lo + hi + 1) / 2
-			if p.measure(string(runes[:mid]), style, size) <= width {
-				lo = mid
-			} else {
-				hi = mid - 1
-			}
+	widths := map[rune]float64{}
+	start, x := 0, 0.0
+	for i, r := range s {
+		w, ok := widths[r]
+		if !ok {
+			w = p.measure(string(r), style, size)
+			widths[r] = w
 		}
-		out = append(out, string(runes[:lo]))
-		runes = runes[lo:]
+		// Хотя бы одна буква в куске, даже если она одна шире колонки.
+		if i > start && x+w > width {
+			out = append(out, s[start:i])
+			start, x = i, 0
+		}
+		x += w
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
 	}
 	return out
 }
