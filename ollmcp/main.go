@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"net"
 	"net/http"
 	"os/signal"
 	"strings"
@@ -65,6 +66,16 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 	}
 	if !exists {
 		return fmt.Errorf("файл настроек %s не найден.\nСоздайте его командой: ollchat --init-config", path)
+	}
+
+	// Порт службы открывается до сборки: отказ «без ключа — только петля»
+	// и занятый порт видны сразу, а не после прогрева графа.
+	var ln net.Listener
+	if addr != "" && !list {
+		if ln, _, err = kbserve.Listen(addr, kbserve.Token()); err != nil {
+			return err
+		}
+		defer ln.Close()
 	}
 
 	// Служба — это режим --http без --tools: только ей нужен прогретый граф.
@@ -118,7 +129,7 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(mcp.Info(srv))
 	})
-	err = serveOn(mux, addr, data.Token, srv)
+	err = serveOn(mux, ln, data.Token, srv)
 	if errors.Is(err, errReplaced) {
 		// Тот же номер процесса и тот же порт после exec: сторож службы
 		// подмены не замечает, а клиенты узнают о возможной смене набора
@@ -133,18 +144,18 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 // или правлены её настройки.
 var errReplaced = errors.New("бинарь или настройки сменились")
 
-// serveOn поднимает службу и ждёт сигнала останова.
-func serveOn(mux *http.ServeMux, addr, token string, msrv *mcp.Server) error {
+// serveOn поднимает службу на открытом порту и ждёт сигнала останова.
+func serveOn(mux *http.ServeMux, ln net.Listener, token string, msrv *mcp.Server) error {
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "ollmcp: ключ доступа НЕ ЗАДАН (OLLMCP_TOKEN)")
+		fmt.Fprintln(os.Stderr, "ollmcp: ключ доступа не задан (OLLMCP_TOKEN) — служба только для этой машины")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errc <- err
 		}
 	}()

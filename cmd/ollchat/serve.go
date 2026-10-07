@@ -45,6 +45,15 @@ import (
 func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Registry,
 	base *kb.Base, cache *graph.Cache) error {
 
+	// Порт открывается первым делом: отказ «без ключа — только петля»
+	// и занятый порт должны быть видны сразу, а не после сборки службы.
+	token := kbserve.Token()
+	ln, _, err := kbserve.Listen(addr, token)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+
 	if base == nil {
 		return fmt.Errorf("библиотека не открыта: укажите kb.dir в файле настроек")
 	}
@@ -61,7 +70,6 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 	if len(cfg.Servers) > 0 {
 		fallback = cfg.Servers[0].URL
 	}
-	token := kbserve.Token()
 
 	// Графовому входу — только инструменты графа. Реестр диалога содержит то,
 	// что человек включил себе (bash, запись файлов, правку кода), и отдать
@@ -107,25 +115,24 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 		})
 	})
 
-	// Об отсутствии ключа говорим прямо и один раз при запуске. Молчаливая
-	// служба без проверки в корпоративной сети — это не «удобно настроено»,
-	// а незамеченная дыра.
+	// Об отсутствии ключа говорим прямо и один раз при запуске. Без ключа
+	// служба открыта только петле (kbserve.Listen), и человек должен знать,
+	// почему соседи её не видят.
 	fmt.Fprintf(os.Stderr, "ollchat --serve %s: коллекций %d, ключ доступа %s, MCP %s\n",
 		addr, len(names),
-		map[bool]string{true: "задан", false: "НЕ ЗАДАН (OLLMCP_TOKEN)"}[token != ""],
+		map[bool]string{true: "задан", false: "не задан (OLLMCP_TOKEN) — служба только для этой машины"}[token != ""],
 		map[bool]string{true: "включён (/mcp)", false: "выключен"}[withMCP])
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errc <- err
 		}
 	}()

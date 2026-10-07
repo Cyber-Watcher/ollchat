@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os/signal"
 	"sync"
@@ -291,14 +290,6 @@ func Info(srv *Server) map[string]any {
 		"name": serverName, "version": serverVersion,
 		"protocol": protocolVersion, "tools": len(srv.list()),
 	}
-}
-
-func loopback(host string) bool {
-	if host == "" || host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func trim(s string, n int) string {

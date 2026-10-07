@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +112,27 @@ func TestServeGraphToolLetsGraphToolsThrough(t *testing.T) {
 	_, err = svc.Tool(context.Background(), "", tools.NameGraphSearch, map[string]any{"query": "мьютекс"})
 	if errors.Is(err, kbserve.ErrToolNotServed) {
 		t.Fatalf("инструмент графа отвергнут как неисполняемый: %v", err)
+	}
+}
+
+// Без OLLMCP_TOKEN служба не открывает порт сети: отказ раньше всего прочего
+// и с подсказкой, что делать. Петля без ключа — законный запуск: дальше
+// служба спотыкается уже о пустую библиотеку, а не о ключ.
+func TestServeRefusesNetworkWithoutToken(t *testing.T) {
+	t.Setenv("OLLMCP_TOKEN", "")
+	base, err := kb.OpenBase(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range []string{"0.0.0.0:0", ":0"} {
+		err := runServe(config.Default(), addr, true, nil, base, nil)
+		if err == nil || !strings.Contains(err.Error(), "OLLMCP_TOKEN") {
+			t.Errorf("--serve %s без ключа: %v, ожидался отказ с OLLMCP_TOKEN", addr, err)
+		}
+	}
+	err = runServe(config.Default(), "127.0.0.1:0", true, nil, base, nil)
+	if err == nil || strings.Contains(err.Error(), "OLLMCP_TOKEN") {
+		t.Errorf("--serve 127.0.0.1 без ключа отвергнут из-за ключа: %v", err)
 	}
 }
 
