@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,6 +63,14 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 	}
 	token := kbserve.Token()
 
+	// Графовому входу — только инструменты графа. Реестр диалога содержит то,
+	// что человек включил себе (bash, запись файлов, правку кода), и отдать
+	// его службе значило бы исполнять это по сети без правил и подтверждений.
+	graphReg, err := graphRegistry(registry)
+	if err != nil {
+		return fmt.Errorf("набор графового входа службы: %w", err)
+	}
+
 	mux := kbserve.Handler(kbserve.Opts{
 		TableBoost: cfg.KB.TableBoost,
 		Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
@@ -70,7 +79,7 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 		Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, nil),
 		Default:    cfg.KB.Default,
 		Token:      token,
-		Graph:      &graphService{cfg: cfg, registry: registry, base: base, cache: cache},
+		Graph:      &graphService{cfg: cfg, registry: graphReg, base: base, cache: cache},
 		Verbose:    true,
 	})
 
@@ -139,6 +148,9 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 // обязан получить ровно тот текст, который увидел бы, работая с файлами.
 // Своей реализации поиска здесь нет намеренно — вторая реализация означала бы
 // вторую выдачу.
+//
+// Реестр урезан до инструментов графа (graphRegistry), а Tool ещё и сверяет
+// имя с тем же набором: две независимые преграды на пути к `bash`.
 type graphService struct {
 	cfg      *config.Config
 	registry *tools.Registry
@@ -147,7 +159,16 @@ type graphService struct {
 }
 
 // Tool выполняет именованный инструмент графа.
+//
+// Имя сверяется с набором инструментов графа ДО обращения к реестру. Прежде
+// проверялось только «включён ли такой инструмент», а реестр был диалоговым:
+// запрос `{"name":"bash",…}` исполнял команду от имени службы — без правил
+// deny, без подтверждения, а без OLLMCP_TOKEN и без ключа.
 func (g *graphService) Tool(ctx context.Context, collection, name string, args map[string]any) (string, error) {
+	if !tools.IsGraphTool(name) {
+		return "", fmt.Errorf("%w: %s (графовый вход принимает только %s)",
+			kbserve.ErrToolNotServed, name, strings.Join(tools.GraphToolNames(), ", "))
+	}
 	if g.registry == nil || !g.registry.Has(name) {
 		return "", fmt.Errorf("инструмент %s на этой службе не включён", name)
 	}
@@ -233,6 +254,25 @@ func readOnlyRegistry(full *tools.Registry) (*tools.Registry, error) {
 		// web_search не должен появляться в службе только потому, что он
 		// значится в списке безопасных.
 		if full != nil && full.Has(n) {
+			want = append(want, n)
+		}
+	}
+	return full.Subset(want)
+}
+
+// graphRegistry собирает набор графового входа службы: только инструменты
+// графа, и только те, что включены у администратора.
+//
+// Устроен так же, как readOnlyRegistry, и по той же причине: набор
+// пересобирается из перечисления, а не фильтруется вычитанием опасного, —
+// новый пишущий инструмент не попадёт сюда сам.
+func graphRegistry(full *tools.Registry) (*tools.Registry, error) {
+	if full == nil {
+		return nil, nil
+	}
+	want := make([]string, 0, 5)
+	for _, n := range tools.GraphToolNames() {
+		if full.Has(n) {
 			want = append(want, n)
 		}
 	}

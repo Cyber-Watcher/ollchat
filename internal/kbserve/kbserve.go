@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"hash/fnv"
@@ -263,6 +264,13 @@ func Mount(mux *http.ServeMux, o Opts) {
 			return
 		}
 		text, err := o.Graph.Tool(r.Context(), req.Collection, req.Name, req.Args)
+		if errors.Is(err, ErrToolNotServed) {
+			// Отдельный код, а не общий 400: «так нельзя никогда» и «довод
+			// не разобрался» — разные ответы, и клиент не должен повторять
+			// запрос, который служба не исполнит ни при каких доводах.
+			apiError(w, http.StatusForbidden, err)
+			return
+		}
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err)
 			return
@@ -400,6 +408,13 @@ type GraphSearchRequest struct {
 	Collection string `json:"collection"`
 	Query      string `json:"query"`
 }
+
+// ErrToolNotServed — служба этот инструмент не исполняет и исполнять не будет.
+//
+// Вход `/api/v1/graph/tool` принимает только инструменты графа: всё прочее,
+// от `bash` до `write_file`, означало бы чужие руки на машине службы.
+// GraphServer возвращает эту ошибку (обёрнутой), и вход отвечает 403.
+var ErrToolNotServed = errors.New("служба не исполняет этот инструмент")
 
 // errNoGraph — отказ, который объясняет себя.
 //
