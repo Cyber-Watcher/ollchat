@@ -1375,8 +1375,13 @@ func Default() *Config {
 			MaxRetries:    2,
 			CompactAt:     0.75,
 			CompactKeep:   6,
+			// Тот же список, что в образце конфига (template.go): поиск слит
+			// в один search по замеру 25.09.2026, а умолчание оставалось
+			// с kb_search, и конфиг без tools получал не тот набор, что
+			// созданный --init-config. Расхождение ловит TestTemplateMatchesDefaults.
 			Tools: []string{"read_file", "list_dir", "grep", "write_file", "edit_file",
-				"bash", "http_fetch", "view_image", "scan_redact", "kb_search", "kb_read"},
+				"bash", "http_fetch", "view_image", "scan_redact", "search", "kb_read",
+				"graph_entity", "graph_path"},
 			BashTimeout: "120s",
 			MaxOutputKB: 64,
 		},
