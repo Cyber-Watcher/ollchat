@@ -184,6 +184,11 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 	// как мельтешение и сбой, хотя обе работы шли правильно.
 	if len(files) == 0 {
 		res := IndexResult{Elapsed: time.Since(start)}
+		// Куски без сегмента достраиваются и тогда, когда новых книг нет:
+		// см. buildSegment.
+		if err := c.buildSegment(ctx, send); err != nil {
+			return res, err
+		}
 		send(Progress{Phase: "индекс", Collection: c.name, Done: true, Elapsed: res.Elapsed})
 		return res, nil
 	}
@@ -196,6 +201,9 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 	files, dupes := dedupe(files, c.Books(), nil)
 	if len(files) == 0 {
 		res := IndexResult{Duplicates: dupes, Elapsed: time.Since(start)}
+		if err := c.buildSegment(ctx, send); err != nil {
+			return res, err
+		}
 		send(Progress{
 			Phase: "индекс", Collection: c.name, Done: true,
 			Duplicates: res.Duplicates, Elapsed: res.Elapsed,
@@ -217,7 +225,13 @@ func (c *Collection) Add(ctx context.Context, paths []string, opt IndexOpts, rep
 	if res.Added == 0 || ctx.Err() != nil {
 		// После отмены сегмент не строим: это ещё минуты работы, а Esc должен
 		// останавливать по-настоящему. Извлечённые куски никуда не денутся —
-		// следующий запуск построит сегмент по ним заодно с новыми книгами.
+		// следующий запуск построит сегмент по ним, даже если новых книг
+		// у него не будет.
+		if ctx.Err() == nil {
+			if err := c.buildSegment(ctx, send); err != nil {
+				return res, err
+			}
+		}
 		res.Elapsed = time.Since(start)
 		res.Canceled = ctx.Err() != nil
 		send(Progress{
@@ -580,28 +594,35 @@ func shortErr(err error) string {
 }
 
 // buildSegment строит сегмент по кускам, ещё не попавшим ни в один сегмент.
+//
+// **Зовётся при каждой доливке, а не только когда добавились книги.** Ctrl+C
+// в фазе «индекс» оставляет куски без сегмента, и до 07.10.2026 их достраивал
+// лишь следующий заход с новыми книгами: сверка без новых файлов выходила
+// раньше, и такие книги оставались невидимыми поиску по словам навсегда,
+// а доктор о них молчал.
+//
+// Покрываются только закоммиченные куски — до последней отметки журнала.
+// Обрывок прерванной книги откатит следующая доливка, и сегмент, построенный
+// по нему, указывал бы потом на чужие куски, легшие на те же номера.
 func (c *Collection) buildSegment(ctx context.Context, send func(Progress)) error {
+	if _, err := os.Stat(filepath.Join(c.dir, "chunks.idx")); err != nil {
+		return nil // коллекция ещё пуста
+	}
 	store, err := OpenStore(c.dir)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	covered := 0
-	dirs, err := segmentDirs(c.dir)
+	covered, err := segmentsCover(c.dir)
 	if err != nil {
 		return err
 	}
-	for _, d := range dirs {
-		var meta SegMeta
-		if err := readJSON(filepath.Join(d, "seg.meta"), &meta); err != nil {
-			continue
-		}
-		if end := meta.FirstID + meta.Chunks; end > covered {
-			covered = end
-		}
+	end := store.Count()
+	if st, ok := c.lastCommit(); ok && st.Count < end {
+		end = st.Count
 	}
-	n := store.Count() - covered
+	n := end - covered
 	if n <= 0 {
 		return nil
 	}
@@ -630,6 +651,25 @@ func (c *Collection) buildSegment(ctx context.Context, send func(Progress)) erro
 		return err
 	}
 	return c.reopenIndex()
+}
+
+// segmentsCover — до какого сквозного номера куски покрыты готовыми сегментами.
+func segmentsCover(dir string) (int, error) {
+	dirs, err := segmentDirs(dir)
+	if err != nil {
+		return 0, err
+	}
+	covered := 0
+	for _, d := range dirs {
+		var meta SegMeta
+		if err := readJSON(filepath.Join(d, "seg.meta"), &meta); err != nil {
+			continue
+		}
+		if end := meta.FirstID + meta.Chunks; end > covered {
+			covered = end
+		}
+	}
+	return covered, nil
 }
 
 // Sync сверяет коллекцию с диском: доиндексирует новые книги, помечает

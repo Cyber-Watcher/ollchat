@@ -328,6 +328,14 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		fmt.Fprintf(&b, "  …и ещё %d\n", dups-5)
 	}
 
+	if st.NoSegment > 0 {
+		// Книги прочитаны, куски лежат в хранилище, а сегмента по ним нет:
+		// поиск по словам их не видит, и до 07.10.2026 об этом не говорил
+		// никто — ни сверка, ни доктор.
+		fmt.Fprintf(&b, "\nКуски без словесного индекса: %d\n", st.NoSegment)
+		b.WriteString("  Книги прочитаны, но поиск по словам этих кусков не видит: построение\n" +
+			"  индекса прервали (Ctrl+C в фазе «индекс»). Достроить — команда в конце отчёта.\n")
+	}
 	if st.Segments > 6 {
 		// **Без обещания ускорить поиск.** Замер 30.08.2026 на копии живой
 		// библиотеки: 18 сегментов — 28.37 мс на запрос, тот же корпус,
@@ -386,7 +394,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 			st.Analyzer, AnalyzerVersion)
 	}
 	if len(gone)+len(scans)+len(broken)+len(thin)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
-		!st.Stale && len(del) == 0 {
+		!st.Stale && len(del) == 0 && st.NoSegment == 0 {
 		b.WriteString("\nВсё в порядке: непрочитанных, пропавших, сканов, сбоев и повторов нет.\n")
 	}
 
@@ -420,6 +428,13 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		todo = append(todo, fmt.Sprintf(
 			"ollchat --kb-sync %s   — пометить %s; из выдачи они уйдут сразу",
 			c.Name(), booksWord(len(gone))))
+	}
+	if st.NoSegment > 0 && len(pendFiles)+len(pend.Changed)+len(gone) == 0 {
+		// Отдельной строкой, только когда её не покрывает совет выше: любая
+		// доливка, и --kb-refresh, и --kb-sync, достраивает сегменты сама.
+		todo = append(todo, fmt.Sprintf(
+			"ollchat --kb-sync %s   — достроить словесный индекс по %s",
+			c.Name(), chunksDat(st.NoSegment)))
 	}
 	if len(del) > 0 || st.Segments > 6 {
 		line := fmt.Sprintf("ollchat --kb-merge %s   — уплотнить: выбросить удалённое", c.Name())
@@ -469,6 +484,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		sameFiles: same,
 		editions:  dups,
 		deleted:   len(del),
+		noSegment: st.NoSegment,
 		segments:  st.Segments,
 		stale:     st.Stale,
 	}
@@ -593,6 +609,15 @@ func booksAcc(n int) string {
 	return fmt.Sprintf("%d %s", n, word)
 }
 
+// chunksDat склоняет «по N кускам» — дательный падеж.
+func chunksDat(n int) string {
+	word := "кускам"
+	if n%10 == 1 && n%100 != 11 {
+		word = "куску"
+	}
+	return fmt.Sprintf("%d %s", n, word)
+}
+
 // booksWord склоняет «пропавшая книга»: отчёт читает человек, а не программа.
 func booksWord(n int) string {
 	switch {
@@ -633,6 +658,7 @@ type summary struct {
 	sameFiles int
 	editions  int
 	deleted   int
+	noSegment int
 	segments  int
 	stale     bool
 }
@@ -648,6 +674,7 @@ func (s summary) String() string {
 	}
 	rows := []row{
 		{s.unindexed, "не в индексе — поиск их не находит"},
+		{s.noSegment, "кусков без словесного индекса — поиск по словам их не видит"},
 		{s.copies, "копии на диске — индексация их пропускает"},
 		{s.gone, "пропали с диска, но ещё в выдаче"},
 		{s.broken, "не прочитались"},

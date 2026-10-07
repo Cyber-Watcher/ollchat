@@ -938,6 +938,11 @@ type Stats struct {
 	Analyzer string
 	Stale    bool // версия разбора разошлась с нынешней
 
+	// NoSegment — куски живых книг, не покрытые ни одним сегментом: поиск
+	// по словам их не видит. Остаются, когда построение индекса прервали
+	// (Ctrl+C в фазе «индекс»); достраивает их любая доливка.
+	NoSegment int
+
 	Vectors  int    // сколько кусков обеспечено смыслами
 	VecModel string // какой моделью посчитаны
 	VecDim   int
@@ -969,8 +974,20 @@ func (c *Collection) Stats() Stats {
 		st.Chunks = c.store.Count()
 	}
 	st.Segments = len(c.segs)
+	covered := 0
 	for _, s := range c.segs {
 		st.Terms += s.Terms()
+		if end := s.meta.FirstID + s.meta.Chunks; end > covered {
+			covered = end
+		}
+	}
+	if c.store != nil && c.store.Count() > covered {
+		live := c.liveDocs()
+		for i := covered; i < c.store.Count(); i++ {
+			if live[c.store.recs[i].Doc] {
+				st.NoSegment++
+			}
+		}
 	}
 	st.Bytes = dirSize(c.dir)
 	if c.vectors != nil {

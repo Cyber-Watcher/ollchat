@@ -302,6 +302,112 @@ func TestReindexInterruptedKeepsBook(t *testing.T) {
 	}
 }
 
+// Куски, оставшиеся без сегмента, достраивает сверка и без новых книг,
+// а доктор о них говорит.
+//
+// Ctrl+C в фазе «индекс» оставляет прочитанные книги без словесного индекса.
+// Следующая сверка без новых файлов выходила раньше, и такие книги навсегда
+// оставались невидимы поиску по словам, а доктор молчал. Прерванное построение
+// воспроизводится честно: сегмент, недостроенный до seg.meta, при отмене
+// стирается, и на диске от него не остаётся ничего.
+func TestMissingSegmentBuiltWithoutNewBooks(t *testing.T) {
+	base, coll, books := syncFixture(t)
+	makeBook(t, books, "late.pdf", longPage("lateword arrived after"))
+	if _, err := coll.Add(context.Background(), []string{books}, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := segmentDirs(coll.Dir())
+	if err != nil || len(dirs) != 2 {
+		t.Fatalf("подготовка: сегментов %d, %v", len(dirs), err)
+	}
+	if err := os.RemoveAll(dirs[1]); err != nil {
+		t.Fatal(err)
+	}
+	base.Close()
+
+	base2, err := OpenBase(base.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base2.Close()
+	c2, err := base2.Open("docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := c2.Search("lateword", DefaultSearchOpts()); len(hits) > 0 {
+		t.Fatal("подготовка: книга без сегмента находится")
+	}
+	if n := c2.Stats().NoSegment; n == 0 {
+		t.Fatal("куски без сегмента не посчитаны")
+	}
+	report := Doctor(c2, DoctorOpts{})
+	for _, want := range []string{"без словесного индекса", "ollchat --kb-sync docs"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("доктор не сказал %q:\n%s", want, report)
+		}
+	}
+	if strings.Contains(report, "Всё в порядке") {
+		t.Errorf("доктор считает коллекцию здоровой:\n%s", report)
+	}
+
+	res, err := c2.Sync(context.Background(), IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Added != 0 {
+		t.Fatalf("сверка перечитала %d книг, а новых не было", res.Added)
+	}
+	if !found(t, c2, "lateword") {
+		t.Fatal("сверка без новых книг не достроила сегмент")
+	}
+	if n := c2.Stats().NoSegment; n != 0 {
+		t.Fatalf("после сверки без сегмента осталось %d кусков", n)
+	}
+}
+
+// Сегмент не накрывает обрывок незакоммиченной книги.
+//
+// Сверка без новых книг теперь достраивает сегменты, а отката обрывка
+// у неё нет — его делает только разбор новых книг. Сегмент по обрывку указывал
+// бы потом на куски, легшие на те же номера после отката: слово из обрывка
+// находило бы чужую книгу, а начало новой не находилось бы вовсе.
+func TestSegmentSkipsUncommittedTail(t *testing.T) {
+	_, coll, books := syncFixture(t)
+	committed := coll.ChunkCount()
+	w, err := CreateWriter(coll.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(55, chunksOf("обрывок прерванной книги tailword")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if covered, err := segmentsCover(coll.Dir()); err != nil || covered != committed {
+		t.Fatalf("сегменты покрывают %d кусков при %d закоммиченных (%v)", covered, committed, err)
+	}
+
+	makeBook(t, books, "next.pdf", longPage("nextword fresh book"))
+	if _, err := coll.Add(context.Background(), []string{books}, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := coll.Search("tailword", DefaultSearchOpts()); len(hits) > 0 {
+		t.Fatalf("слово обрывка нашло кусок %s", hits[0].ID)
+	}
+	if !found(t, coll, "nextword") {
+		t.Fatal("новая книга не находится")
+	}
+	if covered, _ := segmentsCover(coll.Dir()); covered != coll.ChunkCount() {
+		t.Fatalf("сегменты покрывают %d кусков из %d", covered, coll.ChunkCount())
+	}
+}
+
 // texts0 — тексты всех кусков хранилища коллекции.
 func texts0(t *testing.T, c *Collection) []string {
 	t.Helper()
