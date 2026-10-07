@@ -45,15 +45,44 @@ import (
 var version = buildinfo.Unknown
 
 func main() {
-	if err := run(); err != nil {
-		// Справка по просьбе (`-- -h` у census, probes, graph-stats,
-		// scan-redact) — не сбой: она уже напечатана, код выхода 0.
-		if errors.Is(err, flag.ErrHelp) {
-			return
-		}
-		fmt.Fprintln(os.Stderr, "ollchat: "+err.Error())
-		os.Exit(1)
+	code, msg := exitStatus(run())
+	if msg != "" {
+		fmt.Fprintln(os.Stderr, "ollchat: "+msg)
 	}
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+// exitCode — завершение с особым кодом выхода. Его возвращают из run,
+// а не зовут os.Exit на месте: os.Exit не ждёт отложенных вызовов, и журнал
+// шагов прогона, база знаний и прочее, что закрывается через defer, остались
+// бы незакрытыми — у --scan-redact-llm так терялся хвост журнала шагов.
+type exitCode struct {
+	code int
+	msg  string // пусто — всё нужное уже напечатано
+}
+
+func (e *exitCode) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("код выхода %d", e.code)
+}
+
+// exitStatus — код выхода и сообщение по итогу run. Единственное место,
+// где решается, чем завершится процесс.
+func exitStatus(err error) (int, string) {
+	// Справка по просьбе (`-- -h` у census, probes, graph-stats,
+	// scan-redact) — не сбой: она уже напечатана, код выхода 0.
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return 0, ""
+	}
+	var ec *exitCode
+	if errors.As(err, &ec) {
+		return ec.code, ec.msg
+	}
+	return 1, err.Error()
 }
 
 // cliFlags — все ключи командной строки. Раньше 131 ключ жил локальными

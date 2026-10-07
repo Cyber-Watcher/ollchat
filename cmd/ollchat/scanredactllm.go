@@ -114,12 +114,22 @@ func runScanRedactLLM(cfg *config.Config, srv *config.Server, model string, sand
 	if err != nil {
 		return err
 	}
+	return scanRedactVerdict(sum)
+}
+
+// scanRedactVerdict — чем кончается прогон с моделью.
+//
+// Код 3, как у --scan-redact: последний вызов нашёл скрытое в итоге. Код
+// уходит наверх, к единственному os.Exit в main, а не вызывается здесь:
+// os.Exit не ждёт defer, и журнал шагов прогона с базой знаний оставались
+// незакрытыми ровно тогда, когда прогон нашёл утечку и разбирать его нужнее
+// всего.
+func scanRedactVerdict(sum scanRedactSummary) error {
 	if sum.calls == 0 {
 		return fmt.Errorf("модель не вызвала %s ни разу — файлов нет", tools.NameScanRedact)
 	}
 	if sum.leak {
-		// Как у --scan-redact: код 3 — последний прогон нашёл скрытое в итоге.
-		os.Exit(3)
+		return &exitCode{code: 3}
 	}
 	return nil
 }
