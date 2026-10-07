@@ -1132,7 +1132,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 
 	case *f.graphMerge != "":
 		return true, gmaint.Merge(os.Stdout, cfg, *f.graphMerge, *f.graphMergeFile, *f.graphMergeLevel,
-			*f.graphMergeMinSame, *f.graphMergeDrop, *f.graphMergeDry || *f.kbDry, *f.kbYes)
+			*f.graphMergeMinSame, *f.graphMergeDrop, f.mergeDry(), *f.kbYes)
 	case *f.graphResolve != "":
 		return true, gmaint.Resolve(os.Stdout, cfg, *f.graphResolve, *f.graphResolveMinCos, *f.graphResolveMinCosMut, *f.graphResolveFull,
 			*f.graphResolveCross, *f.graphResolveNormKey, *f.graphResolveShow, *f.graphResolveOut)
