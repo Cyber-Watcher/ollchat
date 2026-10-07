@@ -628,9 +628,23 @@ func Status(stdout io.Writer, cfg *config.Config, name, folder string, books boo
 		st := g.Stats(chunks)
 		fmt.Fprintf(stdout, "%s: понятий %d, связей %d, упоминаний %d\n",
 			n, st.Entities, st.Edges, st.Mentions)
-		done, empty, skipped := g.Progress().Counts()
-		fmt.Fprintf(stdout, "  разобрано кусков %d из %d (осталось %d)\n", st.Covered, chunks, st.Pending)
-		fmt.Fprintf(stdout, "  из них с понятиями %d, пустых %d, пропущено %d\n", done, empty, skipped)
+		// Тем же счётом, что доктор: по кускам живых книг, виды отметок
+		// порознь. До 07.10.2026 здесь стояли все отметки журнала вместе
+		// с удалёнными книгами, а «пропущено» складывало потерю (модель
+		// не ответила) с нормой (служебный кусок) — ошибка, которую доктор
+		// изжил ещё 27.09.
+		cov, err := liveCoverage(coll, g, nil, nil)
+		if err != nil {
+			g.Close()
+			return err
+		}
+		fmt.Fprintf(stdout, "  разобрано кусков %d из %d (осталось %d)\n", cov.marked(), cov.total, cov.pending)
+		fmt.Fprintf(stdout, "  из них с понятиями %d, пустых %d, не разобрала модель %d, служебных %d\n",
+			cov.done, cov.empty, cov.skipped, cov.service)
+		if ms := deadMarkStats(coll, g); ms.Gone > 0 {
+			fmt.Fprintf(stdout, "  отметок книг, которых в коллекции НЕТ: %d (в %d книгах) — в счёт выше не входят\n",
+				ms.Gone, ms.GoneBooks)
+		}
 		if st.Model != "" {
 			fmt.Fprintf(stdout, "  модель извлечения: %s\n", st.Model)
 		}

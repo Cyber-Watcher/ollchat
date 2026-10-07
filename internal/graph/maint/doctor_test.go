@@ -1,9 +1,14 @@
 package maint
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // Порог пересчёта разметки: судим по понятиям вне тем, а не по перекроенным темам.
@@ -113,5 +118,112 @@ func TestTooManyFailures(t *testing.T) {
 		if err := tooManyFailures("описания тем", c[0], c[1]); err != nil {
 			t.Fatalf("%d сбоев из %d — обычный шум, а не беда: %v", c[0], c[1], err)
 		}
+	}
+}
+
+// lineWith — строка вывода, начинающаяся с prefix (без отступа); пусто, если нет.
+func lineWith(out, prefix string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), prefix) {
+			return strings.TrimSpace(l)
+		}
+	}
+	return ""
+}
+
+// Доктор, --graph-status и --graph-pending называют одни и те же числа,
+// и отметки удалённых книг в них не входят (аудит 07.10.2026, раздел 4.6).
+//
+// До правки заголовок доктора брал все отметки журнала: на этой фикстуре —
+// 68 отметок при 34 кусках хранилища, то есть «осталось 0» и ни одного совета
+// разобрать остаток, хотя у живой книги разобраны 3 куска из 10. Статус
+// вдобавок складывал «не разобрала модель» со «служебными» в одно «пропущено».
+func TestDoctorCountsAgreeWithStatusAndPending(t *testing.T) {
+	f := newMaintFixture(t)
+	g, err := graph.Open(f.coll, 0, f.cfg.Graph.Rules())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := kb.OpenBase(f.cfg.KB.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	coll, err := base.Open(f.name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ords []uint32
+	_ = coll.EachChunkRef(kb.ChunkFilter{}, func(c kb.ChunkRef) error {
+		ords = append(ords, c.Ord)
+		return nil
+	})
+	// У живой книги: кусок 0 — с понятиями (фикстура), 1 — модель не ответила,
+	// 2 — «служебный» без признака оглавления (забыт чисткой: сборка возьмёт снова).
+	mustMark := func(k graph.ChunkKey, m uint32) {
+		if err := g.Progress().Mark(k, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustMark(graph.ChunkKey{Doc: f.keep, Ord: ords[1]}, graph.MarkSkipped)
+	mustMark(graph.ChunkKey{Doc: f.keep, Ord: ords[2]}, graph.MarkService)
+	// Следы книги, которой нет и в хранилище кусков (коллекцию уплотнили).
+	for ord := uint32(0); ord < 40; ord++ {
+		mustMark(graph.ChunkKey{Doc: 999, Ord: ord}, graph.MarkDone)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	total := f.keepChunks
+	marked, pending := 3, total-2 // забытый кусок и в «разобрано», и в «осталось»
+	var out bytes.Buffer
+	if err := DoctorTo(&out, io.Discard, f.cfg, f.name); err != nil {
+		t.Fatal(err)
+	}
+	doctor := out.String()
+	checks := []struct{ got, want string }{
+		{lineWith(doctor, "разобрано кусков"),
+			fmt.Sprintf("разобрано кусков %d из %d (%d%%), осталось %d", marked, total, 100*marked/total, pending)},
+		{lineWith(doctor, "с понятиями"),
+			"с понятиями 1, пустых 0, не разобрала модель 1, служебных 1"},
+		{lineWith(doctor, "из разобранных сборка возьмёт снова"),
+			"из разобранных сборка возьмёт снова 1 — «служебные» без признака: забыты чисткой графа или признак снят; они же в «осталось»"},
+		{lineWith(doctor, "отметок книг, которых в коллекции НЕТ"),
+			fmt.Sprintf("отметок книг, которых в коллекции НЕТ: %d (в 2 книгах) — в счёт выше не входят", f.goneChunks+40)},
+		{lineWith(doctor, "итого по каталогам"),
+			fmt.Sprintf("%-26s %10d %10d %10d   %5.1f%%", "итого по каталогам", marked, pending, total, 100*float64(marked)/float64(total))},
+	}
+	if !strings.Contains(doctor, "разобрать оставшееся") {
+		t.Errorf("доктор не советует разобрать остаток:\n%s", doctor)
+	}
+
+	out.Reset()
+	if err := Status(&out, f.cfg, f.name, "", true); err != nil {
+		t.Fatal(err)
+	}
+	status := out.String()
+	checks = append(checks, []struct{ got, want string }{
+		{lineWith(status, "разобрано кусков"),
+			fmt.Sprintf("разобрано кусков %d из %d (осталось %d)", marked, total, pending)},
+		{lineWith(status, "из них с понятиями"),
+			"из них с понятиями 1, пустых 0, не разобрала модель 1, служебных 1"},
+		{lineWith(status, "вся коллекция:"),
+			fmt.Sprintf("вся коллекция: кусков %d, разобрано %d, осталось %d (%d%%)", total, marked, pending, 100*marked/total)},
+	}...)
+
+	out.Reset()
+	if err := Pending(&out, f.cfg, f.name, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	checks = append(checks, struct{ got, want string }{strings.TrimSpace(out.String()), fmt.Sprint(pending)})
+
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("строка\n  %q\nожидалась\n  %q", c.got, c.want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("доктор:\n%s\nстатус:\n%s", doctor, status)
 	}
 }
