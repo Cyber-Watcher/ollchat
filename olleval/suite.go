@@ -153,8 +153,12 @@ func (d Duration) Get(fallback time.Duration) time.Duration {
 }
 
 // Weight возвращает вес задачи в балле области.
-func (t Task) Weight() float64 {
-	if w, ok := levelWeight[t.Level]; ok {
+func (t Task) Weight() float64 { return weightOf(t.Level) }
+
+// weightOf — вес уровня задачи в балле области. Неизвестный уровень (старые
+// строки index.jsonl без поля level) весит как мелочь.
+func weightOf(level int) float64 {
+	if w, ok := levelWeight[level]; ok {
 		return w
 	}
 	return 1

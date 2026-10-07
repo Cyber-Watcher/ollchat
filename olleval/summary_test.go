@@ -27,6 +27,19 @@ func TestSummarizeMeanScoreAndMedianTime(t *testing.T) {
 	}
 }
 
+// Балл области взвешен уровнями задач, как обещает README: задача «с нуля»
+// (У3) стоит трёх мелочей (У1). Простое среднее давало здесь 0.5.
+func TestSummaryWeightsLevels(t *testing.T) {
+	recs := []Metrics{
+		{Model: "m", Suite: "go", Level: LevelSmall, Score: 1},
+		{Model: "m", Suite: "go", Level: LevelScratch, Score: 0},
+	}
+	got := Summarize(recs)["m|go"].MeanScore
+	if got < 0.249 || got > 0.251 {
+		t.Errorf("балл области %.3f, ожидалось 0.25 (1·1 + 3·0) / 4", got)
+	}
+}
+
 // ReadIndex пропускает битую строку.
 func TestReadIndexSkipsBrokenLine(t *testing.T) {
 	dir := t.TempDir()
