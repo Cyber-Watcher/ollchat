@@ -69,8 +69,15 @@ func bilevel(g *image.Gray) bool {
 
 // WriteFile пишет файл через временный рядом и переименование: прерванная
 // запись не оставляет полфайла на месте готового.
+//
+// Права — только владельцу (0600), каталоги, созданные под итог, — тоже
+// (0700). Прежде файл открывался всем на чтение (0644), а среди итогов есть
+// распознанные копии и разбор -report, где лежат все персональные данные
+// медицинского документа: на машине с другими пользователями их мог прочесть
+// любой. Обезличенным итогам те же права: проверка могла найти в них
+// оставшееся.
 func WriteFile(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
@@ -86,7 +93,7 @@ func WriteFile(path string, data []byte) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		os.Remove(tmp.Name())
 		return err
 	}
