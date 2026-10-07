@@ -409,6 +409,12 @@ var patterns = []rule{
 	{regexp.MustCompile(`\b\d{3}-\d{4}\b`), KindPhone, 0},              // местный номер без кода: 555-0147
 	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), KindID, 0},           // SSN
 	{regexp.MustCompile(`\b\d{3}-\d{3}-\d{3}[\s-]\d{2}\b`), KindID, 0}, // СНИЛС
+	// Русский местный номер: «123-45-67» и с кодом города в скобках —
+	// «(4822) 12-34-56», «8 (4832) 98-76-54» (номера выдуманы). До 07.10.2026
+	// без подписи «тел.» они оставались в .md. Даты «2026-09-05» и
+	// «05-09-26» и нормы «120-160» под эти виды не подходят.
+	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{2}\b`), KindPhone, 0},
+	{regexp.MustCompile(`(?:\b8\s?)?\(\d{3,5}\)\s?(?:\d{1,3}[\s-]\d{2}[\s-]\d{2}|\d{5,7})\b`), KindPhone, 0},
 	{regexp.MustCompile(`\b[A-Z]{1,6}-?\d{5,}\b`), KindID, 0},
 	{regexp.MustCompile(`\b\d{7,}\b`), KindID, 0},
 	// Улица: суффикс и заглавными — «12 MAPLE STREET», как в шапке аптеки

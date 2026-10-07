@@ -385,6 +385,27 @@ func TestRussianAddressWithoutHouseWord(t *testing.T) {
 	}
 }
 
+// Местный номер без подписи: «123-45-67», «(4822) 12-34-56» — до 07.10.2026
+// он оставался в .md. Даты, нормы и диапазоны в скобках номером не становятся.
+func TestRussianLocalPhones(t *testing.T) {
+	words := doc(0,
+		"звонить (4822) 12-34-56 или 123-45-67, 8 (4832) 98-76-54",
+		"Анализ от 2026-09-05, контроль 05-09-26, норма 120-160, (n=120) 5 10 15",
+		"Тромбоциты (150) 180 320, код 150-12-1",
+	)
+	detect(words, Options{})
+	for text, want := range map[string]Kind{
+		"(4822)": KindPhone, "12-34-56": KindPhone, "123-45-67,": KindPhone,
+		"8": KindPhone, "(4832)": KindPhone, "98-76-54": KindPhone,
+		"2026-09-05,": KindNone, "05-09-26,": KindNone, "120-160,": KindNone, "(n=120)": KindNone,
+		"(150)": KindNone, "180": KindNone, "150-12-1": KindNone,
+	} {
+		if k := kindOf(t, words, text); k != want {
+			t.Errorf("%q: %v, а должно быть %v", text, k, want)
+		}
+	}
+}
+
 func TestNameFragmentsAndRepeatedBirth(t *testing.T) {
 	words := doc(0,
 		"Patient: Roe, Annabel DOB: 02/03/1997",
