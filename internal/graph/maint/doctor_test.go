@@ -227,3 +227,78 @@ func TestDoctorCountsAgreeWithStatusAndPending(t *testing.T) {
 		t.Logf("доктор:\n%s\nстатус:\n%s", doctor, status)
 	}
 }
+
+// Верхняя папка книги — по границе каталога и от самого короткого корня
+// (аудит 07.10.2026, раздел 4.6). Прежняя копия сравнивала корень подстрокой:
+// /data/lib находил книги из /data/library, и каталогом выходил «/rary».
+func TestTopFolder(t *testing.T) {
+	cases := []struct {
+		path  string
+		roots []string
+		want  string
+	}{
+		{"/data/lib/AI/agents.pdf", []string{"/data/lib"}, "/AI"},
+		{"/data/lib/AI/Agents/rag.pdf", []string{"/data/lib/"}, "/AI"},
+		{"/data/library/AI/agents.pdf", []string{"/data/lib"}, ""},
+		{"/data/library/Go/book.pdf", []string{"/data/lib", "/data/library"}, "/Go"},
+		{"/data/lib/AI/Agents/rag.pdf", []string{"/data/lib/AI", "/data/lib"}, "/AI"},
+		{"/data/lib/book.pdf", []string{"/data/lib"}, ""},
+		{"/data/lib", []string{"/data/lib"}, ""},
+		{"/elsewhere/AI/x.pdf", []string{"/data/lib"}, ""},
+		{"/data/lib/AI/x.pdf", nil, ""},
+		{"/AI/x.pdf", []string{"/"}, "/AI"},
+		{"/data/lib/Machine Learning/x.pdf", []string{"", "/data/lib"}, "/Machine Learning"},
+	}
+	for _, c := range cases {
+		if got := TopFolder(c.path, c.roots); got != c.want {
+			t.Errorf("TopFolder(%q, %q) = %q, ожидалось %q", c.path, c.roots, got, c.want)
+		}
+	}
+}
+
+// Совет доктора — команда, которую можно вставить в bash как есть
+// (аудит 07.10.2026, раздел 4.6): для книг в корне библиотеки печаталось
+// `--graph-folder (корень библиотеки)` — синтаксическая ошибка.
+func TestBuildAdviceIsShellSafe(t *testing.T) {
+	root := buildAdvice("books", folderPending{folder: rootFolderLabel, pending: 9})
+	if strings.Contains(root, "--graph-folder") || !strings.HasPrefix(root, "ollchat --graph-build books ") {
+		t.Errorf("совет для книг в корне: %q — ключа каталога у них нет", root)
+	}
+	if got := buildAdvice("books", folderPending{folder: "/Machine Learning", pending: 3}); !strings.HasPrefix(got,
+		"ollchat --graph-build books --graph-folder '/Machine Learning'   (3 кусков)") {
+		t.Errorf("каталог с пробелом: %q — без кавычек оболочка разрежет его на два довода", got)
+	}
+	if got := buildAdvice("books", folderPending{folder: "/Безопасность", pending: 5}); got !=
+		"ollchat --graph-build books --graph-folder /Безопасность   (5 кусков)" {
+		t.Errorf("обычный каталог: %q — кавычки ему не нужны", got)
+	}
+
+	f := newMaintFixture(t) // книги фикстуры лежат прямо в корне библиотеки
+	var out bytes.Buffer
+	if err := DoctorTo(&out, io.Discard, f.cfg, f.name); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "--graph-folder (") {
+		t.Errorf("доктор советует несуществующий каталог:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ollchat --graph-build proba   (") {
+		t.Errorf("нет совета разобрать книги корня библиотеки:\n%s", out.String())
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/AI":                 "/AI",
+		"/Coding/Go":          "/Coding/Go",
+		"/Безопасность":       "/Безопасность",
+		"/Machine Learning":   "'/Machine Learning'",
+		"(корень библиотеки)": "'(корень библиотеки)'",
+		"/O'Reilly":           `'/O'\''Reilly'`,
+		"":                    "''",
+		"/a$b":                "'/a$b'",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, ожидалось %s", in, got, want)
+		}
+	}
+}

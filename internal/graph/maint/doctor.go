@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -375,7 +376,14 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		// отбирает книги по куску пути **внутри библиотеки**, и человеку
 		// неоткуда узнать, какие пути там есть, кроме как заглянув на диск.
 		printCoverage(stdout, cov.folders)
-		left := cov.folders
+		// В советах — только каталоги с остатком: закрытые видны в таблице,
+		// и «… и ещё N каталогов» не должно считать их работой.
+		var left []folderPending
+		for _, f := range cov.folders {
+			if f.pending > 0 {
+				left = append(left, f)
+			}
+		}
 		var more int
 		// В советах список обрезаем: за одну ночь берут один каталог, а вся
 		// картина уже показана таблицей выше.
@@ -389,11 +397,7 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 			n++
 			fmt.Fprintf(stdout, "\n  %d. разобрать оставшееся — по каталогу за раз:\n", n)
 			for _, f := range left {
-				if f.pending == 0 {
-					continue
-				}
-				fmt.Fprintf(stdout, "     ollchat --graph-build %s --graph-folder %s   (%d кусков)\n",
-					name, f.folder, f.pending)
+				fmt.Fprintf(stdout, "     %s\n", buildAdvice(name, f))
 			}
 			if more > 0 {
 				fmt.Fprintf(stdout, "     … и ещё %s, все видны в таблице выше\n",
@@ -534,7 +538,7 @@ func liveCoverage(coll *kb.Collection, g *graph.Graph, roots []string, stage *do
 		if stage != nil && seen%20000 == 0 {
 			stage.progress("разбор по кускам", seen, total)
 		}
-		f := topFolder(r.Book.Path, roots)
+		f := TopFolder(r.Book.Path, roots)
 		if f == "" {
 			f = rootFolderLabel
 		}
@@ -601,6 +605,23 @@ func liveCoverage(coll *kb.Collection, g *graph.Graph, roots []string, stage *do
 // у них нет.
 const rootFolderLabel = "(корень библиотеки)"
 
+// buildAdvice — команда разбора остатка одного каталога, готовая к вставке
+// в терминал.
+//
+// До 07.10.2026 для книг в корне библиотеки печаталось
+// `--graph-folder (корень библиотеки)` — синтаксическая ошибка bash, а имя
+// каталога с пробелом разваливалось на два довода. Отобрать книги корня
+// ключом каталога нельзя, поэтому для них совет — сборка без отбора, и это
+// сказано прямо: она возьмёт и остаток остальных каталогов.
+func buildAdvice(name string, f folderPending) string {
+	if f.folder == rootFolderLabel {
+		return fmt.Sprintf("ollchat --graph-build %s   (%d кусков книг прямо в корне библиотеки; "+
+			"отбора по каталогу у них нет — сборка без отбора возьмёт и остальной остаток)", name, f.pending)
+	}
+	return fmt.Sprintf("ollchat --graph-build %s --graph-folder %s   (%d кусков)",
+		name, shellQuote(f.folder), f.pending)
+}
+
 // deadMarkStats — отметки разбора ПО ВИДАМ, отдельно по книгам, которых
 // в коллекции больше нет.
 //
@@ -636,17 +657,41 @@ func plural(n int, one, few, many string) string {
 	return fmt.Sprintf("%d %s", n, word)
 }
 
-// topFolder — верхняя папка книги относительно корня библиотеки.
-func topFolder(path string, roots []string) string {
+// TopFolder — верхняя папка книги относительно корня библиотеки: «/AI»,
+// «/DevOps». Пусто — книга лежит прямо в корне (отбирать по каталогу нечего)
+// или вне всех корней. Одно правило на доктора графа и замеры
+// (internal/graph/stats): до 07.10.2026 у них было по своей копии, и правка
+// 20.09 попала только в одну.
+//
+// **Корень сравнивается по границе каталога.** Прежние копии сравнивали
+// подстрокой, и корень /data/lib находил книги из /data/library — каталогом
+// такой книги становился «/rary», которого нет.
+//
+// **Из подходящих корней берётся самый короткий.** У коллекции lab корень —
+// сам <корень библиотеки>/Раздел, и по нему каталог книги вырождался
+// в корень (20.09.2026: 100 % «чужих» у lab); корни библиотеки короче корней
+// коллекции — их и надо резать.
+func TopFolder(path string, roots []string) string {
+	best := ""
 	for _, root := range roots {
-		if root == "" || !strings.HasPrefix(path, root) {
+		if root == "" {
 			continue
 		}
-		rest := strings.TrimPrefix(strings.TrimPrefix(path, root), "/")
-		if i := strings.Index(rest, "/"); i > 0 {
-			return "/" + rest[:i]
+		root = filepath.Clean(root)
+		inside := path == root || strings.HasPrefix(path, root+"/")
+		if root == "/" {
+			inside = strings.HasPrefix(path, "/")
 		}
-		return "" // книга лежит в самом корне, отбирать по каталогу нечего
+		if inside && (best == "" || len(root) < len(best)) {
+			best = root
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(path, best), "/")
+	if i := strings.Index(rest, "/"); i > 0 {
+		return "/" + rest[:i]
 	}
 	return ""
 }
