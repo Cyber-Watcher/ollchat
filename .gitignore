@@ -1,0 +1,26 @@
+# Собранные бинари. `go build -o ollchat ./cmd/ollchat` кладёт бинарь в корень,
+# а у остальных программ имя совпадает с каталогом исходников, и `-o` из их
+# README кладёт бинарь внутрь каталога. Сами каталоги (/ollmcp, /olleval…)
+# не игнорируются: это исходники, и новый файл в них не должен пропасть молча.
+/ollchat
+/olldiag
+/olldiagtools/olldiagtools
+/olleval/olleval
+/ollmcp/ollmcp
+/ollnode/ollnode
+
+# Выпуск: scripts/build-dist.sh.
+/dist/
+
+# Тестовые бинари и покрытие.
+*.test
+*.coverprofile
+cover.out
+coverage.out
+cover.html
+coverage.html
+
+# Рабочие наборы задач и фикстуры olleval в репозиторий не уезжают: задача
+# с эталоном в открытом доступе попадёт в обучающие выборки (olleval/README.md).
+/olleval/suites/
+/olleval/fixtures/
