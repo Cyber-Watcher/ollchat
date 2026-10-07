@@ -37,8 +37,9 @@ func (f fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, err
 
 // newVectorFixture — коллекция с книгой и векторами кусков модели chunkModel
 // и граф при ней с векторами понятий модели entModel; размерность у обоих
-// одна — 1024, как у bge-m3, чтобы расходилась только модель.
-func newVectorFixture(t *testing.T, chunkModel, entModel string) (*config.Config, string) {
+// одна — 1024, как у bge-m3, чтобы расходилась только модель. graphName —
+// имя графа из настройки graph.name (пусто — рабочий каталог graph).
+func newVectorFixture(t *testing.T, chunkModel, entModel, graphName string) (*config.Config, string) {
 	t.Helper()
 	const dim = 1024
 	root := t.TempDir()
@@ -57,6 +58,7 @@ func newVectorFixture(t *testing.T, chunkModel, entModel string) (*config.Config
 	}
 	cfg := &config.Config{}
 	cfg.KB.Dir = filepath.Join(root, "kb")
+	cfg.Graph.Name = graphName
 	base, err := kb.OpenBase(cfg.KB.Dir)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +110,7 @@ func newVectorFixture(t *testing.T, chunkModel, entModel string) (*config.Config
 // же размерности давали косинусы-мусор — а по ним составлялся список кусков
 // для разрушительной --graph-forget-chunks.
 func TestMisattribRefusesMixedVectorSpaces(t *testing.T) {
-	cfg, name := newVectorFixture(t, "bge-m3", "nomic-embed-text")
+	cfg, name := newVectorFixture(t, "bge-m3", "nomic-embed-text", "")
 	out := filepath.Join(t.TempDir(), "lists")
 	runs := []struct {
 		mode string
@@ -131,7 +133,7 @@ func TestMisattribRefusesMixedVectorSpaces(t *testing.T) {
 
 // Векторы одной модели принимаются, и перепись проходит до конца.
 func TestMisattribAcceptsSameVectorSpace(t *testing.T) {
-	cfg, name := newVectorFixture(t, "bge-m3", "bge-m3")
+	cfg, name := newVectorFixture(t, "bge-m3", "bge-m3", "")
 	if err := misattribAcronym(io.Discard, cfg, name, "", 0, 600); err != nil {
 		t.Fatalf("перепись на векторах одной модели: %v", err)
 	}
@@ -153,5 +155,27 @@ func TestSameVectorSpace(t *testing.T) {
 		if err := sameVectorSpace(c.chunks, ents); (err == nil) != c.ok {
 			t.Errorf("%s: ошибка %v", c.why, err)
 		}
+	}
+}
+
+// Переписи toc и vec-norms читают граф из каталога по настройке, как сам
+// ollchat (аудит 07.10.2026, раздел 4.6): жёсткий каталог «graph» у
+// именованного графа (graph.name = lab → graph-lab) не находил ничего,
+// и перепись молча выходила без чисел графа.
+func TestCensusReadsNamedGraph(t *testing.T) {
+	cfg, name := newVectorFixture(t, "bge-m3", "bge-m3", "lab")
+	var out strings.Builder
+	if err := tocCensus(&out, cfg, name); err != nil {
+		t.Fatalf("toc: %v", err)
+	}
+	if !strings.Contains(out.String(), "упоминаний 1,") {
+		t.Errorf("toc не прочёл журнал упоминаний именованного графа:\n%s", out.String())
+	}
+	out.Reset()
+	if err := vecNorms(&out, cfg, name); err != nil {
+		t.Fatalf("vec-norms: %v", err)
+	}
+	if strings.Contains(out.String(), "векторы понятий не прочитаны") {
+		t.Errorf("vec-norms не нашёл векторов именованного графа:\n%s", out.String())
 	}
 }
