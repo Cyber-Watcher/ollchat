@@ -1054,8 +1054,16 @@ func TestEmbedKeepsModelDigest(t *testing.T) {
 	}
 	before := coll.VecMeta()
 	b := stampedEmbedder{plain, "sha256:bbbb2222bbbb2222"}
-	if _, err := coll.Embed(ctx, b, EmbedOpts{}, nil); err == nil || !strings.Contains(err.Error(), "digest") {
+	_, err := coll.Embed(ctx, b, EmbedOpts{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Fatalf("досчёт чужими весами не отклонён: %v", err)
+	}
+	// Отказ называет обе починки готовыми командами: и для командной строки,
+	// где --kb-embed запускают чаще всего, и для приложения.
+	for _, cmd := range []string{"ollama pull " + plain.Model() + "@sha256:aaaa", "--kb-embed", "--kb-recount", "/kb embed"} {
+		if !strings.Contains(err.Error(), cmd) {
+			t.Errorf("в отказе нет %q:\n%v", cmd, err)
+		}
 	}
 	if got := coll.VecMeta(); got != before {
 		t.Fatalf("после отказа паспорт изменился: %+v → %+v", before, got)

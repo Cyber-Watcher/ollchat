@@ -275,8 +275,11 @@ func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, rep
 			"в паспорте digest %s, у сервера %s.\n"+
 			"Имя то же, веса разные: тег вроде :latest на двух машинах указывает на разные файлы, "+
 			"и векторы, досчитанные вперемешку, лягут в разные углы пространства.\n"+
-			"Взять на сервере те же веса (ollama pull %s@%s) или пересчитать всё: /kb embed %s --recount",
-			c.name, emb.Model(), shortDigest(have), shortDigest(digest), emb.Model(), have, c.name)
+			"Дешёвое лечение: взять на сервере те же веса (ollama rm %s && ollama pull %s@%s).\n"+
+			"Дорогое, если тех весов уже не достать: пересчитать всё — "+
+			"ollchat --kb-embed %s --kb-recount (в приложении /kb embed %s --recount)",
+			c.name, emb.Model(), shortDigest(have), shortDigest(digest),
+			emb.Model(), emb.Model(), have, c.name, c.name)
 	}
 
 	w, err := CreateVecWriter(c.dir, emb.Model(), dim, from, opt.Header)
