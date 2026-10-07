@@ -205,6 +205,11 @@ func (p *painter) rowHeight(cells []cell, widths []float64, size, lead float64) 
 }
 
 // drawRow печатает одну строку таблицы с рамкой и выравниванием.
+//
+// Строка, которая не помещается и на чистой странице, печатается частями,
+// каждая в своей рамке: прежде она целиком уходила за нижний край листа,
+// и текст ячеек пропадал без следа. Строка пониже переезжает на новую
+// страницу целиком.
 func (p *painter) drawRow(cells []cell, widths []float64, align []east.Alignment, x, size, lead float64, head bool) {
 	lines := make([][][]token, len(widths))
 	rows := 1
@@ -218,9 +223,31 @@ func (p *painter) drawRow(cells []cell, widths []float64, align []east.Alignment
 			rows = n
 		}
 	}
-	h := float64(rows)*lead + p.th.tablePad
+	page := p.th.bottom() - p.th.marginT
+	for from := 0; from < rows; {
+		n := rows - from
+		if p.y+float64(n)*lead+p.th.tablePad > p.th.bottom() {
+			fit := int((p.th.bottom() - p.y - p.th.tablePad) / lead)
+			if p.y > p.th.marginT && (fit < 1 || from == 0 && float64(rows)*lead+p.th.tablePad <= page) {
+				p.newPage()
+				continue
+			}
+			if fit < 1 {
+				fit = 1
+			}
+			if fit < n {
+				n = fit
+			}
+		}
+		p.drawRowPart(lines, from, n, widths, align, x, size, lead, head)
+		from += n
+	}
+}
 
-	p.need(h)
+// drawRowPart печатает строки from..from+n всех ячеек строки таблицы.
+func (p *painter) drawRowPart(lines [][][]token, from, n int, widths []float64, align []east.Alignment,
+	x, size, lead float64, head bool) {
+	h := float64(n)*lead + p.th.tablePad
 	top := p.y
 
 	if head {
@@ -236,7 +263,13 @@ func (p *painter) drawRow(cells []cell, widths []float64, align []east.Alignment
 	cx := x
 	for i, w := range widths {
 		p.y = top + p.th.tablePad/2
-		for _, line := range lines[i] {
+		part := lines[i]
+		if from >= len(part) {
+			part = nil
+		} else if part = part[from:]; len(part) > n {
+			part = part[:n]
+		}
+		for _, line := range part {
 			lineW := 0.0
 			for _, t := range line {
 				lineW += t.w + t.space
