@@ -164,6 +164,11 @@ func run(url, modelsArg, pointsArg, usersArg string, parallel int,
 		}
 		if unload {
 			_ = c.unload(ctx, m.Name)
+			// Ждём, пока модель уйдёт из /api/ps, и только потом берёмся
+			// за следующую: выгрузка не мгновенна, и без ожидания память этой
+			// модели попадала в замер следующей как её накладные расходы
+			// (waitUnloaded была написана ровно для этого, но не вызывалась).
+			waitUnloaded(ctx, c, m.Name, unloadWait)
 		}
 		profile.Models = append(profile.Models, res)
 	}
