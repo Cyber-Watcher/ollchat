@@ -283,7 +283,7 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-rebase: новый корень, где книги лежат теперь")
 	f.kbRefresh = flag.String("kb-refresh", "",
 		"долить новое и сразу досчитать векторы(смыслы): --kb-refresh projectdocs")
-	f.kbDry = flag.Bool("kb-dry-run", false, dryRunFlagHelp)
+	f.kbDry = flag.Bool("kb-dry-run", false, dryRunHelp())
 	f.kbKeepThin = flag.Bool("kb-keep-thin", false,
 		"с --kb-sync и --kb-index: брать в индекс и книги, отвергнутые как тощие (страницы-картинки, превью издательства)")
 	f.kbList = flag.Bool("kb-list", false, "показать коллекции базы знаний и выйти")
@@ -642,6 +642,167 @@ func writingFlags(f *cliFlags) map[string]func() bool {
 	}
 }
 
+// Что команда умеет сверх простого запуска.
+const (
+	// cmdDry — понимает --kb-dry-run: показывает, что сделала бы, и ничего
+	// не меняет.
+	cmdDry = 1 << iota
+)
+
+// cliCommand — команда командной строки: ключ, который её вызывает, и что
+// о ней надо знать до запуска.
+type cliCommand struct {
+	name string      // ключ, как его пишут: "--kb-index"
+	on   func() bool // запрошена ли команда в этом запуске
+	can  int         // cmdDry
+	// ownDry — свой ключ сухого прогона у команды, которая --kb-dry-run
+	// не понимает: его называет отказ, чтобы человеку не искать.
+	ownDry string
+}
+
+// commands — все команды командной строки, по строке на ключ.
+//
+// Таблица — единственное место, где сказано, какая команда понимает
+// --kb-dry-run. Ключ общий, и до 07.10.2026 его понимание держалось на памяти:
+// команды, которым его не передали, пропускали его молча. --graph-merge
+// с --kb-dry-run склеивал по-настоящему, --kb-reindex перечитывал книги —
+// тот же путь, которым 29.08.2026 «сухая» синхронизация доиндексировала
+// 49 книг (kbdry_test.go). Новая команда без строки здесь сухого прогона
+// не получит: сочетание с ним будет отказом, а не работой.
+//
+// Порядок — как в dispatchCLI, плюс команды, которые выполняет сам run.
+func commands(f *cliFlags) []cliCommand {
+	str := func(p *string) func() bool { return func() bool { return *p != "" } }
+	on := func(p *bool) func() bool { return func() bool { return *p } }
+	return []cliCommand{
+		{name: "--version", on: on(f.showVer)},
+		{name: "--init-config", on: on(f.initConfig)},
+		{name: "--kb-list", on: on(f.kbList)},
+		{name: "--kb-doctor", on: str(f.kbDoctor)},
+		{name: "--kb-index", on: str(f.kbIndex), can: cmdDry},
+		{name: "--kb-sync", on: str(f.kbSync), can: cmdDry},
+		{name: "--kb-reindex", on: str(f.kbReindex)},
+		{name: "--kb-hash", on: str(f.kbHash)},
+		{name: "--kb-years", on: str(f.kbYears)},
+		{name: "--kb-reanalyze", on: str(f.kbReanalyze), can: cmdDry},
+		{name: "--kb-flag-toc", on: str(f.kbFlagTOC), can: cmdDry},
+		{name: "--kb-merge", on: str(f.kbMerge), can: cmdDry},
+		{name: "--kb-rebase", on: str(f.kbRebase), can: cmdDry},
+		{name: "--kb-refresh", on: str(f.kbRefresh), can: cmdDry},
+		{name: "--kb-retitle", on: str(f.kbRetitle), can: cmdDry},
+		{name: "--kb-embed", on: str(f.kbEmbed), can: cmdDry},
+		{name: "--graph-build", on: str(f.graphBuild)},
+		{name: "--graph-pending", on: str(f.graphPending)},
+		{name: "--nodes", on: on(f.nodes)},
+		{name: "--graph-doctor", on: str(f.graphDoctor)},
+		{name: "--graph-repartition-due", on: str(f.graphRepartition)},
+		{name: "--graph-rebase-books", on: str(f.graphRebaseBooks), can: cmdDry},
+		{name: "--graph-record-books", on: str(f.graphRecordBooks)},
+		{name: "--graph-unmerge", on: str(f.graphUnmerge), can: cmdDry},
+		{name: "--graph-deny-aliases", on: str(f.graphDenyAliases), can: cmdDry},
+		{name: "--graph-drop-dead-marks", on: str(f.graphDropDeadMarks), can: cmdDry},
+		{name: "--graph-forget-chunks", on: str(f.graphForgetChunks), can: cmdDry},
+		{name: "--graph-forget-toc", on: str(f.graphForgetTOC), can: cmdDry},
+		{name: "--graph-archive", on: str(f.graphArchive)},
+		{name: "--graph-archives", on: str(f.graphArchives)},
+		{name: "--graph-restore", on: str(f.graphRestore)},
+		{name: "--graph-find", on: str(f.graphFind)},
+		{name: "--graph-summaries", on: str(f.graphSum)},
+		{name: "--kb-eval-gen", on: str(f.kbEvalGen)},
+		{name: "--kb-sample", on: str(f.kbSample)},
+		{name: "--kb-eval", on: str(f.kbEval)},
+		{name: "--graph-findings", on: str(f.graphFindings), ownDry: "--graph-findings-dry"},
+		{name: "--graph-bench", on: str(f.graphBench)},
+		{name: "--graph-tune", on: str(f.graphTune)},
+		{name: "--graph-drift", on: str(f.graphDrift)},
+		{name: "--graph-entry-eval", on: str(f.graphEntryEval)},
+		{name: "--graph-book", on: str(f.graphBook)},
+		{name: "--graph-groups-build", on: str(f.graphGroupsBuild)},
+		{name: "--graph-drop-book", on: str(f.graphDropBook), ownDry: "запуск без --apply"},
+		{name: "--graph-compact", on: str(f.graphCompact), ownDry: "--graph-compact-check"},
+		// Склейка понимает и свой --graph-merge-dry: см. cliFlags.mergeDry.
+		{name: "--graph-merge", on: str(f.graphMerge), can: cmdDry},
+		{name: "--graph-resolve", on: str(f.graphResolve)},
+		{name: "--graph-queue-doubts", on: str(f.graphQueueDoubts)},
+		{name: "--graph-embed-stale", on: str(f.graphEmbedStale), can: cmdDry},
+		{name: "--graph-embed-edges", on: str(f.graphEmbedEdges), can: cmdDry},
+		{name: "--graph-embed", on: str(f.graphEmbed)},
+		{name: "--graph-embed-follow", on: str(f.graphEmbedFollow)},
+		{name: "--graph-recheck", on: str(f.graphRecheck)},
+		{name: "--graph-communities", on: str(f.graphComm)},
+		{name: "--graph-stats", on: str(f.graphStats)},
+		{name: "--doc-probe", on: str(f.docProbe)},
+		{name: "--scan-redact", on: str(f.scanRedact)},
+		{name: "--census", on: str(f.census)},
+		{name: "--probes", on: str(f.probes)},
+		{name: "--graph-status", on: str(f.graphStatus)},
+		{name: "--scan-redact-llm", on: str(f.scanRedactLLM)},
+		{name: "--ask", on: str(f.askQ)},
+		{name: "--ask-stdin", on: on(f.askStdin)},
+		{name: "--questions", on: str(f.askFile)},
+		{name: "--serve", on: str(f.serveAddr)},
+	}
+}
+
+// requested — команды, запрошенные в этом запуске, по порядку таблицы.
+func requested(f *cliFlags) []cliCommand {
+	var out []cliCommand
+	for _, c := range commands(f) {
+		if c.on() {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// dryRunCommands — ключи команд, которые понимают --kb-dry-run.
+func dryRunCommands() []string {
+	var out []string
+	for _, c := range commands(&cliFlags{}) {
+		if c.can&cmdDry != 0 {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
+// dryRunHelp — описание ключа сухого прогона. Список команд берётся
+// из таблицы, а не пишется руками: описание — обещание пользователю,
+// и разойтись с тем, что команды делают на деле, оно не должно.
+func dryRunHelp() string {
+	return "только показать, что будет сделано, ничего не меняя; понимают: " +
+		strings.Join(dryRunCommands(), ", ")
+}
+
+// checkDryRun отвергает --kb-dry-run у команды, которая его не понимает:
+// она выполнилась бы по-настоящему, хотя человек просил только показать.
+func checkDryRun(f *cliFlags) error {
+	if !*f.kbDry {
+		return nil
+	}
+	list := strings.Join(dryRunCommands(), ", ")
+	cmds := requested(f)
+	if len(cmds) == 0 {
+		return fmt.Errorf("--kb-dry-run без команды ничего не значит.\n  Сухой прогон понимают: %s", list)
+	}
+	for _, c := range cmds {
+		if c.can&cmdDry != 0 {
+			continue
+		}
+		msg := "команда " + c.name + " сухого прогона не умеет: с --kb-dry-run она выполнилась бы по-настоящему"
+		if c.ownDry != "" {
+			msg += ".\n  Показать, ничего не меняя, у неё можно иначе: " + c.ownDry
+		}
+		return fmt.Errorf("%s.\n  --kb-dry-run понимают: %s", msg, list)
+	}
+	return nil
+}
+
+// mergeDry — сухой ли прогон у --graph-merge. У склейки свой ключ
+// --graph-merge-dry, но и общий --kb-dry-run обязан действовать: иначе
+// «покажи, что склеится» с общим ключом склеивало бы по-настоящему.
+func (f *cliFlags) mergeDry() bool { return *f.graphMergeDry || *f.kbDry }
+
 // readerRefusal — какая из запрещённых команд запрошена; пусто — ни одной.
 // Имена перебираются по порядку, чтобы сообщение не плясало от запуска к запуску.
 func readerRefusal(f *cliFlags) string {
@@ -883,6 +1044,10 @@ func parseEvery(s string) (time.Duration, error) {
 
 func run() error {
 	f := parseFlags()
+	// До всякой работы: отказ должен прийти раньше, чем команда что-то тронет.
+	if err := checkDryRun(f); err != nil {
+		return err
+	}
 
 	if *f.showVer {
 		fmt.Println("ollchat " + buildinfo.Describe(version))
@@ -1165,13 +1330,6 @@ func sessionDir() string {
 	}
 	return filepath.Join(os.TempDir(), "ollchat-sessions")
 }
-
-// dryRunFlagHelp — описание ключа сухого прогона.
-//
-// Вынесено в постоянную, потому что это обещание пользователю: перечисленные
-// здесь команды обязаны ничего не менять при --kb-dry-run. Проверяется тестом.
-const dryRunFlagHelp = "только показать, что будет сделано: " +
-	"с --kb-embed, --kb-sync, --kb-index, --kb-refresh, --kb-rebase, --kb-reanalyze, --graph-forget-chunks, --graph-deny-aliases, --graph-unmerge, --graph-rebase-books"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `ollchat %s — TUI-клиент и агент для Ollama
