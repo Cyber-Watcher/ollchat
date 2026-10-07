@@ -39,6 +39,36 @@ type binaryWatch struct {
 
 	files    []fileSig
 	validate func() error
+
+	// refused — файл, уже отвергнутый trustedStat: о нём сказано один раз,
+	// а проверка идёт каждую секунду.
+	refused struct{ dev, ino uint64 }
+}
+
+// trustedStat — можно ли запускать этот файл вместо себя.
+//
+// Подмену служба замечает сама и сама же exec-ает новый файл — со своими
+// правами и своим окружением, где лежит OLLMCP_TOKEN. Раньше годился любой
+// исполняемый файл по пути бинаря: подложенный другим пользователем (чужой
+// владелец, запись для группы или для всех) он означал бы чужой код от нашего
+// имени. Теперь — только свой или root-а, и писать в него может лишь владелец.
+func trustedStat(st *syscall.Stat_t) error {
+	if uid := uint32(os.Getuid()); st.Uid != uid && st.Uid != 0 {
+		return fmt.Errorf("владелец — uid %d, а не мы (uid %d) и не root", st.Uid, uid)
+	}
+	if st.Mode&0o022 != 0 {
+		return fmt.Errorf("права %o: писать в файл может не только владелец", st.Mode&0o777)
+	}
+	return nil
+}
+
+// trustedBinary — trustedStat для файла по пути: последняя сверка перед exec.
+func trustedBinary(path string) error {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return err
+	}
+	return trustedStat(&st)
 }
 
 // fileSig — приметы файла настроек: правка на месте меняет размер или mtime,
@@ -96,7 +126,17 @@ func (w *binaryWatch) binaryReplaced() bool {
 		return false
 	}
 	mtime := time.Unix(int64(st.Mtim.Sec), int64(st.Mtim.Nsec))
-	return st.Mode&0o111 != 0 && st.Size > 0 && time.Since(mtime) > 500*time.Millisecond
+	if st.Mode&0o111 == 0 || st.Size <= 0 || time.Since(mtime) <= 500*time.Millisecond {
+		return false
+	}
+	if err := trustedStat(&st); err != nil {
+		if w.refused.dev != uint64(st.Dev) || w.refused.ino != uint64(st.Ino) {
+			w.refused.dev, w.refused.ino = uint64(st.Dev), uint64(st.Ino)
+			fmt.Fprintf(os.Stderr, "ollmcp: новый бинарь %s не принят (%v), остаюсь на прежнем\n", w.path, err)
+		}
+		return false
+	}
+	return true
 }
 
 // settingsChanged — правлен ли файл настроек, и годится ли правка.
@@ -138,6 +178,10 @@ func serveStdio(ctx context.Context, srv *Server, verbose bool) error {
 		return Serve(ctx, srv, os.Stdin, os.Stdout, verbose)
 	}
 	return serveWatched(ctx, srv, os.Stdin, os.Stdout, verbose, w, func() error {
+		// Сверка ещё раз прямо перед exec: файл могли подменить снова.
+		if err := trustedBinary(w.path); err != nil {
+			return err
+		}
 		_ = srv.Steps.Close()
 		return syscall.Exec(w.path, os.Args, append(os.Environ(), reexecEnv+"="+srv.Fingerprint()))
 	})
@@ -177,6 +221,9 @@ func Reexec() error {
 	path, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	if err := trustedBinary(path); err != nil {
+		return fmt.Errorf("новый бинарь %s не принят: %w", path, err)
 	}
 	return syscall.Exec(path, os.Args, os.Environ())
 }

@@ -157,6 +157,71 @@ func TestServeWatchedReexecWaitsForCall(t *testing.T) {
 	}
 }
 
+// Подменённый бинарь запускается вместо себя, только если он свой (или root-а)
+// и писать в него может лишь владелец: иначе это мог быть чужой код, которому
+// exec отдал бы наши права и окружение с OLLMCP_TOKEN.
+func TestBinaryReplacedRefusesUntrusted(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ollmcp")
+	if err := os.WriteFile(bin, []byte("старый"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(bin, &st); err != nil {
+		t.Fatal(err)
+	}
+	// Прежний файл держим открытым, как держит его работающий процесс:
+	// иначе его номер узла освободится и достанется одной из подмен.
+	held, err := os.Open(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	w := &binaryWatch{path: bin, dev: uint64(st.Dev), ino: uint64(st.Ino)}
+	replace := func(mode os.FileMode, chown bool) {
+		t.Helper()
+		fresh := bin + ".new"
+		if err := os.WriteFile(fresh, []byte("новый"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(fresh, mode); err != nil {
+			t.Fatal(err)
+		}
+		if chown {
+			if err := os.Chown(fresh, 12345, 12345); err != nil {
+				t.Fatal(err)
+			}
+		}
+		old := time.Now().Add(-time.Minute)
+		if err := os.Chtimes(fresh, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(fresh, bin); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	replace(0o775, false)
+	if w.binaryReplaced() {
+		t.Error("принят бинарь, в который может писать группа")
+	}
+	replace(0o757, false)
+	if w.binaryReplaced() {
+		t.Error("принят бинарь, в который могут писать все")
+	}
+	// Чужого владельца файлу может дать только root.
+	if os.Geteuid() == 0 {
+		replace(0o755, true)
+		if w.binaryReplaced() {
+			t.Error("принят бинарь чужого владельца")
+		}
+	}
+	replace(0o755, false)
+	if !w.binaryReplaced() {
+		t.Error("свой бинарь с правами 0755 не принят")
+	}
+}
+
 // Правка файла настроек перезапускает службу так же, как подмена бинаря,
 // а негодная правка — нет: служба остаётся на прежних настройках.
 func TestSettingsChangeTriggersReexec(t *testing.T) {
