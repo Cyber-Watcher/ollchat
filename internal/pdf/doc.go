@@ -217,7 +217,13 @@ func (d *Document) expandObjStm(s *Stream) {
 	}
 	head := newParser(data[:first], d)
 	type entry struct{ num, off int }
-	entries := make([]entry, 0, n)
+	// /N берётся из самого файла, и заранее выделять память под него нельзя:
+	// PDF в килобайт с /N 99999999999 просил полтора терабайта, и процесс
+	// падал нехваткой памяти — её recover не ловит. Запись заголовка — два
+	// числа с пробелами, не короче четырёх байт, поэтому больше first/4+1
+	// записей там не поместится; дальше цикл всё равно обрывается на конце
+	// заголовка.
+	entries := make([]entry, 0, min(n, first/4+1))
 	for i := 0; i < n; i++ {
 		numObj, err := head.object()
 		if err != nil {
