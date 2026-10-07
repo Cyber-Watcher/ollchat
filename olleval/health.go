@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
@@ -136,6 +137,10 @@ type Heartbeat struct {
 func HeartbeatPath(root string) string { return filepath.Join(root, "state", "run.lock") }
 
 // WriteHeartbeat обновляет отметку.
+//
+// Атомарно: служба возврата читает отметку в любой момент, и файл,
+// пойманный между обрезкой и записью, не разбирался — LiveRun считал
+// прогон мёртвым, и сервер открывали людям посреди замера.
 func WriteHeartbeat(root string, hb Heartbeat) error {
 	hb.Updated = time.Now()
 	if err := os.MkdirAll(filepath.Dir(HeartbeatPath(root)), 0o755); err != nil {
@@ -145,7 +150,7 @@ func WriteHeartbeat(root string, hb Heartbeat) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(HeartbeatPath(root), append(b, '\n'), 0o644)
+	return fsx.WriteFileAtomic(HeartbeatPath(root), append(b, '\n'), 0o644)
 }
 
 // ClearHeartbeat снимает отметку по окончании прогона.

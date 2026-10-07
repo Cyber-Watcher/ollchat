@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 	"github.com/Cyber-Watcher/ollchat/internal/nodeprobe"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
@@ -404,7 +405,10 @@ func (g *Guard) trackIdle(free bool) time.Duration {
 	st.Updated = now
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
 		if b, err := json.Marshal(st); err == nil {
-			_ = os.WriteFile(path, append(b, '\n'), 0o644)
+			// Атомарно: оборванная запись оставляла бы битый файл, а битый
+			// читается как «простоя не было», и счёт до подъёма службы
+			// начинался бы заново.
+			_ = fsx.WriteFileAtomic(path, append(b, '\n'), 0o644)
 		}
 	}
 	return now.Sub(st.Since)

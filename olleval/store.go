@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Store — раскладка результатов прогонов на диске.
@@ -59,6 +61,11 @@ func SafeName(model string) string {
 }
 
 // WriteJSON пишет значение в файл каталога попытки.
+//
+// Запись атомарная: по одному лишь наличию metrics.json попытка считается
+// сделанной (Done), и файл, оборванный посреди записи (kill, пропало
+// питание), навсегда засчитывал бы попытку с битыми метриками — заново её
+// ночь уже не прогнала бы. Паспорт ночи так же переписывается целиком.
 func WriteJSON(dir, name string, v any) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -67,15 +74,15 @@ func WriteJSON(dir, name string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, name), append(b, '\n'), 0o644)
+	return fsx.WriteFileAtomic(filepath.Join(dir, name), append(b, '\n'), 0o644)
 }
 
-// WriteText пишет текст в файл каталога попытки.
+// WriteText пишет текст в файл каталога попытки — атомарно, как WriteJSON.
 func WriteText(dir, name, text string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644)
+	return fsx.WriteFileAtomic(filepath.Join(dir, name), []byte(text), 0o644)
 }
 
 // AppendIndex дописывает строку в index.jsonl ночи.

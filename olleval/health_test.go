@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -94,6 +96,47 @@ func TestHeartbeat(t *testing.T) {
 	}
 	if _, alive := LiveRun(root, time.Minute); alive {
 		t.Error("отметка снята, а прогон считается живым")
+	}
+}
+
+// Файлы попытки и отметка жизни подменяются целиком: открытый прежде файл
+// дочитывается прежним, а не половиной нового. Запись на месте сначала
+// обрезала файл: оборванный metrics.json засчитывал попытку с битыми
+// метриками, а отметка, пойманная между обрезкой и записью, читалась
+// службой возврата как «прогон мёртв».
+func TestRunFilesReplacedWhole(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteJSON(dir, "metrics.json", Metrics{Task: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(dir, "metrics.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := WriteJSON(dir, "metrics.json", Metrics{Task: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	var m Metrics
+	if err := json.NewDecoder(f).Decode(&m); err != nil || m.Task != "old" {
+		t.Errorf("metrics.json переписан на месте: %q, %v", m.Task, err)
+	}
+
+	root := t.TempDir()
+	if err := WriteHeartbeat(root, Heartbeat{Task: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	hf, err := os.Open(HeartbeatPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hf.Close()
+	if err := WriteHeartbeat(root, Heartbeat{Task: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	var hb Heartbeat
+	if err := json.NewDecoder(hf).Decode(&hb); err != nil || hb.Task != "old" {
+		t.Errorf("отметка переписана на месте: %q, %v", hb.Task, err)
 	}
 }
 
