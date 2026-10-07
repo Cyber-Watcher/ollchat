@@ -10,40 +10,44 @@ import (
 	"testing"
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/graph/vecstand"
 )
 
 // Косинус считается по определению, не подгоняется под реализацию:
 // ортогональные векторы дают 0, одинаковые — 1, противоположные — -1,
 // нулевой вектор — 0 (делить не на что).
 func TestCosineKnownVectors(t *testing.T) {
-	orthoA := make([]int8, entVecDim)
-	orthoB := make([]int8, entVecDim)
+	orthoA := make([]int8, testVecDim)
+	orthoB := make([]int8, testVecDim)
 	orthoA[0], orthoB[1] = 5, 5
 	if got := cosine(orthoA, orthoB); got != 0 {
 		t.Errorf("ортогональные векторы: cos = %v, ожидался 0", got)
 	}
 
-	same := make([]int8, entVecDim)
+	same := make([]int8, testVecDim)
 	same[0], same[1], same[2] = 3, -4, 5
 	if got := cosine(same, same); absFloat(got-1) > 1e-9 {
 		t.Errorf("вектор с самим собой: cos = %v, ожидался 1", got)
 	}
 
-	a := make([]int8, entVecDim)
-	b := make([]int8, entVecDim)
+	a := make([]int8, testVecDim)
+	b := make([]int8, testVecDim)
 	a[0], a[1] = 7, -2
 	b[0], b[1] = -7, 2
 	if got := cosine(a, b); absFloat(got-(-1)) > 1e-9 {
 		t.Errorf("противоположные векторы: cos = %v, ожидался -1", got)
 	}
 
-	zero := make([]int8, entVecDim)
-	nonzero := make([]int8, entVecDim)
+	zero := make([]int8, testVecDim)
+	nonzero := make([]int8, testVecDim)
 	nonzero[0] = 1
 	if got := cosine(zero, nonzero); got != 0 {
 		t.Errorf("нулевой вектор: cos = %v, ожидался 0 (делить не на что)", got)
 	}
 }
+
+// testVecDim — размерность векторов в тестах косинуса: как у bge-m3.
+const testVecDim = 1024
 
 func absFloat(x float64) float64 {
 	if x < 0 {
@@ -125,31 +129,31 @@ func TestCutListLimitsCountAndWidth(t *testing.T) {
 	}
 }
 
-// Вектор понятия читается по номеру: id=1 — с нулевого байта, границы —
+// Вектор понятия читается по номеру: id=1 — первый вектор, границы —
 // отказ, а не чтение чужой памяти.
 func TestEntityVectorAt(t *testing.T) {
-	raw := make([]byte, entVecDim*2) // ровно два понятия
-	var minusOne int8 = -1
-	for i := 0; i < entVecDim; i++ {
-		raw[i] = byte(int8(1))            // понятие 1: все байты 1
-		raw[entVecDim+i] = byte(minusOne) // понятие 2: все байты -1
+	data := make([]int8, testVecDim*2) // ровно два понятия
+	for i := 0; i < testVecDim; i++ {
+		data[i] = 1             // понятие 1: все числа 1
+		data[testVecDim+i] = -1 // понятие 2: все числа -1
 	}
-	v1, ok := entityVectorAt(raw, 1)
-	if !ok || len(v1) != entVecDim || v1[0] != 1 {
-		t.Fatalf("понятие 1: ok=%v len=%d v[0]=%v", ok, len(v1), v1[0])
+	vecs := &vecstand.Vectors{Model: "bge-m3", Dim: testVecDim, Count: 2, Data: data}
+	v1, ok := entityVectorAt(vecs, 1)
+	if !ok || len(v1) != testVecDim || v1[0] != 1 {
+		t.Fatalf("понятие 1: ok=%v len=%d", ok, len(v1))
 	}
-	v2, ok := entityVectorAt(raw, 2)
+	v2, ok := entityVectorAt(vecs, 2)
 	if !ok || v2[0] != -1 {
-		t.Fatalf("понятие 2: ok=%v v[0]=%v", ok, v2[0])
+		t.Fatalf("понятие 2: ok=%v v=%v", ok, v2)
 	}
-	if _, ok := entityVectorAt(raw, 0); ok {
+	if _, ok := entityVectorAt(vecs, 0); ok {
 		t.Error("id=0 обязан отказать")
 	}
-	if _, ok := entityVectorAt(raw, 3); ok {
+	if _, ok := entityVectorAt(vecs, 3); ok {
 		t.Error("векторов ещё не досчитано до понятия 3 — обязан отказать")
 	}
 	if _, ok := entityVectorAt(nil, 1); ok {
-		t.Error("пустой файл векторов — обязан отказать, а не читать чужую память")
+		t.Error("векторов нет вовсе — обязан отказать, а не читать чужую память")
 	}
 }
 

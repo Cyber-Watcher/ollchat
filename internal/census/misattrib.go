@@ -15,7 +15,6 @@
 package census
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -27,60 +26,66 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/graph/vecstand"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
-// entVecDim — размерность вектора понятия; та же модель и та же размерность,
-// что у векторов кусков (kb.Collection.ChunkVectorByRef).
-const entVecDim = 1024
-
 // ── общее для всех трёх переписей ──────────────────────────────────────────
 
-// readEntityVectors читает сырые векторы понятий с диска: entities.vec лежит
-// подряд по номеру понятия, вектор id=1 — с нулевого байта. Паспорт
-// (entities.vecmeta) сверяется до счёта: при другой размерности смещения
-// режут чужие байты, и все косинусы становятся мусором без единой ошибки;
-// хвост файла за пределами паспорта — остаток прежней записи, он отрезается.
-func readEntityVectors(g *graph.Graph) ([]byte, error) {
-	var meta struct {
-		Dim   int `json:"dim"`
-		Count int `json:"count"`
+// loadEntityVectors читает векторы понятий графа общим стендом vecstand
+// и сверяет, что они лежат в одном пространстве с векторами кусков.
+//
+// **Зачем сверка.** Переписи меряют косинус между вектором куска и вектором
+// понятия, а их списки идут прямо в разрушительную --graph-forget-chunks.
+// До 07.10.2026 entities.vec разбирался здесь своей копией формата, ждал
+// размерность 1024 и моделей не сравнивал: векторы понятий, пересчитанные
+// другой моделью той же размерности, давали косинусы-мусор без единой
+// ошибки, и по мусору составлялся список кусков к забыванию. Теперь —
+// отказ, если модели или размерности расходятся. Отпечатка весов (digest)
+// в паспорте векторов коллекции нет, поэтому сверяются имя модели
+// и размерность; файлы самого графа проверяет его же загрузчик
+// (VectorsInfo: паспорт, размер, контрольная сумма).
+func loadEntityVectors(g *graph.Graph, c *kb.Collection) (*vecstand.Vectors, error) {
+	if !g.VectorsInfo().Ready {
+		if p := g.VectorsProblem(); p != "" {
+			return nil, fmt.Errorf("векторы понятий графом не приняты: %s", p)
+		}
+		return nil, fmt.Errorf("векторы понятий не посчитаны — переписи сравнивать не с чем (ollchat --graph-embed %s)", c.Name())
 	}
-	mraw, err := os.ReadFile(filepath.Join(g.Dir(), "entities.vecmeta"))
+	v, err := vecstand.Load(g.Dir())
 	if err != nil {
+		return nil, fmt.Errorf("векторы понятий: %w", err)
+	}
+	if err := sameVectorSpace(c.VecMeta(), v); err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(mraw, &meta); err != nil {
-		return nil, fmt.Errorf("entities.vecmeta: %w", err)
-	}
-	if meta.Dim != entVecDim {
-		return nil, fmt.Errorf("векторы понятий размерности %d, перепись считает только %d", meta.Dim, entVecDim)
-	}
-	raw, err := os.ReadFile(filepath.Join(g.Dir(), "entities.vec"))
-	if err != nil {
-		return nil, err
-	}
-	if n := meta.Count * meta.Dim; n >= 0 && n < len(raw) {
-		raw = raw[:n]
-	}
-	return raw, nil
+	return v, nil
 }
 
-// entityVectorAt — вектор понятия id из сырых байт entities.vec; ok=false,
-// если понятия с таким id нет или векторы ещё не досчитаны до него.
-func entityVectorAt(raw []byte, id uint32) ([]int8, bool) {
-	if id == 0 {
+// sameVectorSpace — посчитаны ли векторы кусков и векторы понятий одной
+// моделью одной размерности: косинус между разными пространствами ничего
+// не значит.
+func sameVectorSpace(chunks kb.VecMeta, ents *vecstand.Vectors) error {
+	if chunks.Count == 0 {
+		return fmt.Errorf("векторы кусков коллекции не посчитаны — переписи сравнивать не с чем (ollchat --kb-embed)")
+	}
+	if chunks.Model != ents.Model || chunks.Dim != ents.Dim {
+		return fmt.Errorf("векторы кусков посчитаны моделью %q (размерность %d), а векторы понятий — %q (%d):\n"+
+			"косинус между разными пространствами — мусор, а списки переписи идут в --graph-forget-chunks;\n"+
+			"пересчитайте одни из них той же моделью (--kb-embed или --graph-embed)",
+			chunks.Model, chunks.Dim, ents.Model, ents.Dim)
+	}
+	return nil
+}
+
+// entityVectorAt — вектор понятия id: векторы лежат по номеру, id=1 —
+// первый. ok=false, если понятия с таким id нет или векторы ещё не
+// досчитаны до него.
+func entityVectorAt(v *vecstand.Vectors, id uint32) ([]int8, bool) {
+	if v == nil || id == 0 {
 		return nil, false
 	}
-	from := (int(id) - 1) * entVecDim
-	if from < 0 || from+entVecDim > len(raw) {
-		return nil, false
-	}
-	v := make([]int8, entVecDim)
-	for i := range v {
-		v[i] = int8(raw[from+i])
-	}
-	return v, true
+	return v.Vector(int(id) - 1)
 }
 
 // cosine — косинус между двумя векторами одной модели (кусок и понятие,
@@ -234,7 +239,7 @@ func misattribAcronym(stdout io.Writer, cfg *config.Config, collName string, out
 		return err
 	}
 	defer g.Close()
-	raw, err := readEntityVectors(g)
+	ents, err := loadEntityVectors(g, c)
 	if err != nil {
 		return err
 	}
@@ -286,7 +291,7 @@ func misattribAcronym(stdout io.Writer, cfg *config.Config, collName string, out
 			continue
 		}
 		candidates++
-		ev, ok := entityVectorAt(raw, e.ID)
+		ev, ok := entityVectorAt(ents, e.ID)
 		if !ok {
 			continue
 		}
@@ -438,7 +443,7 @@ func misattribAlias(stdout io.Writer, cfg *config.Config, collName string, out s
 		return err
 	}
 	defer g.Close()
-	raw, err := readEntityVectors(g)
+	ents, err := loadEntityVectors(g, c)
 	if err != nil {
 		return err
 	}
@@ -513,7 +518,7 @@ func misattribAlias(stdout io.Writer, cfg *config.Config, collName string, out s
 		}
 		for _, id := range ids {
 			st := stats[id]
-			ev, ok := entityVectorAt(raw, id)
+			ev, ok := entityVectorAt(ents, id)
 			if !ok {
 				continue
 			}
@@ -664,7 +669,7 @@ func misattribMention(stdout io.Writer, cfg *config.Config, collName string, out
 		return err
 	}
 	defer g.Close()
-	raw, err := readEntityVectors(g)
+	ents, err := loadEntityVectors(g, c)
 	if err != nil {
 		return err
 	}
@@ -753,7 +758,7 @@ func misattribMention(stdout io.Writer, cfg *config.Config, collName string, out
 				}
 			}
 			var cs float64
-			if ev, okv := entityVectorAt(raw, id); okv && hasVec {
+			if ev, okv := entityVectorAt(ents, id); okv && hasVec {
 				cs = cosine(cv, ev)
 			}
 			switch kind {
