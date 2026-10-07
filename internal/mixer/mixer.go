@@ -173,6 +173,10 @@ func Build(question string, d Deps, s Settings) Result {
 	if strings.TrimSpace(question) == "" || d.Coll == nil {
 		return Result{}
 	}
+	// nil конкретного типа (kbembed.New, kbrerank.New без настройки) — не
+	// эмбеддер и не реранкер: иначе привратник мерил бы выдачу порогом
+	// реранкера, которого нет (см. kb.RerankerOrNil).
+	d.Embedder, d.Reranker = kb.EmbedderOrNil(d.Embedder), kb.RerankerOrNil(d.Reranker)
 	coll := d.Coll
 
 	// Модель без инструментов ничего не дозапросит, поэтому ей нужна не только

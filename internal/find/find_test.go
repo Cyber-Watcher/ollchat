@@ -8,6 +8,7 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 )
 
 // deadEmbedder — эмбеддер, который не отвечает: так ведёт себя сервер, пока
@@ -65,6 +66,23 @@ func TestWordsOnlyReasonsDiffer(t *testing.T) {
 	}
 	if whyNotSet == whyDead {
 		t.Error("причины обязаны различаться словами, а не только признаком")
+	}
+}
+
+// Ненастроенный эмбеддер, пришедший nil своего типа, — тот же «не настроен».
+//
+// kbembed.New без модели отдаёт (*Embedder)(nil), и в Deps он проходил
+// проверку `== nil`: поиск шёл к пустому эмбеддеру, а человек читал
+// «смысловой поиск недоступен (<nil>)» — поломку там, где её нет.
+func TestTypedNilEmbedderIsNotConfigured(t *testing.T) {
+	var emb *kbembed.Embedder // так kbembed.New отвечает «модель не задана»
+	_, got, why := QueryVector(context.Background(), Deps{Embedder: emb}, "в",
+		Opts{Semantic: true, QueryTimeout: time.Second})
+	if got != nil {
+		t.Errorf("nil своего типа отдан дальше как эмбеддер: %#v", got)
+	}
+	if strings.Contains(why, "<nil>") || !strings.Contains(why, "не настроен") {
+		t.Errorf("ожидалось «не настроен», получено: %q", why)
 	}
 }
 

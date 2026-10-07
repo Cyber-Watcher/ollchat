@@ -38,6 +38,19 @@ type Reranker interface {
 	Model() string
 }
 
+// RerankerOrNil отдаёт реранкер или настоящий nil, если реранкера на деле нет.
+//
+// kbrerank.New без адреса возвращает nil своего типа, и в интерфейсе он
+// проходит проверку `!= nil`: подмешивание считало выдачу переранжированной
+// и мерило её порогом реранкера, хотя второй ступени не было (аудит
+// 07.10.2026). См. EmbedderOrNil.
+func RerankerOrNil(r Reranker) Reranker {
+	if nilInside(r) {
+		return nil
+	}
+	return r
+}
+
 // RerankOpts — как переранжировать.
 type RerankOpts struct {
 	// Candidates — сколько кусков брать из первого этапа. 0 — двадцать.
@@ -73,7 +86,7 @@ func Rerank(ctx context.Context, rr Reranker, query string, hits []Result,
 	topK int, o RerankOpts) ([]Result, error) {
 
 	o = o.Norm()
-	if rr == nil || len(hits) == 0 {
+	if rr = RerankerOrNil(rr); rr == nil || len(hits) == 0 {
 		return hits, nil
 	}
 	if topK <= 0 {

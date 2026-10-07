@@ -1143,7 +1143,7 @@ func (c *Collection) hybrid(ctx context.Context, query string, opt SearchOpts, e
 // semanticHits возвращает ближайшие по смыслу куски или ничего, если смысл
 // сейчас недоступен. Причина недоступности записывается в note.
 func (c *Collection) semanticHits(ctx context.Context, query string, opt SearchOpts, emb Embedder) ([]Hit, string) {
-	if emb == nil || !opt.Semantic || c.vectors == nil {
+	if emb = EmbedderOrNil(emb); emb == nil || !opt.Semantic || c.vectors == nil {
 		return nil, ""
 	}
 	m := c.vectors.Meta()
@@ -1203,7 +1203,7 @@ func (c *Collection) setNote(note string) {
 func (c *Collection) DebugVectorHits(ctx context.Context, emb Embedder, query string, n int) ([]Result, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.vectors == nil || emb == nil {
+	if emb = EmbedderOrNil(emb); c.vectors == nil || emb == nil {
 		return nil, nil
 	}
 	q, err := embedQuery(ctx, emb, query, c.vectors.Dim())

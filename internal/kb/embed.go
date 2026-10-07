@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,33 @@ import (
 type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 	Model() string
+}
+
+// EmbedderOrNil отдаёт эмбеддер или настоящий nil, если эмбеддера на деле нет.
+//
+// kbembed.New при незаданной модели возвращает nil своего типа, и положенный
+// в интерфейс он проходит проверку `emb != nil`: смысловой поиск шёл
+// к «эмбеддеру», который молча отдаёт пустоту, а в заметке выдачи появлялось
+// «смысловой поиск недоступен (<nil>)» (аудит 07.10.2026). Каждый, кто
+// принимает эмбеддер снаружи, пропускает его через эту функцию.
+func EmbedderOrNil(e Embedder) Embedder {
+	if nilInside(e) {
+		return nil
+	}
+	return e
+}
+
+// nilInside — пуст ли интерфейс по-настоящему: nil сам или nil внутри
+// (указатель, отображение, функция, канал, срез конкретного типа).
+func nilInside(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // EmbedOpts — как считать.
@@ -179,7 +207,7 @@ func (c *Collection) coverage(model string) Coverage {
 // Embed считает недостающие векторы коллекции.
 func (c *Collection) Embed(ctx context.Context, emb Embedder, opt EmbedOpts, report func(Progress)) (res EmbedResult, err error) {
 	defer c.restamp() // запись своей же коллекции не должна выглядеть чужой
-	if emb == nil {
+	if emb = EmbedderOrNil(emb); emb == nil {
 		return res, errors.New("не задана модель эмбеддингов: укажите kb.embed_model в настройках")
 	}
 	start := time.Now()
@@ -449,7 +477,7 @@ func (c *Collection) bookByID(id uint32) (BookRec, bool) {
 // это замер, а не таблица.
 func (c *Collection) EstimateEmbed(ctx context.Context, emb Embedder, opt EmbedOpts, sample int) (EmbedResult, error) {
 	var res EmbedResult
-	if emb == nil {
+	if emb = EmbedderOrNil(emb); emb == nil {
 		return res, errors.New("не задана модель эмбеддингов")
 	}
 	c.mu.RLock()
