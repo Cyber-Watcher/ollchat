@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +69,47 @@ func TestToolsListEqualsReadOnlyNames(t *testing.T) {
 		if !want[n] {
 			t.Errorf("служба отдаёт лишнее: %s", n)
 		}
+	}
+}
+
+// Вектор вопроса служба считает с заголовками сервера из конфига: Ollama за
+// прокси с авторизацией без них отказывала, и служба молча искала по словам.
+func TestServiceEmbedderSendsServerHeaders(t *testing.T) {
+	got := make(chan string, 4)
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			http.NotFound(w, r)
+			return
+		}
+		got <- r.Header.Get("X-Proxy-Auth")
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+	}))
+	defer ollama.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := "[kb]\ndir = \"" + filepath.Join(dir, "kb") + "\"\nembed_model = \"bge-m3\"\n" +
+		"[log]\nenabled = false\n" +
+		"[[servers]]\nname = \"local\"\nurl = \"" + ollama.URL + "\"\n" +
+		"[servers.headers]\nX-Proxy-Auth = \"секрет\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := build(cfg, false, mcp.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Вопрос уникален: одиночные векторы кэшируются на весь процесс.
+	q := fmt.Sprintf("заголовки %d", time.Now().UnixNano())
+	if _, err := data.Emb.Embed(context.Background(), []string{q}); err != nil {
+		t.Fatal(err)
+	}
+	if h := <-got; h != "секрет" {
+		t.Errorf("эмбеддер службы пришёл без заголовков сервера: X-Proxy-Auth = %q", h)
 	}
 }
 

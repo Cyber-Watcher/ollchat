@@ -111,9 +111,14 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 			"ollchat --kb-add имя /путь/к/книгам", cfg.KB.Dir)
 	}
 
+	// Вектор вопроса служба считает через первый сервер конфига — и с его
+	// заголовками, как диалог со своим сервером. Без них Ollama за прокси
+	// с авторизацией отказывала эмбеддеру, и служба молча откатывалась
+	// на поиск по словам.
 	fallback := ""
+	var headers map[string]string
 	if len(cfg.Servers) > 0 {
-		fallback = cfg.Servers[0].URL
+		fallback, headers = cfg.Servers[0].URL, cfg.Servers[0].Headers
 	}
 
 	// Графовому входу — только инструменты графа. Реестр диалога содержит то,
@@ -129,7 +134,7 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 		Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
 		RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
 		Base:       base,
-		Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, nil),
+		Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
 		Default:    cfg.KB.Default,
 		Token:      token,
 		Graph:      &graphService{cfg: cfg, registry: graphReg, base: base, cache: cache},

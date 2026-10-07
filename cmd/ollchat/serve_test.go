@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -210,6 +211,55 @@ func TestServeMCPUsesServiceSettings(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("вызов по /mcp не попал в журнал шагов (%v)", logs)
+	}
+}
+
+// Вектор вопроса служба считает с заголовками сервера из конфига: Ollama за
+// прокси с авторизацией без них отказывала, и служба молча искала по словам.
+func TestServeEmbedderSendsServerHeaders(t *testing.T) {
+	got := make(chan string, 4)
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			http.NotFound(w, r)
+			return
+		}
+		got <- r.Header.Get("X-Proxy-Auth")
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+	}))
+	defer ollama.Close()
+
+	dir := t.TempDir()
+	base, err := kb.OpenBase(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.Create("books", ""); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.KB.Dir, cfg.KB.EmbedModel = dir, "bge-m3"
+	cfg.Servers = []config.Server{{Name: "gpu", URL: ollama.URL,
+		Headers: map[string]string{"X-Proxy-Auth": "секрет"}}}
+	mux, _, closeSvc, err := serveMux(cfg, "", false, nil, base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSvc()
+
+	// Вопрос уникален: одиночные векторы кэшируются на весь процесс.
+	body := fmt.Sprintf(`{"collection":"books","query":"заголовки %d"}`, time.Now().UnixNano())
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/search", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	select {
+	case h := <-got:
+		if h != "секрет" {
+			t.Errorf("эмбеддер службы пришёл без заголовков сервера: X-Proxy-Auth = %q", h)
+		}
+	default:
+		t.Fatalf("вектор вопроса не запрашивался: код %d, %s", w.Code, w.Body.String())
 	}
 }
 
