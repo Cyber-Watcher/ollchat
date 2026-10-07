@@ -1054,11 +1054,11 @@ func Doctor(stdout io.Writer, cfg *config.Config, name string, quick bool) error
 		// Граф открывается только ради одного вопроса — «разобрана ли книга»,
 		// — и потому по требованию: на большой коллекции это секунды и гигабайт.
 		var inGraph kb.InGraph
+		var g *graph.Graph
 		if !quick {
 			line.step("открываю граф", 0, 0)
-			if g, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules()); err == nil {
-				inGraph = g.CoversDoc
-				defer g.Close()
+			if gr, err := graph.Open(coll.Dir(), coll.ChunkCount(), cfg.Graph.Rules()); err == nil {
+				g, inGraph = gr, gr.CoversDoc
 			}
 		}
 		report := kb.Doctor(coll, kb.DoctorOpts{
@@ -1070,6 +1070,12 @@ func Doctor(stdout io.Writer, cfg *config.Config, name string, quick bool) error
 			Step:  line.step,
 		})
 		line.stop()
+		// Граф закрывается сразу после отчёта, а не отложенно: defer в цикле
+		// по `--kb-doctor all` держал открытыми графы всех коллекций до конца
+		// проверки, а открытый граф большой библиотеки — это гигабайт памяти.
+		if g != nil {
+			g.Close()
+		}
 		fmt.Fprintln(stdout, report)
 	}
 	return nil
