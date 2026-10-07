@@ -312,7 +312,7 @@ func (g *Graph) addGroupSiblings(seeds []FoundEntity, have map[uint32]bool, opt 
 		}
 		seeds = append(seeds, FoundEntity{
 			Entity:      ent,
-			Mentions:    len(g.ment.Of(id)),
+			Mentions:    len(g.mentionsOf(id)),
 			Books:       booksOf(g, id),
 			Matched:     "по группе",
 			Aliases:     g.ents.DisplayAliases(ent),

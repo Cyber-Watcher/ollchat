@@ -597,7 +597,11 @@ func (e *Edges) around(id uint32) []Edge {
 // Одна и та же связь встречается в десятках кусков — это не десять разных
 // связей, а одна, подтверждённая десять раз. Вес складывается: чем чаще
 // книги говорят о связи, тем она крепче.
-func (e *Edges) Neighbors(src uint32) []Neighbor {
+func (e *Edges) Neighbors(src uint32) []Neighbor { return e.neighborsKeep(src, nil) }
+
+// neighborsKeep — то же, но только по связям, для которых keep вернул true;
+// nil — по всем. Нужен поиску, который не видит отброшенных книг (dropbook.go).
+func (e *Edges) neighborsKeep(src uint32, keep func(Edge) bool) []Neighbor {
 	type key struct {
 		id uint32
 		in bool
@@ -617,12 +621,16 @@ func (e *Edges) Neighbors(src uint32) []Neighbor {
 		}
 	}
 	for _, ed := range e.outgoing(src) {
-		add(ed.Dst, ed.Type, ed.Weight, false)
+		if keep == nil || keep(ed) {
+			add(ed.Dst, ed.Type, ed.Weight, false)
+		}
 	}
 	// Входящие идут тем же списком: для вопроса «с чем это связано» разницы
 	// нет, а для печати направление сохранено в поле In.
 	for _, ed := range e.incoming(src) {
-		add(ed.Src, ed.Type, ed.Weight, true)
+		if keep == nil || keep(ed) {
+			add(ed.Src, ed.Type, ed.Weight, true)
+		}
 	}
 	out := make([]Neighbor, 0, len(agg))
 	for _, n := range agg {

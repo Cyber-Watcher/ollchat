@@ -142,3 +142,55 @@ func (g *Graph) RestoreBook(book uint32, path string) error {
 
 // Dropped отдаёт множество отброшенных книг.
 func (g *Graph) Dropped() *DroppedBooks { return g.dropped }
+
+// Видимое поиску — граф за вычетом отброшенных книг.
+//
+// До 07.10.2026 отброшенная книга пряталась только из цитат: соседи понятия,
+// число его упоминаний и книг, цепочки Path и смысловой вход считали и её
+// связи и упоминания. Понятие, известное лишь из отброшенной книги, приходило
+// в выдачу «по смыслу» с соседями из неё же, а цепочка «как связаны X и Y»
+// шла через связь, которую та книга и дала (аудит, 4.5). Поиск смотрит
+// на граф через эти функции. Разбиение на темы, их описания и приборы
+// обслуживания по-прежнему видят граф целиком: разбиение меняется только
+// явным пересчётом, и прятать книгу из тем — отдельное решение.
+
+// visibleEdge — связь подтверждена книгой, которая не отброшена.
+func (g *Graph) visibleEdge(ed Edge) bool { return !g.dropped.Dropped(ed.Evidence.Doc) }
+
+// neighbors — соседи понятия по видимым связям.
+func (g *Graph) neighbors(id uint32) []Neighbor {
+	if g.dropped.Count() == 0 {
+		return g.edge.Neighbors(id)
+	}
+	return g.edge.neighborsKeep(id, g.visibleEdge)
+}
+
+// around — видимые связи понятия в обе стороны (обход цепочек).
+func (g *Graph) around(id uint32) []Edge {
+	all := g.edge.around(id)
+	if g.dropped.Count() == 0 {
+		return all
+	}
+	out := all[:0]
+	for _, ed := range all {
+		if g.visibleEdge(ed) {
+			out = append(out, ed)
+		}
+	}
+	return out
+}
+
+// mentionsOf — куски понятия в книгах, которые не отброшены.
+func (g *Graph) mentionsOf(id uint32) []ChunkKey {
+	all := g.ment.Of(id)
+	if g.dropped.Count() == 0 {
+		return all
+	}
+	out := all[:0]
+	for _, k := range all {
+		if !g.dropped.Dropped(k.Doc) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
