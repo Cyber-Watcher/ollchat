@@ -109,13 +109,20 @@ func OpenVectors(dir string) (*Vectors, error) {
 			info.Size(), want)
 	}
 
-	buf := make([]byte, want)
-	if _, err := f.ReadAt(buf, 0); err != nil {
-		return nil, err
-	}
+	// Читается окнами прямо в итоговый срез: прежний способ — весь файл
+	// в []byte и копия в []int8 — на миг удваивал память, а у библиотеки
+	// в полмиллиона кусков это лишние полгигабайта на каждое открытие.
 	v := &Vectors{dir: dir, meta: meta, data: make([]int8, want)}
-	for i, b := range buf {
-		v.data[i] = int8(b)
+	buf := make([]byte, min(want, 4<<20))
+	for off := int64(0); off < want; {
+		n := min(int64(len(buf)), want-off)
+		if _, err := f.ReadAt(buf[:n], off); err != nil {
+			return nil, err
+		}
+		for i, b := range buf[:n] {
+			v.data[off+int64(i)] = int8(b)
+		}
+		off += n
 	}
 	return v, nil
 }

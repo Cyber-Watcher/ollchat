@@ -105,6 +105,105 @@ func TestOpenSeesExternalMerge(t *testing.T) {
 	}
 }
 
+// Замок, чужой файл и временный файл атомарной записи коллекцию изменённой
+// не делают.
+//
+// В отпечатке было время правки самого каталога, а его меняет создание
+// и удаление любого файла: служба перечитывала коллекцию целиком — с сотнями
+// мегабайт векторов — от каждой поставленной и снятой блокировки.
+func TestStaleIgnoresLockAndForeignFiles(t *testing.T) {
+	base, coll, _ := mergeFixture(t)
+	reader, err := base.Open(coll.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.lock(); err != nil {
+		t.Fatal(err)
+	}
+	reader.unlock()
+	if err := os.WriteFile(filepath.Join(reader.Dir(), "заметки.txt"), []byte("своё"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reader.Stale() {
+		t.Fatal("замок и чужой файл объявили коллекцию изменённой")
+	}
+	if again, _ := base.Open(coll.Name()); again != reader {
+		t.Fatal("коллекция перечитана, хотя её данные не менялись")
+	}
+}
+
+// Волны счёта смыслов, идущего в другом процессе, коллекцию не перечитывают:
+// новые векторы подхватываются один раз, когда счёт закончится.
+func TestStaleWaitsForVectorsToSettle(t *testing.T) {
+	base, coll, _ := embedFixture(t)
+	if _, err := coll.Embed(context.Background(), newFakeEmbedder(64), EmbedOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := base.Open(coll.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.Stale() {
+		t.Fatal("подготовка: коллекция изменена сразу после открытия")
+	}
+
+	// «Другой процесс» считает смыслы: замок стоит, паспорт векторов
+	// переписан очередной волной.
+	lock := filepath.Join(reader.Dir(), lockMark)
+	if err := placeMarker(lock); err != nil {
+		t.Fatal(err)
+	}
+	_, metaPath := vecPaths(reader.Dir())
+	var vm VecMeta
+	if err := readJSON(metaPath, &vm); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(metaPath, vm); err != nil {
+		t.Fatal(err)
+	}
+	if reader.Stale() {
+		t.Fatal("волна векторов под живым замком заставила перечитать коллекцию")
+	}
+
+	// Счёт закончился — замок снят: теперь перечитать надо.
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if !reader.Stale() {
+		t.Fatal("досчитанные векторы не подхватываются после снятия замка")
+	}
+}
+
+// Перезапись указателей кусков (проход --kb-flag-toc) видна читателю:
+// без времени каталога её выдаёт только chunks.idx в отпечатке.
+func TestStaleSeesChunkIndexRewrite(t *testing.T) {
+	base, coll, _ := mergeFixture(t)
+	reader, err := base.Open(coll.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := filepath.Join(reader.Dir(), "chunks.idx")
+	raw, err := os.ReadFile(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomicForTest(idx, raw); err != nil {
+		t.Fatal(err)
+	}
+	if !reader.Stale() {
+		t.Fatal("переписанные указатели кусков не замечены")
+	}
+}
+
+// writeFileAtomicForTest — подмена файла переименованием, как у fsx.WriteFileAtomic.
+func writeFileAtomicForTest(path string, data []byte) error {
+	tmp := path + ".tmp-test"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Нетронутая коллекция не перечитывается: иначе каждый запрос к библиотеке
 // в 463 МБ стоил бы полной загрузки индекса.
 func TestOpenKeepsUnchangedCollection(t *testing.T) {
