@@ -60,7 +60,25 @@ type GuardReport struct {
 
 // NewGuard готовит проверку по настройкам конфига.
 func NewGuard(c *ollama.Client, cfg GuardCfg, root string) *Guard {
-	return &Guard{Client: c, Cfg: cfg, Root: root, Run: runCommand}
+	return &Guard{Client: c, Cfg: cfg, Root: root, Run: sudoFails(runCommand)}
+}
+
+// sudoFails делает ненулевой код команды через sudo ошибкой.
+//
+// Код возврата nodeprobe не смотрит — для nvidia-smi и systemctl это верно.
+// Но отказ sudo (нет NOPASSWD на journalctl) приходил к нему обычным выводом
+// «a password is required»: запросов к Ollama в таком «журнале» ноль, и
+// журнал выглядел тихим, а не недоступным. С ошибкой проверка пишет в
+// guard.log честное «журнал недоступен».
+func sudoFails(run func(context.Context, string, ...string) (string, int, error)) func(context.Context, string, ...string) (string, int, error) {
+	return func(ctx context.Context, name string, args ...string) (string, int, error) {
+		out, code, err := run(ctx, name, args...)
+		if err == nil && code != 0 && name == "sudo" {
+			err = fmt.Errorf("sudo %s: код %d: %s", strings.Join(args, " "), code,
+				strings.TrimSpace(tail(out, 300)))
+		}
+		return out, code, err
+	}
 }
 
 // serviceName — имя юнита systemd, за которым следим.
@@ -91,8 +109,9 @@ func (g *Guard) probeOpts() nodeprobe.Opts {
 		UtilSampleGap: time.Duration(g.Cfg.UtilSampleGap),
 		JournalWindow: window,
 		// Журнал службы на стенде читается через sudo: учётка прогона
-		// не состоит в systemd-journal.
-		JournalCmd: []string{"sudo", "journalctl"},
+		// не состоит в systemd-journal. -n — не ждать пароля: в tmux у sudo
+		// есть терминал, и проверка висела бы до утра.
+		JournalCmd: []string{"sudo", "-n", "journalctl"},
 	}
 	if o.Want.Models {
 		client := g.Client

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,7 +70,7 @@ func (d *Doctor) Healthy(ctx context.Context) bool {
 // не гоняются.
 func (d *Doctor) Restart(ctx context.Context) error {
 	d.Log("перезапускаю Ollama")
-	if _, _, err := d.Run(ctx, "sudo", "systemctl", "restart", "ollama"); err != nil {
+	if err := d.systemctl(ctx, "restart", "ollama"); err != nil {
 		return fmt.Errorf("перезапуск Ollama: %w", err)
 	}
 	wait := d.Cfg.RestartWait.Get(5 * time.Minute)
@@ -98,7 +99,7 @@ func (d *Doctor) StartService(ctx context.Context, name string) error {
 		name = "ollama"
 	}
 	d.Log("поднимаю службу %s", name)
-	if _, _, err := d.Run(ctx, "sudo", "systemctl", "start", name); err != nil {
+	if err := d.systemctl(ctx, "start", name); err != nil {
 		return fmt.Errorf("запуск службы %s: %w", name, err)
 	}
 	wait := d.Cfg.RestartWait.Get(5 * time.Minute)
@@ -115,6 +116,27 @@ func (d *Doctor) StartService(ctx context.Context, name string) error {
 		}
 	}
 	return fmt.Errorf("служба %s не поднялась за %s", name, wait)
+}
+
+// systemctl зовёт `sudo -n systemctl <verb> <unit>` и считает сбоем
+// и ненулевой код.
+//
+// runCommand отдаёт код возврата как результат, а не как ошибку: так нужно
+// docker и nvidia-smi. Но здесь это значило, что отказ sudo (нет NOPASSWD,
+// не та служба) выглядел успехом: прогон писал «перезапускаю Ollama», ждал
+// её — живую и нетронутую — и считал сервер вылеченным, а погашенную службу
+// «поднимал» пять минут впустую. -n — потому что прогон идёт в tmux, где
+// у sudo есть терминал: без -n он ждал бы пароля, которого ночью никто
+// не введёт.
+func (d *Doctor) systemctl(ctx context.Context, verb, unit string) error {
+	out, code, err := d.Run(ctx, "sudo", "-n", "systemctl", verb, unit)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("код %d: %s", code, strings.TrimSpace(tail(out, 500)))
+	}
+	if err != nil {
+		return fmt.Errorf("sudo systemctl %s %s: %w", verb, unit, err)
+	}
+	return nil
 }
 
 // ── Отметка о живом прогоне ──────────────────────────────────────────────────

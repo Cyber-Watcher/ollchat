@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestDoctorRestartWaitsForUp(t *testing.T) {
 		Cfg:    HealthCfg{RestartWait: Duration(5 * time.Second)},
 		Log:    func(string, ...any) {},
 		Run: func(ctx context.Context, name string, args ...string) (string, int, error) {
-			restarted = name == "sudo" && len(args) > 2 && args[2] == "ollama"
+			restarted = name == "sudo" && strings.Join(args, " ") == "-n systemctl restart ollama"
 			return "", 0, nil
 		},
 	}
@@ -71,6 +72,49 @@ func TestDoctorRestartWaitsForUp(t *testing.T) {
 	}
 	if !restarted {
 		t.Error("systemctl restart ollama не вызван")
+	}
+}
+
+// Отказ sudo — сбой перезапуска, а не успех: раньше ненулевой код молча
+// глотался, и прогон считал сервер вылеченным, не тронув его.
+func TestDoctorSudoRefusalIsError(t *testing.T) {
+	var healthAsked bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthAsked = true
+		_, _ = w.Write([]byte(`{"version":"0.32.13"}`))
+	}))
+	t.Cleanup(srv.Close)
+	d := &Doctor{
+		Client: ollama.New(srv.URL, 5*time.Second, 5*time.Second, nil),
+		Cfg:    HealthCfg{RestartWait: Duration(5 * time.Second)},
+		Log:    func(string, ...any) {},
+		Run: func(context.Context, string, ...string) (string, int, error) {
+			return "sudo: a password is required\n", 1, nil
+		},
+	}
+	err := d.Restart(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "password is required") {
+		t.Errorf("отказ sudo при перезапуске: %v", err)
+	}
+	if err := d.StartService(context.Background(), "ollama"); err == nil {
+		t.Error("отказ sudo при подъёме службы принят за успех")
+	}
+	if healthAsked {
+		t.Error("после отказа sudo прогон ждал подъёма сервера, которого не будет")
+	}
+}
+
+// Отказ sudo у журнала — «журнал недоступен», а не тихий журнал без запросов.
+func TestSudoFails(t *testing.T) {
+	refuse := func(context.Context, string, ...string) (string, int, error) {
+		return "sudo: a password is required\n", 1, nil
+	}
+	if _, _, err := sudoFails(refuse)(context.Background(), "sudo", "-n", "journalctl"); err == nil {
+		t.Error("отказ sudo прошёл без ошибки")
+	}
+	// Остальным командам код возврата — результат, а не ошибка.
+	if _, code, err := sudoFails(refuse)(context.Background(), "systemctl", "is-active", "ollama"); err != nil || code != 1 {
+		t.Errorf("код systemctl стал ошибкой: %d, %v", code, err)
 	}
 }
 
