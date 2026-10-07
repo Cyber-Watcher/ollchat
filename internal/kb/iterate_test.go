@@ -6,7 +6,50 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// Книга по номеру ищется указателем, и он следует за реестром: перечитанная
+// книга находится под новым номером, а при повторе номера в старом реестре
+// (обрыв до сверки NextDoc) выигрывает первая запись — как при переборе.
+func TestBookLookupFollowsRegistry(t *testing.T) {
+	_, coll, books := syncFixture(t)
+	oldID := bookID(t, coll, "guide.pdf")
+	path := makeBook(t, books, "guide.pdf", longPage("rewritten guide text"), longPage("more of it"),
+		longPage("and an appendix"))
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	newID := bookID(t, coll, "guide.pdf")
+	if b, ok := coll.BookAny(newID); !ok || b.Path != path {
+		t.Fatalf("перечитанная книга по номеру %d: %+v, %v", newID, b, ok)
+	}
+	if _, ok := coll.BookAny(oldID); ok {
+		t.Fatalf("запись прежней версии %d всё ещё находится, хотя реестр её заменил", oldID)
+	}
+	if _, ok := coll.BookAny(0); ok {
+		t.Fatal("по нулевому номеру нашлась книга — это номер непрочитанных")
+	}
+
+	// Старый реестр с повтором номера: первая запись выигрывает.
+	dup := []BookRec{
+		{ID: 5, Kind: BookOK, Path: "/lib/первая.pdf"},
+		{ID: 5, Kind: BookOK, Path: "/lib/вторая.pdf"},
+	}
+	if err := writeDocs(coll.Dir(), dup); err != nil {
+		t.Fatal(err)
+	}
+	if err := coll.loadDocs(); err != nil {
+		t.Fatal(err)
+	}
+	if b, ok := coll.BookAny(5); !ok || b.Path != "/lib/первая.pdf" {
+		t.Fatalf("при повторе номера найдена %q, ожидалась первая запись", b.Path)
+	}
+}
 
 // Ссылка «книга, номер куска» разрешается по нынешнему хранилищу, а не по тому,
 // что было при первом обращении.

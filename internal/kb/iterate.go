@@ -170,11 +170,19 @@ func InFolder(path, folder string) bool {
 }
 
 // book ищет книгу без блокировки — вызывается изнутри уже занятого замка.
+// По указателю, а не перебором: её зовут на каждом куске обхода.
 func (c *Collection) book(id uint32) (BookRec, bool) {
-	for _, d := range c.docs {
-		if d.ID == id {
-			return d, true
+	if c.byID == nil {
+		// Коллекция собрана вручную (тесты), указателя нет — перебор.
+		for _, d := range c.docs {
+			if d.ID == id && id != 0 {
+				return d, true
+			}
 		}
+		return BookRec{}, false
+	}
+	if i, ok := c.byID[id]; ok {
+		return c.docs[i], true
 	}
 	return BookRec{}, false
 }

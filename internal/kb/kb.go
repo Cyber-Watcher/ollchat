@@ -493,6 +493,7 @@ type Collection struct {
 	meta    Meta
 	docs    []BookRec
 	byPath  map[string]int // путь → место в docs
+	byID    map[uint32]int // номер книги → место в docs; см. indexIDs
 	deleted map[uint32]bool
 	store   *Store
 	segs    []*Segment
@@ -582,6 +583,7 @@ func (c *Collection) reconcileNextDoc() {
 func (c *Collection) loadDocs() error {
 	c.docs = nil
 	c.byPath = map[string]int{}
+	c.byID = map[uint32]int{}
 	data, err := os.ReadFile(filepath.Join(c.dir, "docs.jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -607,7 +609,34 @@ func (c *Collection) loadDocs() error {
 		c.byPath[rec.Path] = len(c.docs)
 		c.docs = append(c.docs, rec)
 	}
+	c.indexIDs()
 	return nil
+}
+
+// indexDocs перестраивает оба указателя реестра — по пути и по номеру —
+// после того, как c.docs заменили целиком. Под c.mu.Lock или до публикации.
+func (c *Collection) indexDocs() {
+	c.byPath = make(map[string]int, len(c.docs))
+	for i, d := range c.docs {
+		c.byPath[d.Path] = i
+	}
+	c.indexIDs()
+}
+
+// indexIDs перестраивает указатель по номеру. Первая запись с номером
+// выигрывает — так же, как выигрывала при переборе; нулевой номер у книг,
+// которые не прочитались, и по нему не ищут.
+//
+// **Зачем указатель.** Книгу кусок ищет по номеру на каждом шаге обхода,
+// и перебор реестра на 550 тысяч кусков стоил около 13 с (аудит 07.10.2026).
+// Ведётся там же, где byPath: здесь, в indexDocs и в appendDoc.
+func (c *Collection) indexIDs() {
+	c.byID = make(map[uint32]int, len(c.docs))
+	for i, d := range c.docs {
+		if _, seen := c.byID[d.ID]; d.ID != 0 && !seen {
+			c.byID[d.ID] = i
+		}
+	}
 }
 
 func (c *Collection) loadDeleted() error {
@@ -928,13 +957,12 @@ func (c *Collection) Book(id uint32) (BookRec, bool) {
 func (c *Collection) BookAny(id uint32) (BookRec, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	for _, d := range c.docs {
-		if d.ID == id {
-			d.Deleted = c.deleted[id]
-			return d, true
-		}
+	d, ok := c.book(id)
+	if !ok {
+		return BookRec{}, false
 	}
-	return BookRec{}, false
+	d.Deleted = c.deleted[id]
+	return d, true
 }
 
 // Stats — сводка по коллекции.
@@ -1092,18 +1120,15 @@ func (c *Collection) SearchWith(ctx context.Context, query string, opt SearchOpt
 			Snippet: Snippet(text, query, snippetRunes),
 			Code:    ChunkFlags(rec.Flags)&FlagCode != 0,
 		}
-		for _, d := range c.docs {
-			if d.ID == rec.Doc {
-				res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
-				res.Year, res.YearSrc = d.Year, d.YearSrc
-				res.Unit = shortUnit(d.UnitWord)
-				if res.Unit == unitLines {
-					res.Rel = relToRoots(d.Path, c.meta.Roots)
-				}
-				if res.Book == "" {
-					res.Book = filepath.Base(d.Path)
-				}
-				break
+		if d, ok := c.book(rec.Doc); ok {
+			res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
+			res.Year, res.YearSrc = d.Year, d.YearSrc
+			res.Unit = shortUnit(d.UnitWord)
+			if res.Unit == unitLines {
+				res.Rel = relToRoots(d.Path, c.meta.Roots)
+			}
+			if res.Book == "" {
+				res.Book = filepath.Base(d.Path)
 			}
 		}
 		out = append(out, res)
@@ -1275,18 +1300,15 @@ func (c *Collection) Around(id string, around int) ([]Result, error) {
 			Unit: "стр.", Text: text, Snippet: text,
 			Code: ChunkFlags(rec.Flags)&FlagCode != 0,
 		}
-		for _, d := range c.docs {
-			if d.ID == rec.Doc {
-				res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
-				res.Year, res.YearSrc = d.Year, d.YearSrc
-				res.Unit = shortUnit(d.UnitWord)
-				if res.Unit == unitLines {
-					res.Rel = relToRoots(d.Path, c.meta.Roots)
-				}
-				if res.Book == "" {
-					res.Book = filepath.Base(d.Path)
-				}
-				break
+		if d, ok := c.book(rec.Doc); ok {
+			res.Book, res.Author, res.Path = d.Title, d.Author, d.Path
+			res.Year, res.YearSrc = d.Year, d.YearSrc
+			res.Unit = shortUnit(d.UnitWord)
+			if res.Unit == unitLines {
+				res.Rel = relToRoots(d.Path, c.meta.Roots)
+			}
+			if res.Book == "" {
+				res.Book = filepath.Base(d.Path)
 			}
 		}
 		out = append(out, res)

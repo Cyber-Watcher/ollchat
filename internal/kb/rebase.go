@@ -128,10 +128,7 @@ func (c *Collection) Rebase(from, to string, dry bool) (RebaseResult, error) {
 
 	c.mu.Lock()
 	c.docs = changed
-	c.byPath = make(map[string]int, len(changed))
-	for i, d := range changed {
-		c.byPath[d.Path] = i
-	}
+	c.indexDocs()
 	c.meta = meta
 	c.mu.Unlock()
 	c.restamp() // правка своей же коллекции не должна выглядеть чужой

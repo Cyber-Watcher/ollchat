@@ -134,10 +134,7 @@ func (c *Collection) forgetRecord(abs string) error {
 		}
 	}
 	c.docs = kept
-	c.byPath = make(map[string]int, len(kept))
-	for i, d := range kept {
-		c.byPath[d.Path] = i
-	}
+	c.indexDocs()
 	c.mu.Unlock()
 	return writeDocs(c.dir, kept)
 }
@@ -926,10 +923,19 @@ func (c *Collection) appendDoc(rec BookRec) error {
 		return err
 	}
 	if i, ok := c.byPath[rec.Path]; ok {
+		// Замена по пути меняет номер на этом месте: указатель по номеру
+		// перестраивается целиком — записей сотни, а первая с номером
+		// обязана выигрывать, как при переборе.
 		c.docs[i] = rec
+		c.indexIDs()
 	} else {
 		c.byPath[rec.Path] = len(c.docs)
 		c.docs = append(c.docs, rec)
+		if _, seen := c.byID[rec.ID]; c.byID == nil {
+			c.indexIDs()
+		} else if rec.ID != 0 && !seen {
+			c.byID[rec.ID] = len(c.docs) - 1
+		}
 	}
 	return nil
 }

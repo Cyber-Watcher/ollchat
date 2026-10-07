@@ -461,14 +461,7 @@ func shortDigest(d string) string {
 }
 
 // bookByID ищет книгу по её номеру, не беря замок: вызывается под ним.
-func (c *Collection) bookByID(id uint32) (BookRec, bool) {
-	for _, d := range c.docs {
-		if d.ID == id {
-			return d, true
-		}
-	}
-	return BookRec{}, false
-}
+func (c *Collection) bookByID(id uint32) (BookRec, bool) { return c.book(id) }
 
 // EstimateEmbed меряет скорость на небольшой пробе и оценивает всю работу.
 //
