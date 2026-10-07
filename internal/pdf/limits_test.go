@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -199,6 +200,84 @@ func TestTrueTypeCmapBounded(t *testing.T) {
 	normal := parseTrueTypeCmap(ttfWithCmap(cmapFormat12([3]uint32{'A', 'Z', 3})))
 	if len(normal) != 26 || normal[3] != 'A' || normal[28] != 'Z' {
 		t.Errorf("обычная таблица разобрана неверно: %d записей, %q %q", len(normal), normal[3], normal[28])
+	}
+}
+
+// withBudget временно уменьшает пределы разбора: проверять их на настоящих
+// величинах значило бы гонять гигабайты в каждом прогоне.
+func withBudget(t *testing.T, stream int, base int64) {
+	t.Helper()
+	oldStream, oldBase, oldPer := maxDecoded, workBase, workPerByte
+	maxDecoded, workBase, workPerByte = stream, base, 1
+	t.Cleanup(func() { maxDecoded, workBase, workPerByte = oldStream, oldBase, oldPer })
+}
+
+// Каждый шаг цепочки фильтров ограничен: RunLength и ASCII85 тоже.
+func TestFilterOutputLimited(t *testing.T) {
+	rl := bytes.Repeat([]byte{129, 'x'}, 1000) // по 128 байт на пару
+	if got := runLengthDecode(rl, 1000); len(got) != 1000 {
+		t.Errorf("RunLength выдал %d байт при пределе 1000", len(got))
+	}
+	if got := ascii85Decode(bytes.Repeat([]byte("z"), 1000), 100); len(got) != 100 {
+		t.Errorf("ASCII85 выдал %d байт при пределе 100", len(got))
+	}
+	if got := lzwDecode(lzwBomb(), true, 100); len(got) > 100 {
+		t.Errorf("LZW выдал %d байт при пределе 100", len(got))
+	}
+}
+
+// lzwBomb — коды LZW, раз за разом удлиняющие одну и ту же цепочку.
+func lzwBomb() []byte {
+	var codes []int
+	codes = append(codes, 'a')
+	for c := 258; c < 4000; c++ {
+		codes = append(codes, c)
+	}
+	var out []byte
+	var acc uint32
+	var bits uint
+	width := uint(9)
+	for i, c := range codes {
+		acc = acc<<width | uint32(c)
+		bits += width
+		for bits >= 8 {
+			out = append(out, byte(acc>>(bits-8)))
+			bits -= 8
+		}
+		switch i + 258 + 1 {
+		case 511:
+			width = 10
+		case 1023:
+			width = 11
+		case 2047:
+			width = 12
+		}
+	}
+	return out
+}
+
+// Цепочка Flate → RunLength: Flate сам по себе ограничен, а RunLength после
+// него разворачивал каждые два байта в 128 — поток в 64 КБ давал гигабайты.
+// Бюджет документа обрывает такой файл ошибкой, а не нехваткой памяти.
+func TestFilterChainBudget(t *testing.T) {
+	withBudget(t, 64<<20, 32<<20)
+	rl := bytes.Repeat([]byte{129, 'x'}, 4<<20) // 8 МБ → 512 МБ после RunLength
+	packed := zlibBytes(rl)
+	content := fmt.Sprintf("<< /Filter [/FlateDecode /RunLengthDecode] /Length %d >>\nstream\n%s\nendstream",
+		len(packed), packed)
+	doc := build(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << >> /Contents [4 0 R 4 0 R 4 0 R 4 0 R] >>",
+		content)
+	bounded(t, 20*time.Second, func() {
+		if _, err := Extract(doc, Options{}); !errors.Is(err, ErrTooHeavy) {
+			t.Errorf("ожидался ErrTooHeavy, получено %v", err)
+		}
+	})
+	// Обычный документ в тот же бюджет укладывается.
+	if got := pageText(t, docWith("/F1 5 0 R", "BT /F1 12 Tf 72 720 Td (Hello) Tj ET", helvetica)); got != "Hello" {
+		t.Errorf("обычный документ: %q", got)
 	}
 }
 

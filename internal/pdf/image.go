@@ -94,6 +94,9 @@ func ExtractImages(data []byte, opt ImageOptions) (out []Image, err error) {
 				return out, nil
 			}
 		}
+		if doc.overspent {
+			return nil, heavy(i+1, len(pages))
+		}
 	}
 	return out, nil
 }

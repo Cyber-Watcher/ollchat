@@ -43,7 +43,8 @@ func ScanPages(data []byte) (out []ScanPage, err error) {
 		return nil, err
 	}
 	ex := newExtractor(doc)
-	for i, pg := range doc.Pages() {
+	pages := doc.Pages()
+	for i, pg := range pages {
 		sp := ScanPage{}
 		sp.Width, sp.Height = doc.pageSize(pg)
 		ex.unit = i + 1
@@ -79,6 +80,9 @@ func ScanPages(data []byte) (out []ScanPage, err error) {
 			}
 		}
 		out = append(out, sp)
+		if doc.overspent {
+			return nil, heavy(i+1, len(pages))
+		}
 	}
 	return out, nil
 }

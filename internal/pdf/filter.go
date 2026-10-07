@@ -13,11 +13,11 @@ import (
 // errImageStream сообщает, что поток — картинка, а не текст.
 var errImageStream = errors.New("поток содержит изображение")
 
-// maxDecoded ограничивает размер распакованного потока: битый или намеренно
-// раздутый файл не должен съесть всю память.
-const maxDecoded = 256 << 20
-
 // Decode применяет к потоку цепочку фильтров из /Filter и возвращает данные.
+//
+// Каждый шаг цепочки ограничен отдельно (см. budget.go): прежде предел
+// стоял только у FlateDecode и LZW, и RunLength после Flate разворачивал
+// его 256 МБ ещё в шестьдесят четыре раза.
 func (d *Document) Decode(s *Stream) ([]byte, error) {
 	if s == nil {
 		return nil, errors.New("пустой поток")
@@ -53,26 +53,28 @@ func (d *Document) Decode(s *Stream) ([]byte, error) {
 }
 
 func (d *Document) applyFilter(name Name, data []byte, parm Dict) ([]byte, error) {
+	limit := d.decodeLimit()
+	var out []byte
+	var err error
 	switch name {
 	case "FlateDecode", "Fl":
-		out, err := inflate(data)
+		out, err = inflate(data, limit)
 		if err != nil && len(out) == 0 {
 			return nil, fmt.Errorf("FlateDecode: %w", err)
 		}
-		return d.predict(out, parm)
+		out, err = d.predict(out, parm)
 	case "LZWDecode", "LZW":
 		early := 1
 		if v, ok := toInt(d.Resolve(parm["EarlyChange"])); ok {
 			early = v
 		}
-		out := lzwDecode(data, early == 1)
-		return d.predict(out, parm)
+		out, err = d.predict(lzwDecode(data, early == 1, limit), parm)
 	case "ASCIIHexDecode", "AHx":
-		return asciiHexDecode(data), nil
+		out = asciiHexDecode(data) // вдвое короче входа: предел не нужен
 	case "ASCII85Decode", "A85":
-		return ascii85Decode(data), nil
+		out = ascii85Decode(data, limit)
 	case "RunLengthDecode", "RL":
-		return runLengthDecode(data), nil
+		out = runLengthDecode(data, limit)
 	case "Crypt":
 		return data, nil
 	case "DCTDecode", "JPXDecode", "JBIG2Decode", "CCITTFaxDecode":
@@ -80,11 +82,16 @@ func (d *Document) applyFilter(name Name, data []byte, parm Dict) ([]byte, error
 	default:
 		return data, nil
 	}
+	if !d.spend(len(out)) {
+		return nil, ErrTooHeavy
+	}
+	return out, err
 }
 
 // inflate распаковывает zlib или голый deflate, возвращая всё, что успело
 // распаковаться: обрыв в конце потока — обычное дело в живых файлах.
-func inflate(data []byte) ([]byte, error) {
+// Больше limit байт не выдаёт.
+func inflate(data []byte, limit int) ([]byte, error) {
 	// Некоторые файлы оставляют мусор перед заголовком zlib.
 	for i := 0; i < len(data) && i < 32; i++ {
 		if !isSpace(data[i]) {
@@ -94,11 +101,11 @@ func inflate(data []byte) ([]byte, error) {
 	}
 	r, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return inflateRaw(data)
+		return inflateRaw(data, limit)
 	}
-	out, rerr := readAllLimited(r)
+	out, rerr := readAllLimited(r, limit)
 	if len(out) == 0 && rerr != nil {
-		if raw, rawErr := inflateRaw(data); rawErr == nil || len(raw) > 0 {
+		if raw, rawErr := inflateRaw(data, limit); rawErr == nil || len(raw) > 0 {
 			return raw, nil
 		}
 		return out, rerr
@@ -107,15 +114,15 @@ func inflate(data []byte) ([]byte, error) {
 }
 
 // inflateRaw распаковывает поток без заголовка zlib: попадаются и такие.
-func inflateRaw(data []byte) ([]byte, error) {
+func inflateRaw(data []byte, limit int) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
 	defer r.Close()
-	return readAllLimited(r)
+	return readAllLimited(r, limit)
 }
 
-func readAllLimited(r io.Reader) ([]byte, error) {
+func readAllLimited(r io.Reader, limit int) ([]byte, error) {
 	var buf bytes.Buffer
-	_, err := io.Copy(&buf, io.LimitReader(r, maxDecoded))
+	_, err := io.Copy(&buf, io.LimitReader(r, int64(limit)))
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return buf.Bytes(), err
 	}
@@ -260,8 +267,8 @@ func iabs(v int) int {
 
 // lzwDecode распаковывает вариант LZW из PDF. Стандартная библиотека Go не
 // умеет «раннюю смену» ширины кода (EarlyChange), принятую в PDF по умолчанию,
-// поэтому декодер написан здесь.
-func lzwDecode(data []byte, early bool) []byte {
+// поэтому декодер написан здесь. Больше limit байт не выдаёт.
+func lzwDecode(data []byte, early bool, limit int) []byte {
 	const (
 		clearCode = 256
 		eodCode   = 257
@@ -317,8 +324,8 @@ func lzwDecode(data []byte, early bool) []byte {
 			return out
 		}
 		out = append(out, entry...)
-		if len(out) > maxDecoded {
-			return out
+		if len(out) >= limit {
+			return out[:limit]
 		}
 		if prev != nil && len(table) < 4096 {
 			table = append(table, append(append([]byte{}, prev...), entry[0]))
@@ -361,12 +368,17 @@ func asciiHexDecode(data []byte) []byte {
 	return out
 }
 
-func ascii85Decode(data []byte) []byte {
+// ascii85Decode раскрывает ASCII85. «z» — четыре нулевых байта из одного
+// знака, поэтому выход бывает вчетверо больше входа: он ограничен limit.
+func ascii85Decode(data []byte, limit int) []byte {
 	var out []byte
 	var group [5]byte
 	n := 0
 	data = bytes.TrimPrefix(bytes.TrimLeft(data, " \t\r\n"), []byte("<~"))
 	for i := 0; i < len(data); i++ {
+		if len(out) >= limit {
+			return out[:limit]
+		}
 		c := data[i]
 		switch {
 		case isSpace(c):
@@ -395,7 +407,7 @@ func ascii85Decode(data []byte) []byte {
 		}
 		out = appendBase85(out, group, n)
 	}
-	return out
+	return out[:min(len(out), limit)]
 }
 
 func appendBase85(out []byte, g [5]byte, n int) []byte {
@@ -407,9 +419,11 @@ func appendBase85(out []byte, g [5]byte, n int) []byte {
 	return append(out, buf[:n-1]...)
 }
 
-func runLengthDecode(data []byte) []byte {
+// runLengthDecode раскрывает RunLength. Пара байт разворачивается в 128:
+// без предела limit цепочка Flate → RunLength превращала 256 МБ в 16 ГБ.
+func runLengthDecode(data []byte, limit int) []byte {
 	var out []byte
-	for i := 0; i < len(data); {
+	for i := 0; i < len(data) && len(out) < limit; {
 		l := int(data[i])
 		i++
 		switch {
@@ -432,7 +446,7 @@ func runLengthDecode(data []byte) []byte {
 			i++
 		}
 	}
-	return out
+	return out[:min(len(out), limit)]
 }
 
 // asArray приводит объект к массиву: одиночное значение считается массивом из

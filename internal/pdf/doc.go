@@ -31,6 +31,10 @@ type Document struct {
 	// crypt — расшифровка содержимого. Пусто у обычных документов;
 	// у зашифрованных с пустым паролем пользователя — см. crypt.go.
 	crypt *crypt
+
+	// work — остаток бюджета работы, overspent — бюджет исчерпан (budget.go).
+	work      int64
+	overspent bool
 }
 
 // Open разбирает документ из памяти.
@@ -46,6 +50,7 @@ func Open(data []byte) (doc *Document, err error) {
 		inStm:   map[int][]byte{},
 		cache:   map[int]Object{},
 		loading: map[int]bool{},
+		work:    budgetFor(len(data)),
 	}
 	d.scanObjects()
 	d.readTrailer()
@@ -58,7 +63,15 @@ func Open(data []byte) (doc *Document, err error) {
 		}
 	}
 	d.loadObjectStreams()
+	if d.overspent {
+		return nil, ErrTooHeavy
+	}
 	return d, nil
+}
+
+// heavy — ошибка исчерпанного бюджета с местом, где разбор остановился.
+func heavy(page, total int) error {
+	return fmt.Errorf("%w (разбор остановлен на странице %d из %d)", ErrTooHeavy, page, total)
 }
 
 // IsPDF сообщает, похожи ли данные на документ PDF.

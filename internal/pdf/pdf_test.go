@@ -344,10 +344,10 @@ func TestFilters(t *testing.T) {
 	if got := string(asciiHexDecode([]byte("48656C6C6F>"))); got != "Hello" {
 		t.Fatalf("ASCIIHex: %q", got)
 	}
-	if got := string(ascii85Decode([]byte("87cURD_*#TDfTZ)~>"))); got != "Hello, world" {
+	if got := string(ascii85Decode([]byte("87cURD_*#TDfTZ)~>"), maxDecoded)); got != "Hello, world" {
 		t.Fatalf("ASCII85: %q", got)
 	}
-	if got := string(runLengthDecode([]byte{2, 'a', 'b', 'c', 254, 'z', 128})); got != "abczzz" {
+	if got := string(runLengthDecode([]byte{2, 'a', 'b', 'c', 254, 'z', 128}, maxDecoded)); got != "abczzz" {
 		t.Fatalf("RunLength: %q", got)
 	}
 }

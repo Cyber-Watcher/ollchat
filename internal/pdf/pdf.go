@@ -112,6 +112,11 @@ func Extract(data []byte, opt Options) (res *Result, err error) {
 	for i := first - 1; i < last; i++ {
 		ex.unit = i + 1
 		res.Pages = append(res.Pages, Page{Number: i + 1, Text: ex.page(pages[i])})
+		// Бюджет кончился — дальше страницы вышли бы пустыми, и неполный текст
+		// выглядел бы целым. Честнее отказать прямо (см. budget.go).
+		if doc.overspent {
+			return nil, heavy(i+1, len(pages))
+		}
 	}
 
 	if ex.shown == 0 {
