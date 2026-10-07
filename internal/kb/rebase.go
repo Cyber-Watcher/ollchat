@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Перенос коллекции туда, где книги лежат по другому пути.
@@ -166,19 +168,25 @@ func swapPrefix(path, oldRoot, newRoot string) (string, bool) {
 }
 
 // writeDocs перезаписывает реестр книг целиком.
+//
+// Через fsx.WriteFileAtomic: данные доходят до диска раньше переименования.
+// До 07.10.2026 здесь были os.WriteFile и Rename без fsync, и отказ питания
+// сразу после подмены мог оставить на месте реестра пустой файл — коллекцию
+// без единой книги, хотя куски целы.
 func writeDocs(dir string, docs []BookRec) error {
+	return fsx.WriteFileAtomic(filepath.Join(dir, "docs.jsonl"), docsBytes(docs), 0o644)
+}
+
+// docsBytes — реестр книг строками JSON, как он лежит в docs.jsonl.
+func docsBytes(docs []BookRec) []byte {
 	var b strings.Builder
 	for _, d := range docs {
 		line, err := json.Marshal(d)
 		if err != nil {
-			return err
+			continue // BookRec из строк и чисел маршалится всегда
 		}
 		b.Write(line)
 		b.WriteByte('\n')
 	}
-	tmp := filepath.Join(dir, "docs.jsonl.new")
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(dir, "docs.jsonl"))
+	return []byte(b.String())
 }

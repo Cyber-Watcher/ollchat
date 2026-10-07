@@ -2,12 +2,13 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Уплотнение коллекции.
@@ -329,16 +330,10 @@ func (c *Collection) writeCompacted(tmp string, kept []BookRec, chunks int, stat
 		return err
 	}
 
-	var b strings.Builder
-	for _, rec := range kept {
-		line, err := json.Marshal(rec)
-		if err != nil {
-			return err
-		}
-		b.Write(line)
-		b.WriteByte('\n')
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "docs.jsonl"), []byte(b.String()), 0o644); err != nil {
+	// Реестр и журнал — с fsync, как и всё остальное в новом каталоге: после
+	// подмены прежнего уже не будет, и недописанный реестр означал бы
+	// коллекцию без книг.
+	if err := writeDocs(tmp, kept); err != nil {
 		return err
 	}
 
@@ -354,7 +349,7 @@ func (c *Collection) writeCompacted(tmp string, kept []BookRec, chunks int, stat
 	if err := writeJSON(filepath.Join(tmp, "meta.json"), meta); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(tmp, "journal.log"), nil, 0o644)
+	return fsx.WriteFileAtomic(filepath.Join(tmp, "journal.log"), nil, 0o644)
 }
 
 // swapIn ставит готовый каталог на место прежнего.

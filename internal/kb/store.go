@@ -321,6 +321,18 @@ func OpenStore(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Заголовок сверяется, когда кусков есть хоть один: пустое хранилище
+	// могло оборваться между созданием файлов и записью заголовка, и читать
+	// в нём нечего. До 07.10.2026 заголовок писался, но не проверялся
+	// никогда: чужой или испорченный chunks.dat открывался, и выдача
+	// показывала мусор вместо цитат.
+	if len(recs) > 0 {
+		head := make([]byte, len(storeMagic)+1)
+		if _, err := dat.ReadAt(head, 0); err != nil || string(head) != storeMagic+"\n" {
+			dat.Close()
+			return nil, fmt.Errorf("chunks.dat в %s — не хранилище кусков: нет заголовка %s", dir, storeMagic)
+		}
+	}
 	return &Store{dir: dir, recs: recs, dat: dat}, nil
 }
 

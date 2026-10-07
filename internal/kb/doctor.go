@@ -336,6 +336,11 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		b.WriteString("  Книги прочитаны, но поиск по словам этих кусков не видит: построение\n" +
 			"  индекса прервали (Ctrl+C в фазе «индекс»). Достроить — команда в конце отчёта.\n")
 	}
+	if st.BadSegments > 0 {
+		fmt.Fprintf(&b, "\nСегментов, которые не читаются: %d\n", st.BadSegments)
+		b.WriteString("  Словарь или файлы сегмента испорчены, и открытие коллекции его пропускает:\n" +
+			"  поиск по словам не видит его куски. Пересобрать индекс — команда в конце отчёта.\n")
+	}
 	if st.Segments > 6 {
 		// **Без обещания ускорить поиск.** Замер 30.08.2026 на копии живой
 		// библиотеки: 18 сегментов — 28.37 мс на запрос, тот же корпус,
@@ -394,7 +399,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 			st.Analyzer, AnalyzerVersion)
 	}
 	if len(gone)+len(scans)+len(broken)+len(thin)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
-		!st.Stale && len(del) == 0 && st.NoSegment == 0 {
+		!st.Stale && len(del) == 0 && st.NoSegment == 0 && st.BadSegments == 0 {
 		b.WriteString("\nВсё в порядке: непрочитанных, пропавших, сканов, сбоев и повторов нет.\n")
 	}
 
@@ -447,12 +452,17 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		}
 		todo = append(todo, line)
 	}
-	if st.Stale {
+	if st.Stale || st.BadSegments > 0 {
 		// Именно пересборка индекса, а не --kb-reindex: перечитанная книга
-		// получает новый номер, и граф теряет ссылки на её куски.
+		// получает новый номер, и граф теряет ссылки на её куски. Она же
+		// заменяет и испорченные сегменты: строит все заново по кускам.
+		why := "новыми правилами разбора"
+		if !st.Stale {
+			why = "заново: нечитаемые сегменты заменятся"
+		}
 		todo = append(todo, fmt.Sprintf(
-			"ollchat --kb-reanalyze %s   — пересобрать словесный индекс новыми правилами разбора\n"+
-				"      (книги не перечитываются; куски, векторы и граф не затрагиваются)", c.Name()))
+			"ollchat --kb-reanalyze %s   — пересобрать словесный индекс %s\n"+
+				"      (книги не перечитываются; куски, векторы и граф не затрагиваются)", c.Name(), why))
 	}
 	if len(todo) > 0 {
 		b.WriteString("\nЧто сделать:\n")
@@ -485,6 +495,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		editions:  dups,
 		deleted:   len(del),
 		noSegment: st.NoSegment,
+		badSegs:   st.BadSegments,
 		segments:  st.Segments,
 		stale:     st.Stale,
 	}
@@ -659,6 +670,7 @@ type summary struct {
 	editions  int
 	deleted   int
 	noSegment int
+	badSegs   int
 	segments  int
 	stale     bool
 }
@@ -675,6 +687,7 @@ func (s summary) String() string {
 	rows := []row{
 		{s.unindexed, "не в индексе — поиск их не находит"},
 		{s.noSegment, "кусков без словесного индекса — поиск по словам их не видит"},
+		{s.badSegs, "сегментов не читаются — поиск по словам не видит их куски"},
 		{s.copies, "копии на диске — индексация их пропускает"},
 		{s.gone, "пропали с диска, но ещё в выдаче"},
 		{s.broken, "не прочитались"},

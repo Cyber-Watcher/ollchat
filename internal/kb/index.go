@@ -884,16 +884,34 @@ func (c *Collection) markDeleted(id uint32) error {
 	if c.deleted[id] {
 		return nil
 	}
-	f, err := os.OpenFile(filepath.Join(c.dir, "deleted.ids"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := fmt.Fprintf(f, "%d\n", id); err != nil {
+	if err := appendLine(filepath.Join(c.dir, "deleted.ids"), []byte(fmt.Sprintf("%d\n", id))); err != nil {
 		return err
 	}
 	c.deleted[id] = true
 	return nil
+}
+
+// appendLine дописывает строку в файл коллекции и доводит её до диска.
+//
+// fsync на каждую строку, и это не расточительство: реестр, пометки удалённых
+// и журнал коммитов дописываются по строке на книгу, а книга разбирается
+// секундами. До 07.10.2026 дозапись шла без fsync, хотя куски той же книги
+// Commit доводил до диска: после отказа питания журнал мог помнить книгу,
+// которой нет в реестре, а пометка удаления — пропасть, вернув книгу в выдачу.
+func appendLine(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // appendDoc дописывает запись о книге в реестр.
@@ -904,12 +922,7 @@ func (c *Collection) appendDoc(rec BookRec) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	f, err := os.OpenFile(filepath.Join(c.dir, "docs.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	if err := appendLine(filepath.Join(c.dir, "docs.jsonl"), append(data, '\n')); err != nil {
 		return err
 	}
 	if i, ok := c.byPath[rec.Path]; ok {
@@ -935,12 +948,7 @@ func (c *Collection) journal(state StoreState, doc uint32) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(c.dir, "journal.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	if err := appendLine(filepath.Join(c.dir, "journal.log"), append(data, '\n')); err != nil {
 		return err
 	}
 	c.mu.Lock()

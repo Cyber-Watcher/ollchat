@@ -438,6 +438,39 @@ func TestDeletedBookStaysHidden(t *testing.T) {
 	}
 }
 
+// Сегмент, который не читается, открытие пропускает, а доктор называет
+// и советует пересборку индекса: иначе его куски молча выпали бы из поиска.
+func TestDoctorReportsUnreadableSegment(t *testing.T) {
+	base, coll, _ := syncFixture(t)
+	dirs, err := segmentDirs(coll.Dir())
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("подготовка: сегментов нет: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs[0], "terms.dic"), []byte{0, 1, 'a', 0xff}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base.Close()
+
+	base2, err := OpenBase(base.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base2.Close()
+	c2, err := base2.Open("docs")
+	if err != nil {
+		t.Fatalf("испорченный сегмент не дал открыть коллекцию: %v", err)
+	}
+	if n := c2.Stats().BadSegments; n != 1 {
+		t.Fatalf("нечитаемых сегментов %d, ожидался один", n)
+	}
+	report := Doctor(c2, DoctorOpts{})
+	for _, want := range []string{"не читаются", "ollchat --kb-reanalyze docs"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("доктор не сказал %q:\n%s", want, report)
+		}
+	}
+}
+
 // texts0 — тексты всех кусков хранилища коллекции.
 func texts0(t *testing.T, c *Collection) []string {
 	t.Helper()

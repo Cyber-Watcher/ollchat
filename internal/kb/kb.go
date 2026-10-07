@@ -951,6 +951,11 @@ type Stats struct {
 	// (Ctrl+C в фазе «индекс»); достраивает их любая доливка.
 	NoSegment int
 
+	// BadSegments — готовые сегменты (с seg.meta), которые не открылись:
+	// испорчен словарь или файлы. Открытие их пропускает, и поиск по словам
+	// молча не видит их куски; лечится пересборкой индекса (--kb-reanalyze).
+	BadSegments int
+
 	Vectors  int    // сколько кусков обеспечено смыслами
 	VecModel string // какой моделью посчитаны
 	VecDim   int
@@ -988,6 +993,9 @@ func (c *Collection) Stats() Stats {
 		if end := s.meta.FirstID + s.meta.Chunks; end > covered {
 			covered = end
 		}
+	}
+	if dirs, err := segmentDirs(c.dir); err == nil && len(dirs) > len(c.segs) {
+		st.BadSegments = len(dirs) - len(c.segs)
 	}
 	if c.store != nil && c.store.Count() > covered {
 		live := c.liveDocs()

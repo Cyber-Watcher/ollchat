@@ -2,6 +2,7 @@ package kb
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -329,6 +330,92 @@ func TestSegmentSurvivesReopen(t *testing.T) {
 			t.Fatalf("открытие %d: постинги потеряны (%v)", i, err)
 		}
 		seg.Close()
+	}
+}
+
+// Испорченный словарь сегмента — ошибка открытия, а не мусор и не паника.
+//
+// Последние поля записи словаря (частота, смещение, длина) читались без
+// проверки: переполненное число давало отрицательный сдвиг и панику на срезе
+// посреди открытия коллекции, а ссылка за конец post.dat принималась молча.
+func TestOpenSegmentRejectsCorruptDictionary(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := CreateWriter(dir)
+	w.Append(1, chunksOf("Горутины и каналы составляют основу конкурентности в Go. "+filler(5)))
+	w.Commit()
+	w.Close()
+	store, _ := OpenStore(dir)
+	defer store.Close()
+	segDir := filepath.Join(dir, "seg-00001")
+	if _, err := BuildSegment(segDir, store, 0, store.Count(), nil); err != nil {
+		t.Fatal(err)
+	}
+	dic := filepath.Join(segDir, "terms.dic")
+	good, err := os.ReadFile(dic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overflow := []byte{0, 1, 'a', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	beyond := []byte{0, 1, 'a', 1, 0, 0xff, 0x7f} // постинги длиной 16383 байта с нуля
+	for name, raw := range map[string][]byte{
+		"переполнение":    overflow,
+		"за концом post":  beyond,
+		"обрыв записи":    good[:len(good)-1],
+		"хвост без полей": append(append([]byte{}, good...), 0, 1, 'z'),
+	} {
+		if err := os.WriteFile(dic, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: паника при открытии сегмента: %v", name, r)
+				}
+			}()
+			if seg, err := OpenSegment(segDir); err == nil {
+				seg.Close()
+				t.Errorf("%s: испорченный словарь принят", name)
+			}
+		}()
+	}
+}
+
+// Хранилище с чужим заголовком не открывается: иначе выдача показывала бы
+// мусор вместо цитат. Заголовок писался всегда, но не проверялся.
+func TestOpenStoreChecksMagic(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := CreateWriter(dir)
+	w.Append(1, chunksOf("кусок книги"))
+	w.Commit()
+	w.Close()
+	if s, err := OpenStore(dir); err != nil {
+		t.Fatalf("целое хранилище не открылось: %v", err)
+	} else {
+		s.Close()
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "chunks.dat"), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteAt([]byte("GARBAGE"), 0)
+	f.Close()
+	if s, err := OpenStore(dir); err == nil {
+		s.Close()
+		t.Fatal("хранилище с чужим заголовком открылось")
+	}
+
+	// Пустое хранилище без заголовка — обрыв сразу после создания файлов —
+	// открывается: читать в нём нечего.
+	empty := t.TempDir()
+	for _, name := range []string{"chunks.dat", "chunks.idx"} {
+		if err := os.WriteFile(filepath.Join(empty, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s, err := OpenStore(empty); err != nil {
+		t.Fatalf("пустое хранилище не открылось: %v", err)
+	} else {
+		s.Close()
 	}
 }
 
