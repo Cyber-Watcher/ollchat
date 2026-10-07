@@ -3,8 +3,11 @@ package ollama
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -229,6 +232,82 @@ func TestChatCancelStopsPromptly(t *testing.T) {
 	}
 	if elapsed > serverDelay {
 		t.Errorf("отмена сработала за %v — щедрый chatTimeout не должен её задерживать", elapsed)
+	}
+}
+
+// trackBody — тело ответа, сообщающее о закрытии: Chat закрывает его, только
+// когда горутина потока завершилась.
+type trackBody struct {
+	io.Reader
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (b *trackBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Потребитель, отменивший запрос и бросивший канал, не держит горутину
+// потока: прежде она навсегда висела на полном канале вместе с телом ответа.
+func TestChatReleasesAbandonedStream(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		b.WriteString(`{"message":{"role":"assistant","content":"слово "},"done":false}` + "\n")
+	}
+	body := &trackBody{Reader: strings.NewReader(b.String()), closed: make(chan struct{})}
+	c := New("http://ollama.invalid", time.Second, time.Second, nil)
+	c.chatHTTP.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: http.Header{}}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := c.Chat(ctx, ChatRequest{Model: "m"})
+	// Канал полон, горутина ждёт читателя, которого больше не будет.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(ch) < cap(ch) {
+		if time.Now().After(deadline) {
+			t.Fatalf("канал не заполнился: %d из %d", len(ch), cap(ch))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case <-body.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("горутина потока висит после отмены: тело ответа не закрыто")
+	}
+}
+
+// Потребитель, отменивший запрос, но дочитывающий канал, по-прежнему
+// получает последнее событие — ErrCanceled, а не молча закрытый поток.
+func TestChatCancelStillDeliversLastEvent(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	c := New("http://ollama.invalid", time.Second, time.Second, nil)
+	c.chatHTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		// Тело рвётся вместе с запросом — как у настоящего транспорта.
+		go func() { <-r.Context().Done(); pw.CloseWithError(r.Context().Err()) }()
+		return &http.Response{StatusCode: http.StatusOK, Body: pr, Header: http.Header{}}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := c.Chat(ctx, ChatRequest{Model: "m"})
+	go func() {
+		_, _ = pw.Write([]byte(`{"message":{"role":"assistant","content":"начало"},"done":false}` + "\n"))
+		cancel()
+	}()
+	var last Event
+	for ev := range ch {
+		last = ev
+	}
+	if last.Kind != EventError || !errors.Is(last.Err, ErrCanceled) {
+		t.Fatalf("последнее событие %+v, ожидался ErrCanceled", last)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // EventKind — вид события потока генерации.
@@ -86,12 +87,38 @@ func Retryable(err error) bool {
 // обрыв («поток кончился без завершающего чанка») тем же признаком.
 func MarkRetryable(err error) error { return &RetryableError{Err: err} }
 
+// sendGrace — сколько событие ждёт потребителя, отменившего запрос.
+// Секунды хватает тому, кто дочитывает канал до конца, а ушедший держит
+// горутину не дольше этого.
+const sendGrace = time.Second
+
 // Chat запускает генерацию и возвращает канал событий. Канал закрывается после
 // EventDone или EventError. Прерывание — отменой ctx.
 func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 	out := make(chan Event, 64)
 
 	parent := ctx
+	// send отдаёт событие потребителю, пока тот слушает. Раньше отправка
+	// была голой: потребитель, отменивший запрос и бросивший канал, оставлял
+	// горутину на полном канале навсегда — вместе с телом ответа и
+	// соединением. После отмены событие ещё ждёт sendGrace: вызывающие
+	// (agent.drain, graphex, сжатие истории) дочитывают канал до конца
+	// и ждут последнего события — его они получают, как прежде.
+	send := func(ev Event) bool {
+		select {
+		case out <- ev:
+			return true
+		case <-parent.Done():
+		}
+		t := time.NewTimer(sendGrace)
+		defer t.Stop()
+		select {
+		case out <- ev:
+			return true
+		case <-t.C:
+			return false
+		}
+	}
 	go func() {
 		defer close(out)
 
@@ -104,14 +131,14 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 		req.Stream = true
 		httpReq, err := c.newRequest(ctx, http.MethodPost, "/api/chat", req)
 		if err != nil {
-			out <- Event{Kind: EventError, Err: err}
+			send(Event{Kind: EventError, Err: err})
 			return
 		}
 
 		resp, err := c.chatHTTP.Do(httpReq)
 		if err != nil {
 			if ctx.Err() != nil {
-				out <- Event{Kind: EventError, Err: ErrCanceled}
+				send(Event{Kind: EventError, Err: ErrCanceled})
 				return
 			}
 			// Сетевой сбой — соединение можно попробовать установить заново.
@@ -119,8 +146,8 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 			// через ssh-туннель, и 01.09.2026 семь секунд его переподъёма стоили
 			// целого захода — отказ в соединении сочли неустранимым и остановили
 			// всё. Адрес на месте, слушателя нет **сейчас**: это и надо повторять.
-			out <- Event{Kind: EventError,
-				Err: MarkRetryable(fmt.Errorf("запрос к %s: %w", c.baseURL, err))}
+			send(Event{Kind: EventError,
+				Err: MarkRetryable(fmt.Errorf("запрос к %s: %w", c.baseURL, err))})
 			return
 		}
 		defer resp.Body.Close()
@@ -130,10 +157,10 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 			// 5xx — сбой на стороне сервера, его есть смысл повторить.
 			// 4xx означает неверный запрос: повтор ничего не изменит.
 			if resp.StatusCode >= 500 {
-				out <- Event{Kind: EventError, Err: MarkRetryable(srvErr)}
+				send(Event{Kind: EventError, Err: MarkRetryable(srvErr)})
 				return
 			}
-			out <- Event{Kind: EventError, Err: srvErr}
+			send(Event{Kind: EventError, Err: srvErr})
 			return
 		}
 
@@ -147,8 +174,8 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 			if err := dec.Decode(&chunk); err != nil {
 				if errors.Is(err, io.EOF) {
 					// Поток закончился без финального чанка — считаем это обрывом.
-					out <- Event{Kind: EventError,
-						Err: MarkRetryable(errors.New("поток ответа оборван сервером"))}
+					send(Event{Kind: EventError,
+						Err: MarkRetryable(errors.New("поток ответа оборван сервером"))})
 					return
 				}
 				if ctx.Err() != nil {
@@ -156,16 +183,16 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 					// — обычное дело, второе — беда на сервере, и говорить
 					// о ней надо прямо.
 					if parent.Err() == nil && c.stallTimeout > 0 {
-						out <- Event{Kind: EventError, Err: MarkRetryable(fmt.Errorf(
+						send(Event{Kind: EventError, Err: MarkRetryable(fmt.Errorf(
 							"сервер молчит дольше %s — вероятно, запрос стоит в очереди "+
 								"за другой моделью; предел меняется настройкой stall_timeout",
-							c.stallTimeout))}
+							c.stallTimeout))})
 						return
 					}
-					out <- Event{Kind: EventError, Err: ErrCanceled}
+					send(Event{Kind: EventError, Err: ErrCanceled})
 					return
 				}
-				out <- Event{Kind: EventError, Err: MarkRetryable(fmt.Errorf("разбор ответа: %w", err))}
+				send(Event{Kind: EventError, Err: MarkRetryable(fmt.Errorf("разбор ответа: %w", err))})
 				return
 			}
 
@@ -173,22 +200,28 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 				// Сервер сообщил о сбое прямо в потоке — генерация не удалась.
 				// Такое бывает, например, когда сервер не может разобрать вывод
 				// модели; повтор запроса обычно проходит успешно.
-				out <- Event{Kind: EventError, Err: MarkRetryable(errors.New(chunk.Error))}
+				send(Event{Kind: EventError, Err: MarkRetryable(errors.New(chunk.Error))})
 				return
 			}
 
 			if len(chunk.Message.ToolCalls) > 0 {
-				out <- Event{Kind: EventToolCalls, ToolCalls: chunk.Message.ToolCalls}
+				if !send(Event{Kind: EventToolCalls, ToolCalls: chunk.Message.ToolCalls}) {
+					return
+				}
 			}
 			if chunk.Message.Thinking != "" {
-				out <- Event{Kind: EventThinking, Text: chunk.Message.Thinking}
+				if !send(Event{Kind: EventThinking, Text: chunk.Message.Thinking}) {
+					return
+				}
 			}
 			if chunk.Message.Content != "" {
-				out <- Event{Kind: EventContent, Text: chunk.Message.Content}
+				if !send(Event{Kind: EventContent, Text: chunk.Message.Content}) {
+					return
+				}
 			}
 
 			if chunk.Done {
-				out <- Event{Kind: EventDone, Stats: Stats{
+				send(Event{Kind: EventDone, Stats: Stats{
 					PromptEvalCount:    chunk.PromptEvalCount,
 					PromptEvalDuration: chunk.PromptEvalDuration,
 					EvalCount:          chunk.EvalCount,
@@ -196,7 +229,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 					LoadDuration:       chunk.LoadDuration,
 					EvalDuration:       chunk.EvalDuration,
 					DoneReason:         chunk.DoneReason,
-				}}
+				}})
 				return
 			}
 		}
