@@ -366,7 +366,10 @@ backup_configs() {
     dest="$home/ollobackups/$stamp"
 
     step "Резервная копия настроек"
-    mkdir -p "$dest"
+    # Каталог копии закрыт с самого создания: в Environment= юнита
+    # и в манифесте бывают ключи и пароли прокси, а копируется всё это
+    # раньше, чем доходит до прав в конце.
+    install -d -m 0700 "$dest"
 
     local saved=0
     if [ -f "$UNIT_FILE" ]; then
@@ -408,12 +411,15 @@ backup_configs() {
 
     [ "$saved" -eq 1 ] || warn "файлов настроек не нашлось — сохранён только манифест"
 
-    # Права: каталог должен остаться доступным тому, кто запускал скрипт.
+    # Права: копия принадлежит тому, кто запускал скрипт, и только ему.
+    # Прежде файлы получали 0644, и значения Environment= — ключи, пароли
+    # прокси — читал любой пользователь машины.
     local group
     group=$(id -gn "$user" 2>/dev/null || echo "$user")
     chown -R "$user:$group" "$home/ollobackups"
-    chmod 755 "$home/ollobackups" "$dest"
-    find "$dest" -type f -exec chmod 644 {} +
+    chmod 755 "$home/ollobackups"
+    find "$dest" -type d -exec chmod 700 {} +
+    find "$dest" -type f -exec chmod 600 {} +
 
     say ""
     ok "копия: $dest (владелец $user)"
@@ -439,20 +445,40 @@ restore_configs() {
     [ -d "$src" ] || die "каталог резервной копии не найден: $src"
 
     step "Восстановление настроек из $src"
-    if [ -f "$src/ollama.service" ]; then
-        cp -a "$src/ollama.service" "$UNIT_FILE"
+    # Копия лежит у пользователя и принадлежит ему, а cp -a переносил
+    # владельца вместе с файлом: unit root-службы и её переопределения
+    # становились файлами пользователя, и любой его процесс — хоть bash
+    # агента — вписал бы ExecStartPre=+ и получил root при перезапуске.
+    # Поэтому файлы ставятся заново: владелец root, права 0644, каталог 0755.
+    # Ссылки и всё, что не обычный файл, пропускаются: ссылка из копии
+    # заставила бы root прочитать чужой файл и выложить его в /etc.
+    if regular "$src/ollama.service"; then
+        install -o root -g root -m 0644 "$src/ollama.service" "$UNIT_FILE"
         ok "unit-файл службы"
     fi
-    if [ -d "$src/ollama.service.d" ]; then
-        mkdir -p "$OVERRIDE_DIR"
-        cp -a "$src/ollama.service.d/." "$OVERRIDE_DIR/"
+    if [ -d "$src/ollama.service.d" ] && [ ! -L "$src/ollama.service.d" ]; then
+        install -d -o root -g root -m 0755 "$OVERRIDE_DIR"
+        local f
+        for f in "$src/ollama.service.d"/*; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            if ! regular "$f"; then
+                warn "пропускаю $(basename "$f"): не обычный файл"
+                continue
+            fi
+            install -o root -g root -m 0644 "$f" "$OVERRIDE_DIR/"
+        done
         ok "переопределения службы"
     fi
-    for extra in ollama; do
-        [ -e "$src/$extra" ] && [ ! -e /etc/default/ollama ] && cp -a "$src/$extra" /etc/default/ollama && ok "/etc/default/ollama"
-    done
+    if regular "$src/ollama" && [ ! -e /etc/default/ollama ]; then
+        install -o root -g root -m 0644 "$src/ollama" /etc/default/ollama
+        ok "/etc/default/ollama"
+    fi
     systemctl daemon-reload
 }
+
+# regular — обычный файл, а не ссылка: install идёт по ссылке и прочитал бы
+# от имени root то, на что она указывает.
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 
 # ── Установка ────────────────────────────────────────────────────────────────
 
