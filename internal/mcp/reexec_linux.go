@@ -182,19 +182,32 @@ func Reexec() error {
 }
 
 // serveWatched — сам цикл; exec подставляется, чтобы тест не заменял себя.
+//
+// Вызовы инструментов идут в своих горутинах (session.go), поэтому подмена
+// ждёт не только пустого буфера, но и конца начатых вызовов: их ответы exec
+// выбросил бы вместе с процессом. Замеченная подмена запоминается (pending):
+// правку настроек replaced сообщает один раз.
 func serveWatched(ctx context.Context, srv *Server, in *os.File, outW io.Writer, verbose bool,
 	w *binaryWatch, exec func() error) error {
 	r := bufio.NewReaderSize(in, 1<<20)
-	out := bufio.NewWriter(outW)
-	defer out.Flush()
+	sess := newSession(srv, bufio.NewWriter(outW), verbose)
+	defer sess.close()
 	fds := []unix.PollFd{{Fd: int32(in.Fd()), Events: unix.POLLIN}}
+	pending := false
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if err := sess.err(); err != nil {
+			return err
+		}
 		if r.Buffered() == 0 {
-			if w != nil && w.replaced() {
-				if err := out.Flush(); err != nil {
+			if w != nil && !pending && w.replaced() {
+				pending = true
+			}
+			if pending && sess.idle() {
+				pending = false
+				if err := sess.flush(); err != nil {
 					return err
 				}
 				fmt.Fprintln(os.Stderr, "ollmcp: перезапускаюсь (новый бинарь или настройки)")
@@ -217,12 +230,13 @@ func serveWatched(ctx context.Context, srv *Server, in *os.File, outW io.Writer,
 		}
 		line, err := readLine(r)
 		if err == io.EOF {
-			return nil
+			sess.wait()
+			return sess.err()
 		}
 		if err != nil {
 			return err
 		}
-		if err := handleLine(ctx, srv, line, out, verbose); err != nil {
+		if err := sess.handle(ctx, line); err != nil {
 			return err
 		}
 	}

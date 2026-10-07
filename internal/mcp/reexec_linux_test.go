@@ -87,6 +87,76 @@ func TestServeWatchedReexecOnReplace(t *testing.T) {
 	}
 }
 
+// Подмена ждёт конца начатого вызова: вызовы идут в своих горутинах
+// (session.go), и пустого буфера входа для exec уже мало — ответ вызова,
+// не записанный до exec, пропал бы вместе с процессом.
+func TestServeWatchedReexecWaitsForCall(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ollmcp")
+	if err := os.WriteFile(bin, []byte("старый"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(bin, &st); err != nil {
+		t.Fatal(err)
+	}
+	w := &binaryWatch{path: bin, dev: uint64(st.Dev), ino: uint64(st.Ino)}
+
+	release, started, cancelled := make(chan struct{}), make(chan struct{}, 1), make(chan struct{}, 1)
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outR, outW := io.Pipe()
+	execs := make(chan struct{}, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveWatched(context.Background(), server(slowTool(release, started, cancelled)),
+			inR, outW, false, w, func() error {
+				execs <- struct{}{}
+				return errors.New("exec в тесте не делается")
+			})
+		outW.Close()
+	}()
+	replies := bufio.NewReader(outR)
+	if _, err := inW.WriteString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"долгий","arguments":{}}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	fresh := bin + ".new"
+	if err := os.WriteFile(fresh, []byte("новый"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(fresh, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(fresh, bin); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-execs:
+		t.Fatal("exec посреди вызова: его ответ пропал бы")
+	case <-time.After(2500 * time.Millisecond):
+	}
+
+	close(release)
+	line, err := replies.ReadString('\n')
+	if err != nil || !strings.Contains(line, `"id":1`) {
+		t.Fatalf("ответ на вызов: %q, %v", line, err)
+	}
+	select {
+	case <-execs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("после конца вызова подмены не было")
+	}
+	inW.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("цикл вернул ошибку: %v", err)
+	}
+}
+
 // Правка файла настроек перезапускает службу так же, как подмена бинаря,
 // а негодная правка — нет: служба остаётся на прежних настройках.
 func TestSettingsChangeTriggersReexec(t *testing.T) {
