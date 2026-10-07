@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
@@ -135,5 +137,130 @@ func TestCompactDoneFallsBackToTruncation(t *testing.T) {
 	}
 	if got := m.conv.Messages(); len(got) < 6 || strings.Contains(got[0].Content, "Сводка") {
 		t.Fatalf("ожидалась обрезка без сводки: %d сообщений", len(got))
+	}
+}
+
+// compactingModel — чат без инструментов с полным окном: Enter запускает
+// сжатие истории, и вопрос ждёт его конца.
+func compactingModel(t *testing.T) *Model {
+	t.Helper()
+	m := newTestModel(t)
+	m.cfg.Agent.CompactAt, m.cfg.Agent.CompactKeep = 0.75, 6
+	m.modelCaps, m.modelRealTools = nil, false
+	m.meter = ctxmeter.Meter{Capacity: 1000, Used: 900, Exact: true}
+	fillHistory(m, 10)
+	// Вопрос после сжатия уходит в ход; в конце теста ход закрывается.
+	t.Cleanup(m.stopStreaming)
+	return m
+}
+
+// ask набирает вопрос и жмёт Enter, как человек.
+func ask(m *Model, text string) tea.Cmd {
+	m.ta.SetValue(text)
+	_, cmd := m.Update(pressKey(tea.KeyEnter))
+	return cmd
+}
+
+// Второй Enter во время сжатия запускал второе Summarize, ответ на первое
+// отбрасывался по поколению — и первый вопрос пропадал (аудит 07.10.2026).
+func TestCompactionTakesNoSecondQuestion(t *testing.T) {
+	m := compactingModel(t)
+	if cmd := ask(m, "первый вопрос"); cmd == nil || !m.compacting {
+		t.Fatal("подготовка: сжатие не началось")
+	}
+	gen := m.gen.compact
+
+	ask(m, "второй вопрос")
+	if m.gen.compact != gen {
+		t.Fatal("второй Enter запустил второе сжатие")
+	}
+	if m.ta.Value() != "второй вопрос" {
+		t.Errorf("набранное не должно пропадать из поля: %q", m.ta.Value())
+	}
+	if !strings.Contains(m.statusMsg, "сжимаю") {
+		t.Errorf("человеку не сказано, почему вопрос не ушёл: %q", m.statusMsg)
+	}
+
+	m.Update(compactDoneMsg{gen: gen, text: "первый вопрос", summary: "- сводка"})
+	if m.compacting {
+		t.Error("сжатие не закрыто")
+	}
+	msgs := m.conv.Messages()
+	if last := msgs[len(msgs)-1]; last.Content != "первый вопрос" {
+		t.Fatalf("после сжатия ушёл не первый вопрос: %q", last.Content)
+	}
+}
+
+// Esc прерывает сжатие — и только его: индексация, идущая рядом, живёт дальше.
+// Вопрос ещё не ушёл никуда и возвращается в поле ввода.
+func TestEscCancelsCompaction(t *testing.T) {
+	m := compactingModel(t)
+	idleJob(t, m)
+	ask(m, "вопрос")
+	gen := m.gen.compact
+
+	m.Update(keyPress("esc"))
+	if m.compacting {
+		t.Fatal("Esc не прервал сжатие")
+	}
+	if m.job == nil {
+		t.Fatal("Esc остановил индексацию вместо сжатия")
+	}
+	if m.ta.Value() != "вопрос" {
+		t.Errorf("вопрос не вернулся в поле ввода: %q", m.ta.Value())
+	}
+	n := m.conv.Len()
+	m.Update(compactDoneMsg{gen: gen, text: "вопрос", summary: "- сводка"})
+	if m.conv.Len() != n || m.streaming {
+		t.Fatal("ответ прерванного сжатия применён")
+	}
+}
+
+// /clear и смена сервера бросают сжатие: сводка прежней истории не ложится
+// в очищенную, а вопрос не уходит туда, куда его не задавали.
+func TestCompactionDroppedOnClearAndServerSwitch(t *testing.T) {
+	cases := map[string]func(m *Model){
+		"/clear":        func(m *Model) { m.clearCmd("") },
+		"смена сервера": func(m *Model) { m.switchServer(m.cfg.Servers[0].Name) },
+	}
+	for name, do := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := compactingModel(t)
+			ask(m, "вопрос")
+			gen := m.gen.compact
+
+			do(m)
+			if m.compacting {
+				t.Fatal("сжатие не брошено")
+			}
+			n := m.conv.Len()
+			m.Update(compactDoneMsg{gen: gen, text: "вопрос", summary: "- сводка прежней истории"})
+			if m.conv.Len() != n || m.streaming {
+				t.Fatalf("ответ брошенного сжатия применён: %d → %d сообщений", n, m.conv.Len())
+			}
+			if m.ta.Value() != "вопрос" {
+				t.Errorf("вопрос не вернулся человеку: %q", m.ta.Value())
+			}
+		})
+	}
+}
+
+// Файл /add, дочитанный во время сжатия, ложится в историю после сводки
+// и до вопроса: иначе CompactWith вытеснил бы им из хвоста сообщение,
+// которого нет и в сводке.
+func TestAttachWaitsForCompaction(t *testing.T) {
+	m := compactingModel(t)
+	ask(m, "что в файле?")
+	gen := m.gen.compact
+
+	m.Update(attachMsg{rel: "a.txt", body: "содержимое", notice: "файл a.txt приложен к контексту"})
+	if m.conv.Len() != 10 {
+		t.Fatalf("файл лёг в историю посреди сжатия: %d сообщений", m.conv.Len())
+	}
+	m.Update(compactDoneMsg{gen: gen, text: "что в файле?", summary: "- сводка"})
+	msgs := m.conv.Messages()
+	if len(msgs) < 2 || !strings.Contains(msgs[len(msgs)-2].Content, "содержимое") ||
+		msgs[len(msgs)-1].Content != "что в файле?" {
+		t.Fatalf("файл и вопрос не на своих местах: %+v", msgs)
 	}
 }

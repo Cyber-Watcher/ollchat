@@ -165,6 +165,14 @@ type Model struct {
 	// сослались на один и тот же обмен.
 	turnID string
 
+	// compacting — история сжимается сводкой, а вопрос compactText ждёт
+	// конца сжатия (его отправит onCompactDone). Это занятое состояние, как
+	// ход: второй Enter не принимается, Esc сжатие прерывает, а
+	// compactCancel обрывает запрос к серверу.
+	compacting    bool
+	compactText   string
+	compactCancel context.CancelFunc
+
 	// Подтверждение действия.
 	confirm       *agent.ConfirmRequest
 	confirmScroll int
@@ -1139,16 +1147,53 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 	keepAlive, options := m.server.KeepAlive, maps.Clone(m.server.Options)
 	m.gen.compact++
 	gen := m.gen.compact
-	m.statusMsg = "сжимаю историю сводкой…"
+	// Сжатие — занятое состояние, как ход: раньше второй Enter запускал
+	// второе Summarize, а ответ на первое отбрасывался по поколению вместе
+	// с первым вопросом; Esc сжатие не прерывал (аудит 07.10.2026).
+	ctx, cancel := contextWithTimeout(300)
+	m.compacting, m.compactText, m.compactCancel = true, text, cancel
+	m.statusMsg = "сжимаю историю сводкой… Esc — прервать"
 	m.addBlock(block{kind: blockHint, text: fmt.Sprintf(
 		"окно заполнено на %d%% — сжимаю %d сообщений сводкой моделью %s, вопрос уйдёт следом",
 		100*m.meter.Used/m.meter.Capacity, len(older), model)})
 	return tea.Batch(m.spin.Tick, func() tea.Msg {
-		ctx, cancel := contextWithTimeout(300)
 		defer cancel()
 		summary, stats, err := session.Summarize(ctx, client, model, older, keepAlive, options)
 		return compactDoneMsg{gen: gen, text: text, summary: summary, stats: stats, err: err}
 	}), true
+}
+
+// cancelCompaction бросает идущее сжатие: запрос к серверу обрывается, а его
+// ответ, если всё же придёт, отбросится по поколению. Отдаёт вопрос, который
+// ждал сжатия.
+func (m *Model) cancelCompaction() (string, bool) {
+	if !m.compacting {
+		return "", false
+	}
+	if m.compactCancel != nil {
+		m.compactCancel()
+	}
+	m.gen.compact++
+	text := m.compactText
+	m.compacting, m.compactText, m.compactCancel = false, "", nil
+	m.statusMsg = ""
+	return text, true
+}
+
+// abortCompaction прерывает сжатие и возвращает человеку его вопрос: тот ещё
+// не ушёл ни модели, ни в ленту, и молча пропасть не должен.
+func (m *Model) abortCompaction(why string) {
+	text, ok := m.cancelCompaction()
+	if !ok {
+		return
+	}
+	where := "стрелка вверх вернёт его"
+	if strings.TrimSpace(m.ta.Value()) == "" {
+		m.setInput(text)
+		where = "он возвращён в поле ввода"
+	}
+	m.addBlock(block{kind: blockNotice, text: why + ": сжатие истории прервано, вопрос не отправлен — " + where})
+	m.flushHeldAttach()
 }
 
 // onCompactDone кладёт сводку в историю (или обрезает, если сводки нет)
@@ -1157,6 +1202,7 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != m.gen.compact {
 		return m, nil
 	}
+	m.compacting, m.compactText, m.compactCancel = false, "", nil
 	m.statusMsg = ""
 	keep := m.cfg.Agent.CompactKeep
 	var dropped int
@@ -1183,5 +1229,8 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	// врёт, и повторного сжатия на нём не будет.
 	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
 	m.meter.Exact = false
+	// Файлы /add, дочитанные во время сжатия, — до вопроса: их прикладывали
+	// к нему.
+	m.flushHeldAttach()
 	return m, m.send(msg.text)
 }

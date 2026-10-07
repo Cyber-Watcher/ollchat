@@ -167,7 +167,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// инструмента, следом его результат. Вложение, вставшее между ними,
 		// ломает порядок, которого требует сервер (аудит 07.10.2026). Файл
 		// уже прочитан — в историю он ляжет, как только ход кончится.
-		if m.streaming {
+		// Во время сжатия тоже: CompactWith оставит последние N сообщений,
+		// и вложение вытеснило бы из хвоста то, чего нет и в сводке.
+		if m.streaming || m.compacting {
 			m.heldAttach = append(m.heldAttach, msg)
 			m.statusMsg = "файл " + msg.rel + " приложится после ответа модели"
 			return m, nil
@@ -191,7 +193,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// диалог пропадал (аудит 07.10.2026). Сессия дочиталась, когда вопрос
 		// уже задан; восстанавливать её поверх ответа нельзя, а повторить
 		// команду дёшево.
-		if m.streaming || m.mixing {
+		if m.streaming || m.mixing || m.compacting {
 			again := strings.TrimSpace("/resume " + msg.rec.ID)
 			m.addBlock(block{kind: blockError, text: "сессия не восстановлена: она дочиталась, " +
 				"когда уже шёл ответ модели. Повторите " + again + " после ответа"})
@@ -414,6 +416,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.stopStreaming()
 			m.addBlock(block{kind: blockNotice, text: "генерация прервана"})
 		}
+		m.abortCompaction("Ctrl+C")
 		m.statusMsg = "нажмите Ctrl+C ещё раз для выхода"
 		return m, nil
 	}
@@ -477,6 +480,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.addBlock(block{kind: blockNotice, text: "генерация прервана"})
 			return m, nil
 		}
+		// Сжатие истории — часть хода: Esc прерывает его, а не индексацию,
+		// идущую рядом.
+		if m.compacting {
+			m.abortCompaction("Esc")
+			return m, nil
+		}
 		// Вне генерации Esc останавливает индексацию книг: другой длительной
 		// работы в приложении нет.
 		if m.job != nil {
@@ -495,6 +504,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// истории диалога — два вопроса подряд без ответа между ними.
 		if m.mixing {
 			m.statusMsg = "готовлю знания к вопросу — Esc отменяет"
+			return m, nil
+		}
+		// То же со сжатием: вопрос принят и уйдёт сам, а второй Enter запускал
+		// второе сжатие и терял первый вопрос.
+		if m.compacting {
+			m.statusMsg = "сжимаю историю — вопрос уйдёт следом, Esc отменяет"
 			return m, nil
 		}
 		text := m.ta.Value()

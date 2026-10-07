@@ -354,6 +354,8 @@ func (m *Model) clearCmd(_ string) tea.Cmd {
 	m.dropPendingImages()
 	m.pastes = nil
 	m.addBlock(block{kind: blockNotice, text: "история диалога очищена"})
+	// Сводка, посчитанная по прежней истории, в очищенную лечь не должна.
+	m.abortCompaction("/clear")
 	return nil
 }
 
