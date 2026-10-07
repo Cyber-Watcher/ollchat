@@ -3,6 +3,7 @@ package tools
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 	"io/fs"
@@ -325,7 +326,7 @@ func (t *writeFileTool) Plan(args map[string]any) (*Plan, error) {
 			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 				return "", err
 			}
-			if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			if err := writeFile(t.opts.Sandbox, abs, []byte(content)); err != nil {
 				return "", err
 			}
 			if exists {
@@ -416,17 +417,51 @@ func (t *editFileTool) Plan(args map[string]any) (*Plan, error) {
 		Title:   fmt.Sprintf("%s(%s) +%d -%d", NameEditFile, rel, added, removed),
 		Preview: UnifiedDiff(content, updated, 3),
 		Run: func(ctx context.Context) (string, error) {
-			info, err := os.Stat(abs)
-			mode := fs.FileMode(0o644)
-			if err == nil {
-				mode = info.Mode().Perm()
-			}
-			if err := os.WriteFile(abs, []byte(updated), mode); err != nil {
+			if err := writeFile(t.opts.Sandbox, abs, []byte(updated)); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("Файл %s изменён (добавлено строк: %d, удалено: %d).", rel, added, removed), nil
 		},
 	}, nil
+}
+
+// writeFile записывает файл по просьбе модели так, что сбой посреди записи
+// не оставляет обрезанного файла.
+//
+// **Почему не os.WriteFile.** Она сначала обнуляет файл, потом пишет: убитый
+// процесс, кончившееся место или отключённое питание между этими шагами
+// оставляют вместо исходника пустой или обрезанный файл — и прежнего
+// содержимого нет нигде. Существующий файл поэтому заменяется атомарно
+// (fsx.WriteFileAtomic: временный файл рядом, fsync, переименование поверх),
+// а его права переносятся явно: замена создаёт новый файл, и без этого
+// файл 0600 стал бы 0644.
+//
+// Новый файл пишется как раньше: прежнего содержимого у него нет, а права
+// по umask соблюдает только обычное создание.
+func writeFile(sb *permissions.Sandbox, abs string, data []byte) error {
+	dst := abs
+	// Ссылку внутри песочницы (sandbox.follow_symlinks) пишем насквозь, как
+	// писала os.WriteFile: переименование поверх заменило бы саму ссылку
+	// обычным файлом, а файл, на который она указывает, остался бы прежним.
+	// Куда ведёт ссылка, проверяется заново: с подготовки вызова её могли
+	// перенаправить за пределы песочницы.
+	if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+		if _, err := sb.Resolve(real); err != nil {
+			return err
+		}
+		dst = real
+	}
+	info, err := os.Stat(dst)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return os.WriteFile(dst, data, 0o644)
+	case err != nil:
+		return err
+	case !info.Mode().IsRegular():
+		// Канал или устройство заменять файлом нельзя — пишем в них, как прежде.
+		return os.WriteFile(dst, data, info.Mode().Perm())
+	}
+	return fsx.WriteFileAtomic(dst, data, info.Mode().Perm())
 }
 
 // ── grep ─────────────────────────────────────────────────────────────────────
