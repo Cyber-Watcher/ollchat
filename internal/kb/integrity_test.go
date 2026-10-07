@@ -550,3 +550,95 @@ func texts0(t *testing.T, c *Collection) []string {
 	}
 	return out
 }
+
+// Каталог, из которого пропали все книги разом, сверка не трогает.
+//
+// Библиотека на внешнем диске: том не смонтирован, точка монтирования пуста.
+// Раньше --kb-sync помечал удалёнными все книги, а когда том возвращался,
+// считал их уже известными и не возвращал — до --kb-reindex.
+func TestSyncKeepsBooksOfVanishedRoot(t *testing.T) {
+	_, coll, books := syncFixture(t)
+	ids := []uint32{bookID(t, coll, "guide.pdf"), bookID(t, coll, "other.pdf")}
+
+	// «Том отключён»: книги уехали, на их месте пустой каталог.
+	away := books + ".away"
+	if err := os.Rename(books, away); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(books, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var last Progress
+	res, err := coll.Sync(context.Background(), IndexOpts{}, func(p Progress) {
+		if p.Done {
+			last = p
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 0 {
+		t.Fatalf("сверка при отключённом томе убрала книг: %d", res.Removed)
+	}
+	for _, id := range ids {
+		if coll.isDeleted(id) {
+			t.Fatalf("книга %d помечена удалённой, хотя пропал весь каталог", id)
+		}
+	}
+	if len(res.LostRoots) != 1 || res.LostRoots[0] != books {
+		t.Errorf("итог не назвал пропавший каталог: %v", res.LostRoots)
+	}
+	if len(last.LostRoots) != 1 {
+		t.Errorf("последнее событие хода не назвало пропавший каталог: %+v", last)
+	}
+
+	// «Том вернулся»: книги на месте и находятся без переиндексации.
+	if err := os.Remove(books); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(away, books); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coll.Sync(context.Background(), IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !found(t, coll, "alphaversion") || !found(t, coll, "kubernetes") {
+		t.Fatal("книги вернувшегося тома не находятся")
+	}
+}
+
+// Обычное удаление — одна книга из нескольких — сверка по-прежнему замечает.
+func TestSyncStillRemovesSingleVanishedBook(t *testing.T) {
+	_, coll, books := syncFixture(t)
+	id := bookID(t, coll, "other.pdf")
+	if err := os.Remove(filepath.Join(books, "other.pdf")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := coll.Sync(context.Background(), IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 1 || !coll.isDeleted(id) {
+		t.Fatalf("удалённая книга не убрана: убрано %d, помечена %v", res.Removed, coll.isDeleted(id))
+	}
+	if len(res.LostRoots) != 0 {
+		t.Errorf("каталог с живой книгой назван пропавшим: %v", res.LostRoots)
+	}
+}
+
+// Граница каталога: /data/lib не содержит /data/library.
+func TestUnderRootRespectsBoundary(t *testing.T) {
+	for _, c := range []struct {
+		path, root string
+		want       bool
+	}{
+		{"/data/lib/a.pdf", "/data/lib", true},
+		{"/data/lib/x/a.pdf", "/data/lib/", true},
+		{"/data/library/a.pdf", "/data/lib", false},
+		{"/data/lib", "/data/lib", true},
+	} {
+		if got := underRoot(c.path, c.root); got != c.want {
+			t.Errorf("underRoot(%q, %q) = %v, ожидалось %v", c.path, c.root, got, c.want)
+		}
+	}
+}

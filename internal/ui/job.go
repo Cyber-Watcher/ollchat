@@ -233,7 +233,13 @@ func jobResult(job *kbJob, p kb.Progress) string {
 	if len(parts) == 0 {
 		parts = append(parts, "новых книг не нашлось")
 	}
-	return fmt.Sprintf("%s — готово за %s\n  %s", job.title, since(job.started), strings.Join(parts, ", "))
+	out := fmt.Sprintf("%s — готово за %s\n  %s", job.title, since(job.started), strings.Join(parts, ", "))
+	// Сверка не тронула каталог, из которого пропали все книги разом: так
+	// выглядит не подключённый том, и сказать об этом надо прямо в итоге.
+	for _, root := range p.LostRoots {
+		out += fmt.Sprintf("\n  внимание: из %s пропали все книги — том не подключён? Книги не помечены удалёнными", root)
+	}
+	return out
 }
 
 func since(t time.Time) string {

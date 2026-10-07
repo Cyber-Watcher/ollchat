@@ -81,6 +81,11 @@ type Progress struct {
 	Done     bool
 	Canceled bool
 	Err      error
+
+	// LostRoots — каталоги коллекции, из которых при сверке пропали все
+	// книги разом (см. Collection.lostRoots). Приходит в последнем событии
+	// хода, чтобы итог в интерфейсе мог о них сказать.
+	LostRoots []string
 }
 
 // IndexResult — итог индексации.
@@ -110,6 +115,10 @@ type IndexResult struct {
 	// глазами, а для этого человеку нужны имя файла и причина с числами.
 	Thin      int
 	ThinBooks []ThinBook
+
+	// LostRoots — каталоги, книги которых сверка не тронула, потому что
+	// пропали все разом: так выглядит не смонтированный том (Sync).
+	LostRoots []string
 }
 
 // ThinBook — книга, отвергнутая как тощая: путь и причина с числами.
@@ -669,6 +678,49 @@ func segmentsCover(dir string) (int, error) {
 	return covered, nil
 }
 
+// lostRoots — каталоги коллекции, из которых пропали ВСЕ живые книги.
+//
+// Пропажа одной-двух книг — обычное удаление, его сверка и должна заметить.
+// Пропажа всех книг каталога разом почти всегда значит другое: том не
+// смонтирован, сетевая папка отвалилась, переименовали родителя. Удалять
+// в этом случае нельзя ничего: вернуть книги назад сверка не умеет.
+// Если книги удалены намеренно, их убирают командой удаления книги.
+func lostRoots(roots []string, docs []BookRec, deleted func(uint32) bool) []string {
+	var lost []string
+	for _, root := range roots {
+		live, missing := 0, 0
+		for _, d := range docs {
+			if (d.ID != 0 && deleted(d.ID)) || !underRoot(d.Path, root) {
+				continue
+			}
+			live++
+			if _, err := os.Stat(d.Path); os.IsNotExist(err) {
+				missing++
+			}
+		}
+		if live > 0 && missing == live {
+			lost = append(lost, root)
+		}
+	}
+	return lost
+}
+
+// underRoot — лежит ли путь внутри каталога, по границе каталога:
+// /data/lib не содержит /data/library.
+func underRoot(path, root string) bool {
+	return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
+}
+
+// underAny — лежит ли путь внутри одного из каталогов.
+func underAny(path string, roots []string) bool {
+	for _, r := range roots {
+		if underRoot(path, r) {
+			return true
+		}
+	}
+	return false
+}
+
 // Sync сверяет коллекцию с диском: доиндексирует новые книги, помечает
 // пропавшие и переиндексирует изменившиеся.
 func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progress)) (IndexResult, error) {
@@ -695,9 +747,29 @@ func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progre
 	// **Нулевой номер — не «книги нет», а «книга не прочиталась».** Номер
 	// выдаётся при успешном разборе, и помечать удалённым тут нечего: кусков
 	// у такой книги нет. Снимается сама запись — тем же способом, что в Forget.
+	// **Каталог, из которого пропало всё, — не удаление, а отсутствие тома.**
+	// Библиотека на внешнем диске или в сетевой папке: том не смонтирован,
+	// точка монтирования пуста, и каждая книга «не найдена». Раньше сверка
+	// помечала удалёнными их все, а когда том возвращался, считала книги уже
+	// известными и не возвращала — до --kb-reindex. Теперь книги такого
+	// каталога не трогаются, а итог называет каталог.
+	lost := lostRoots(roots, docs, c.isDeleted)
+	if len(lost) > 0 && report != nil {
+		inner := report
+		report = func(p Progress) {
+			if p.Done {
+				p.LostRoots = lost
+			}
+			inner(p)
+		}
+	}
+
 	var removed int
 	for _, d := range docs {
 		if d.ID != 0 && c.isDeleted(d.ID) {
+			continue
+		}
+		if underAny(d.Path, lost) {
 			continue
 		}
 		if _, err := os.Stat(d.Path); err == nil || !os.IsNotExist(err) {
@@ -715,6 +787,7 @@ func (c *Collection) Sync(ctx context.Context, opt IndexOpts, report func(Progre
 
 	res, err := c.Add(ctx, roots, opt, report)
 	res.Removed = removed
+	res.LostRoots = lost
 	if removed > 0 {
 		if rerr := c.reopenIndex(); err == nil {
 			err = rerr
