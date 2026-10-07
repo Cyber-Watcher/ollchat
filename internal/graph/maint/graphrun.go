@@ -2433,10 +2433,12 @@ type verdictFacts struct {
 	mutual bool
 }
 
-// MergeLevelNames — уровни строгости для справки.
+// mergeLevelNames — уровни строгости для справки. Пороги здесь обязаны
+// совпадать с mergeLevels: у mutual справка до 07.10.2026 обещала 0.80, хотя
+// порог опущен до 0.70 ещё 02.09, — сверяет TestMergeLevelHelpMatchesCode.
 func mergeLevelNames() string {
 	return "strict (ДА+синоним+cos≥0.95), alias (ДА+синоним), vector (ДА+cos≥0.95), " +
-		"mixed (ДА+любой из двух), mutual (ДА+взаимный синоним+cos≥0.80), " +
+		"mixed (ДА+любой из двух), mutual (ДА+взаимный синоним+cos≥0.70), " +
 		"soft (ДА+cos≥0.92), all-yes (любое ДА)"
 }
 
