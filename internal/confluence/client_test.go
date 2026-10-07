@@ -2,10 +2,13 @@ package confluence
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -159,6 +162,68 @@ func TestResolverOrder(t *testing.T) {
 	}
 	if got, err := Resolver(nil, "", "", "")(); got != "" || err != nil {
 		t.Fatalf("без источников — пусто и без ошибки: %q, %v", got, err)
+	}
+}
+
+// listServer отдаёт страницу с files вложениями и kids детьми — постранично,
+// как Confluence: results по limit штук, начиная со start, и _links.next,
+// пока есть ещё.
+func listServer(t *testing.T, files, kids int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		total, kind := 0, ""
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/child/attachment"):
+			total, kind = files, "файл"
+		case strings.HasSuffix(r.URL.Path, "/child/page"):
+			total, kind = kids, "ребёнок"
+		default:
+			_, _ = w.Write([]byte(`{"id":"123","title":"Т","body":{"storage":{"value":"<p>ок</p>"}}}`))
+			return
+		}
+		start, _ := strconv.Atoi(r.URL.Query().Get("start"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		var results []map[string]any
+		for i := start; i < total && i < start+limit; i++ {
+			results = append(results, map[string]any{"id": strconv.Itoa(1000 + i),
+				"title": fmt.Sprintf("%s %d", kind, i)})
+		}
+		resp := map[string]any{"results": results, "size": len(results), "_links": map[string]any{}}
+		if start+limit < total {
+			resp["_links"] = map[string]any{"next": fmt.Sprintf("%s?limit=%d&start=%d", r.URL.Path, limit, start+limit)}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Вложения и дети читаются постранично, а не первой страницей: прежде всё
+// после 50 вложений и 100 детей пропадало молча, и список выглядел полным.
+// Сверх предела список помечен неполным.
+func TestListsArePaginated(t *testing.T) {
+	srv := listServer(t, 120, maxChildren+30)
+	p, err := New(srv.URL, fixedToken("т"), 5*time.Second).Get(context.Background(), "123", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Files) != 120 || p.FilesCut {
+		t.Errorf("вложений %d (неполон %v), ожидалось все 120", len(p.Files), p.FilesCut)
+	} else if p.Files[119].Title != "файл 119" {
+		t.Errorf("последнее вложение %q", p.Files[119].Title)
+	}
+	if len(p.Children) != maxChildren || !p.ChildrenCut {
+		t.Errorf("детей %d (неполон %v), ожидалось %d и пометка", len(p.Children), p.ChildrenCut, maxChildren)
+	}
+	md, err := p.Markdown()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, fmt.Sprintf("список неполон: показаны первые %d", maxChildren)) {
+		t.Errorf("неполный список детей не помечен")
+	}
+	if strings.Count(md, "список неполон") != 1 {
+		t.Errorf("полный список вложений помечен неполным")
 	}
 }
 

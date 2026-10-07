@@ -61,6 +61,10 @@ type Page struct {
 	Children []Child
 	Files    []Attachment
 	URL      string
+
+	// FilesCut и ChildrenCut — список неполон: дальше предела есть ещё или
+	// он не дочитался. Молча обрезанный список выглядел бы полным.
+	FilesCut, ChildrenCut bool
 }
 
 // Child — дочерняя страница: только имя и номер, без содержимого.
@@ -100,19 +104,33 @@ func (p Page) Markdown() (string, error) {
 		"при следующей выгрузке -->\n\n")
 	b.WriteString(body)
 
-	if len(p.Files) > 0 {
+	if len(p.Files) > 0 || p.FilesCut {
 		b.WriteString("\n## Вложения\n\n")
 		for _, f := range p.Files {
 			fmt.Fprintf(&b, "- %s (%s, %d КБ)\n", f.Title, f.Type, f.Size/1024)
 		}
+		cutNote(&b, p.FilesCut, len(p.Files))
 	}
-	if len(p.Children) > 0 {
+	if len(p.Children) > 0 || p.ChildrenCut {
 		b.WriteString("\n## Дочерние страницы\n\n")
 		for _, c := range p.Children {
 			fmt.Fprintf(&b, "- %s (страница %s)\n", c.Title, c.ID)
 		}
+		cutNote(&b, p.ChildrenCut, len(p.Children))
 	}
 	return b.String(), nil
+}
+
+// cutNote помечает неполный список: модель и человек должны видеть, что
+// это не всё.
+func cutNote(b *strings.Builder, cut bool, shown int) {
+	switch {
+	case !cut:
+	case shown == 0:
+		b.WriteString("- _(список не получен)_\n")
+	default:
+		fmt.Fprintf(b, "- _(список неполон: показаны первые %d)_\n", shown)
+	}
 }
 
 var rePageID = regexp.MustCompile(`(?:pageId=|/pages/)(\d+)`)
@@ -181,30 +199,69 @@ func (c *Client) Get(ctx context.Context, page string, withChildren bool) (*Page
 	// нужны, без них страница бессмысленна. Замер 25.08.2026: у страницы
 	// «Инструкция по переходу с JWT на UUID» 713 знаков текста и скриншот,
 	// в котором и лежит вся суть.
-	var files struct {
-		Results []struct {
+	//
+	// Оба списка постраничные. Раньше бралась только первая страница (50
+	// вложений, 100 детей), и остальное пропадало молча — список выглядел
+	// полным. Теперь страницы читаются до предела, а неполный список помечен.
+	p.FilesCut = c.list(ctx, "/rest/api/content/"+id+"/child/attachment", maxFiles, func(raw json.RawMessage) {
+		var f struct {
 			Title    string                     `json:"title"`
 			Metadata struct{ MediaType string } `json:"metadata"`
 			Ext      struct{ FileSize int64 }   `json:"extensions"`
-		} `json:"results"`
-	}
-	if err := c.get(ctx, "/rest/api/content/"+id+"/child/attachment?limit=50", &files); err == nil {
-		for _, f := range files.Results {
-			p.Files = append(p.Files, Attachment{
-				Title: f.Title, Type: f.Metadata.MediaType, Size: f.Ext.FileSize})
 		}
-	}
+		if json.Unmarshal(raw, &f) == nil {
+			p.Files = append(p.Files, Attachment{Title: f.Title, Type: f.Metadata.MediaType, Size: f.Ext.FileSize})
+		}
+	})
 	if withChildren {
-		var kids struct {
-			Results []struct{ ID, Title string } `json:"results"`
-		}
-		if err := c.get(ctx, "/rest/api/content/"+id+"/child/page?limit=100", &kids); err == nil {
-			for _, k := range kids.Results {
+		p.ChildrenCut = c.list(ctx, "/rest/api/content/"+id+"/child/page", maxChildren, func(raw json.RawMessage) {
+			var k struct{ ID, Title string }
+			if json.Unmarshal(raw, &k) == nil {
 				p.Children = append(p.Children, Child{ID: k.ID, Title: k.Title})
 			}
-		}
+		})
 	}
 	return p, nil
+}
+
+// Пределы списков страницы. Страница уходит модели целиком, и тысяча строк
+// вложений съела бы контекст; дальше предела — пометка, а не молчание.
+const (
+	maxFiles    = 200
+	maxChildren = 500
+	listPage    = 50 // элементов за запрос
+)
+
+// list читает постраничный список Confluence (results и _links.next) не дальше
+// max элементов и отдаёт каждый в each. true — список неполон: за пределом
+// есть ещё или очередная страница не прочиталась.
+func (c *Client) list(ctx context.Context, path string, max int, each func(json.RawMessage)) bool {
+	got := 0
+	for start := 0; ; {
+		var page struct {
+			Results []json.RawMessage `json:"results"`
+			Links   struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		if err := c.get(ctx, fmt.Sprintf("%s?limit=%d&start=%d", path, listPage, start), &page); err != nil {
+			return true
+		}
+		for _, r := range page.Results {
+			if got == max {
+				return true
+			}
+			each(r)
+			got++
+		}
+		if page.Links.Next == "" || len(page.Results) == 0 {
+			return false
+		}
+		if got == max {
+			return true
+		}
+		start += len(page.Results)
+	}
 }
 
 // token — токен на время жизни клиента; fresh — спросить источник заново.
