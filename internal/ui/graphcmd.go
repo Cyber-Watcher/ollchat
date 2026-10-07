@@ -428,9 +428,14 @@ func (m *Model) graphPack(arg string) tea.Cmd {
 		if err != nil {
 			return errorMsg{err: fmt.Errorf("/graph pack: %w", err)}
 		}
-		if _, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules); err != nil {
+		g, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules)
+		if err != nil {
 			return errorMsg{err: fmt.Errorf("/graph pack: граф коллекции %s: %w", name, err)}
 		}
+		// Граф открывался только ради проверки, что он годен и привязан
+		// к коллекции. Не закрытый, он держал бы журналы открытыми и сотни
+		// мегабайт памяти до самого выхода (аудит 07.10.2026).
+		_ = g.Close()
 		res, err := graph.Pack(coll.Dir(), path)
 		if err != nil {
 			return errorMsg{err: fmt.Errorf("/graph pack: упаковать не вышло: %w", err)}
