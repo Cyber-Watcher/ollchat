@@ -196,7 +196,8 @@ func (c Check) Line() string {
 		return strings.Join(s, ", ")
 	}
 	return fmt.Sprintf(LeakMark+": в PDF — %s; в .md — %s. "+
-		"Файлы записаны, но показывать их наружу нельзя, пока это не исправлено.\n",
+		"Обезличенные файлы записаны с пометкой UNVERIFIED в имени: показывать их наружу нельзя, "+
+		"пока это не исправлено.\n",
 		none(c.LeaksPDF), none(c.LeaksMD))
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -125,6 +126,13 @@ func (t *scanRedactTool) Plan(args map[string]any) (*Plan, error) {
 	extra := []permissions.Request{{Kind: permissions.KindRead, Target: in, Tool: NameScanRedact}}
 	for _, p := range writes[1:] {
 		extra = append(extra, permissions.Request{Kind: permissions.KindWrite, Target: p, Tool: NameScanRedact})
+	}
+	// Найдёт проверка скрытое — замазанный PDF и .md лягут под именами
+	// *.UNVERIFIED.*: это тоже цели записи, и правила проверяют их наравне.
+	for _, p := range outs.Unverified().List() {
+		if !slices.Contains(writes, p) {
+			extra = append(extra, permissions.Request{Kind: permissions.KindWrite, Target: p, Tool: NameScanRedact})
+		}
 	}
 	rel := t.opts.Sandbox.Rel
 	shown := make([]string, 0, len(writes))
