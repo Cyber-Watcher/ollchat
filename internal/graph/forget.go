@@ -254,15 +254,13 @@ func rewriteBinaryWith(path string, size int, stamp string, dry bool, change fun
 		os.Remove(tmp)
 		return res, err
 	}
-	res.backup = path + ".bak-" + stamp
-	if err := os.Rename(path, res.backup); err != nil {
-		os.Remove(tmp)
+	// Подмена — ссылкой и одним переименованием (swap.go): обрыв посреди неё
+	// не оставляет каталог без журнала.
+	backup, err := swapIn(path, tmp, path+".bak-"+stamp)
+	if err != nil {
 		return res, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Rename(res.backup, path)
-		return res, err
-	}
+	res.backup = backup
 	return res, nil
 }
 
@@ -322,13 +320,10 @@ func recountEntities(path string, count map[uint32]int, stamp string, dry bool) 
 		os.Remove(tmp)
 		return 0, 0, "", err
 	}
-	backup = path + ".bak-" + stamp
-	if err := os.Rename(path, backup); err != nil {
-		os.Remove(tmp)
-		return 0, 0, "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Rename(backup, path)
+	// Реестр без журнала — это граф с номерами с единицы поверх связей
+	// и векторов: подмена только ссылкой и одним переименованием (swap.go).
+	backup, err = swapIn(path, tmp, path+".bak-"+stamp)
+	if err != nil {
 		return 0, 0, "", err
 	}
 	return changed, orphans, backup, nil

@@ -171,16 +171,14 @@ func CompactDrop(collDir, name string, check, force bool, drop map[uint32]bool) 
 		}
 	}
 
-	st.Backup = path + ".bak-" + time.Now().Format("20060102-150405")
-	if err := os.Rename(path, st.Backup); err != nil {
+	// Остаться без реестра нельзя ни при каких обстоятельствах — это и есть
+	// сам граф: подмена ссылкой и одним переименованием, без окна, в котором
+	// реестра нет вовсе (swap.go).
+	backup, err := swapIn(path, tmp, path+".bak-"+time.Now().Format("20060102-150405"))
+	if err != nil {
 		return st, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		// Возврат прежнего файла: остаться без реестра нельзя ни при каких
-		// обстоятельствах — это и есть сам граф.
-		_ = os.Rename(st.Backup, path)
-		return st, err
-	}
+	st.Backup = backup
 	syncDir(dir)
 	st.Applied = true
 	return st, nil

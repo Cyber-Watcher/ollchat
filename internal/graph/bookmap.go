@@ -350,15 +350,22 @@ func rewriteJSONL(path, stamp string, change func(map[string]any) bool) (int, st
 	if changed == 0 {
 		return 0, "", nil
 	}
-	backup := path + ".bak-" + stamp
-	if err := os.Rename(path, backup); err != nil {
-		return 0, "", err
-	}
-	if err := fsx.WriteFileAtomic(path, out.Bytes(), 0o644); err != nil {
-		_ = os.Rename(backup, path)
+	backup, err := swapNew(path, stamp, out.Bytes())
+	if err != nil {
 		return 0, "", err
 	}
 	return changed, backup, nil
+}
+
+// swapNew ставит на место path новое содержимое, оставив прежний файл копией
+// «.bak-<stamp>»: заготовка рядом, затем ссылка и одно переименование
+// (swap.go) — обрыв не оставляет журнал ни пустым, ни отсутствующим.
+func swapNew(path, stamp string, data []byte) (string, error) {
+	tmp := path + ".tmp-" + stamp
+	if err := writeSynced(tmp, data); err != nil {
+		return "", err
+	}
+	return swapIn(path, tmp, path+".bak-"+stamp)
 }
 
 // rewriteAliases переписывает номера книг в журнале синонимов формата 2.
@@ -394,12 +401,8 @@ func rewriteAliases(path, stamp string, remap func(uint32) (uint32, bool)) (int,
 	if changed == 0 {
 		return 0, "", nil
 	}
-	backup := path + ".bak-" + stamp
-	if err := os.Rename(path, backup); err != nil {
-		return 0, "", err
-	}
-	if err := fsx.WriteFileAtomic(path, out.Bytes(), 0o644); err != nil {
-		_ = os.Rename(backup, path)
+	backup, err := swapNew(path, stamp, out.Bytes())
+	if err != nil {
 		return 0, "", err
 	}
 	return changed, backup, nil
