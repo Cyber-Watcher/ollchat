@@ -69,6 +69,11 @@ func renderPage(ctx context.Context, path string, n int) (image.Image, error) {
 	if err != nil {
 		return nil, errors.New("программы pdftoppm в системе нет — установите пакет poppler-utils")
 	}
+	// Путь — полный: относительный, начинающийся с «-» («-скан.pdf»),
+	// pdftoppm прочёл бы как свой ключ, а не как файл.
+	if path, err = filepath.Abs(path); err != nil {
+		return nil, err
+	}
 	tmp, err := os.MkdirTemp("", "ollchat-render-*")
 	if err != nil {
 		return nil, err
