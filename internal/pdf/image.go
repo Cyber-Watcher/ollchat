@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 )
 
@@ -44,6 +45,62 @@ type ImageOptions struct {
 // ErrUnsupportedImage сообщает, что картинку не удалось перевести в обычный
 // формат: так бывает с факсимильным сжатием и JPEG 2000.
 var ErrUnsupportedImage = errors.New("формат картинки не поддерживается")
+
+// Размер картинки проверяется до того, как под неё выделена память.
+//
+// Ширина и высота записаны в самом файле, и декодер выделяет память по ним
+// раньше, чем прочтёт хоть одну точку: JPEG или GIF в десятки байт с
+// заголовком 65535×65535 просил 3,6 ГБ, и процесс падал нехваткой памяти,
+// которую recover не ловит. Проверка одна на всех: сырые отсчёты, JPEG и
+// CCITT из PDF, картинки книг EPUB и страницы, нарисованные pdftoppm для
+// обезличивания (internal/redact).
+//
+// Предел — в байтах раскрытой картинки: 256 МБ. Это прежний предел сырых
+// отсчётов (64 миллиона точек RGBA) и факсимильных сканов (лист A0 при
+// 400 dpi), а цветной JPEG при нём бывает до 89 миллионов точек — лист A3
+// при 600 dpi.
+const maxImageBytes = 256 << 20
+
+// ErrImageTooLarge — картинка больше, чем её разумно раскрывать.
+var ErrImageTooLarge = errors.New("картинка слишком велика")
+
+// CheckImageSize проверяет, что картинку w×h по bytesPerPixel байт на точку
+// можно раскрыть. Сравнения устроены без переполнения: произведение размеров
+// из файла переполнялось и проходило проверку нулём.
+func CheckImageSize(w, h, bytesPerPixel int) error {
+	if w <= 0 || h <= 0 || bytesPerPixel <= 0 {
+		return fmt.Errorf("неподходящий размер картинки %d×%d", w, h)
+	}
+	if w > maxImageBytes/bytesPerPixel/h {
+		return fmt.Errorf("%w: %d×%d", ErrImageTooLarge, w, h)
+	}
+	return nil
+}
+
+// CheckImageConfig — то же по заголовку картинки, прочитанному
+// image.DecodeConfig: байт на точку — по её цветовой модели.
+func CheckImageConfig(cfg image.Config) error {
+	return CheckImageSize(cfg.Width, cfg.Height, bytesPerPixel(cfg.ColorModel))
+}
+
+// bytesPerPixel — сколько байт на точку займёт картинка с такой цветовой
+// моделью у декодеров стандартной библиотеки.
+func bytesPerPixel(m color.Model) int {
+	if _, ok := m.(color.Palette); ok {
+		return 1
+	}
+	switch m {
+	case color.GrayModel, color.AlphaModel:
+		return 1
+	case color.Gray16Model, color.Alpha16Model:
+		return 2
+	case color.YCbCrModel:
+		return 3
+	case color.RGBA64Model, color.NRGBA64Model:
+		return 8
+	}
+	return 4 // RGBA, NRGBA, CMYK и всё незнакомое
+}
 
 // ExtractImages достаёт картинки документа в порядке страниц.
 //
@@ -121,6 +178,14 @@ func (d *Document) imageBytes(s *Stream) (string, []byte, error) {
 				return "", nil, err
 			}
 		}
+		// Сами мы его не раскрываем, а раскроет тот, кому картинку отдадут
+		// (сервер модели), — и упадёт так же. Незнакомый декодеру вид JPEG
+		// (арифметическое кодирование) проходит как прежде.
+		if cfg, err := jpeg.DecodeConfig(bytes.NewReader(data)); err == nil {
+			if err := CheckImageConfig(cfg); err != nil {
+				return "", nil, err
+			}
+		}
 		return "jpeg", data, nil
 	case "JPXDecode", "JBIG2Decode", "CCITTFaxDecode":
 		return "", nil, ErrUnsupportedImage
@@ -146,8 +211,8 @@ func (d *Document) imageBytes(s *Stream) (string, []byte, error) {
 func (d *Document) rasterize(s *Stream, data []byte) (image.Image, error) {
 	w, _ := toInt(d.Resolve(s.Dict["Width"]))
 	h, _ := toInt(d.Resolve(s.Dict["Height"]))
-	if w <= 0 || h <= 0 || w*h > 64<<20 {
-		return nil, fmt.Errorf("неподходящий размер картинки %d×%d", w, h)
+	if err := CheckImageSize(w, h, 4); err != nil { // растр собирается в RGBA
+		return nil, err
 	}
 	bpc, _ := toInt(d.Resolve(s.Dict["BitsPerComponent"]))
 	mask := false
@@ -165,6 +230,11 @@ func (d *Document) rasterize(s *Stream, data []byte) (image.Image, error) {
 	}
 	if comps == 0 {
 		return nil, errors.New("неизвестная цветовая модель")
+	}
+	// Число составляющих и разрядность — из файла: огромный /N у ICCBased
+	// переполнял длину строки ниже.
+	if comps > maxColors || !validBPC(bpc) {
+		return nil, fmt.Errorf("неподдержанная картинка: составляющих %d, разрядность %d", comps, bpc)
 	}
 
 	// Инверсия из /Decode: у масок [1 0] встречается сплошь и рядом.

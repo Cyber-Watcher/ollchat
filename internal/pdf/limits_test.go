@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -578,6 +580,76 @@ func TestPageTextBounded(t *testing.T) {
 	if n := strings.Count(text, "a"); n > 1000 || !strings.Contains(text, pageCutMark) {
 		t.Errorf("кусков %d при пределе 1000, обрезка отмечена: %v", n, strings.Contains(text, pageCutMark))
 	}
+}
+
+// Размер картинки проверяется без переполнения и до выделения памяти.
+func TestCheckImageSize(t *testing.T) {
+	for _, c := range []struct {
+		w, h, bpp int
+		ok        bool
+	}{
+		{16384, 16384, 1, true}, {16385, 16384, 1, false},
+		{8192, 8192, 4, true}, {8193, 8192, 4, false},
+		{0, 10, 1, false}, {10, -1, 1, false}, {10, 10, 0, false},
+		{1 << 32, 1 << 32, 1, false}, // произведение переполнялось в ноль
+	} {
+		if err := CheckImageSize(c.w, c.h, c.bpp); (err == nil) != c.ok {
+			t.Errorf("%d×%d по %d байт: %v", c.w, c.h, c.bpp, err)
+		}
+	}
+}
+
+// hugeJPEG — настоящий JPEG 16×16, в заголовке которого записано 65535×65535.
+func hugeJPEG(t *testing.T) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, image.NewGray(image.Rect(0, 0, 16, 16)), nil); err != nil {
+		t.Fatal(err)
+	}
+	data := b.Bytes()
+	i := bytes.Index(data, []byte{0xFF, 0xC0}) // SOF0: длина, точность, высота, ширина
+	if i < 0 {
+		t.Fatal("в JPEG нет SOF0")
+	}
+	binary.BigEndian.PutUint16(data[i+5:], 65535)
+	binary.BigEndian.PutUint16(data[i+7:], 65535)
+	return data
+}
+
+// scanDoc — страница, целиком покрытая картинкой с таким словарём и данными.
+func scanDoc(imgDict string, data []byte) []byte {
+	return build(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+		stream("", "q 612 0 0 792 0 0 cm /Im0 Do Q"),
+		stream(imgDict, string(data)))
+}
+
+// JPEG в десятки байт с заголовком 65535×65535: декодер выделял память по
+// заголовку — гигабайты — раньше, чем читал точки. Факсимильный скан
+// с /Columns и /Rows по 2³²: произведение переполнялось в ноль и проходило
+// проверку, а паника губила разбор всего документа.
+func TestHugeImageHeaders(t *testing.T) {
+	jpegDoc := scanDoc("<< /Type /XObject /Subtype /Image /Width 16 /Height 16 /ColorSpace /DeviceGray "+
+		"/BitsPerComponent 8 /Filter /DCTDecode >>", hugeJPEG(t))
+	ccittDoc := scanDoc("<< /Type /XObject /Subtype /Image /Width 16 /Height 16 /ImageMask true "+
+		"/Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 4294967296 /Rows 4294967296 >> >>", []byte{0, 0, 0})
+	bounded(t, 20*time.Second, func() {
+		for name, doc := range map[string][]byte{"JPEG": jpegDoc, "CCITT": ccittDoc} {
+			pages, err := ScanPages(doc)
+			if err != nil || len(pages) != 1 {
+				t.Errorf("%s: страницы скана: %v, %d", name, err, len(pages))
+				continue
+			}
+			if pages[0].Image != nil || !strings.Contains(pages[0].Note, "слишком велика") {
+				t.Errorf("%s: картинка раскрыта или причина не та: %q", name, pages[0].Note)
+			}
+		}
+		if imgs, err := ExtractImages(jpegDoc, ImageOptions{}); err != nil || len(imgs) != 0 {
+			t.Errorf("JPEG с огромным заголовком отдан наружу: %v, %d", err, len(imgs))
+		}
+	})
 }
 
 // /N объектного потока берётся из файла: до правки под него заранее

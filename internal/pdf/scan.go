@@ -126,6 +126,15 @@ func (d *Document) decodeImage(s *Stream) (image.Image, error) {
 			}
 		}
 		if last == "DCTDecode" {
+			// Память декодер берёт по заголовку, раньше точек: сначала
+			// размер (CheckImageSize).
+			cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				return nil, err
+			}
+			if err := CheckImageConfig(cfg); err != nil {
+				return nil, err
+			}
 			return jpeg.Decode(bytes.NewReader(data))
 		}
 		return d.decodeCCITT(s, data, len(filters)-1)
@@ -177,8 +186,8 @@ func (d *Document) decodeCCITT(s *Stream, data []byte, filterIdx int) (image.Ima
 	if rows := intOr("Rows", 0); rows > 0 {
 		h = rows
 	}
-	if w <= 0 || h <= 0 || w*h > 256<<20 {
-		return nil, fmt.Errorf("неподходящий размер картинки CCITT %d×%d", w, h)
+	if err := CheckImageSize(w, h, 1); err != nil {
+		return nil, fmt.Errorf("CCITT: %w", err)
 	}
 	// BlackIs1 = false (умолчание PDF): ноль — чёрный, как и у ccitt без Invert.
 	opts := &ccitt.Options{Align: boolOr("EncodedByteAlign", false), Invert: boolOr("BlackIs1", false)}
