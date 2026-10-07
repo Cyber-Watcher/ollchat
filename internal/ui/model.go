@@ -140,6 +140,7 @@ type Model struct {
 	// Лента диалога.
 	blocks   []block
 	rendered []string
+	blockSeq uint64 // последний выданный номер блока, см. block.id
 
 	// Состояние генерации.
 	streaming  bool
@@ -695,16 +696,33 @@ func (m *Model) addBlockAndShow(b block) int {
 }
 
 func (m *Model) addBlock(b block) int {
+	m.blockSeq++
+	b.id = m.blockSeq
 	m.blocks = append(m.blocks, b)
 	m.rendered = append(m.rendered, m.rend.Render(b, m.showThinking))
 	m.refreshViewport(true)
 	return len(m.blocks) - 1
 }
 
+// blockIndex находит блок по номеру; -1 — его в ленте больше нет: лента
+// очищена или заменена восстановленной сессией.
+func (m *Model) blockIndex(id uint64) int {
+	if id == 0 {
+		return -1
+	}
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		if m.blocks[i].id == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *Model) updateBlock(i int, b block) {
 	if i < 0 || i >= len(m.blocks) {
 		return
 	}
+	b.id = m.blocks[i].id // перерисованный блок — тот же самый
 	m.blocks[i] = b
 	m.rendered[i] = m.rend.Render(b, m.showThinking)
 	m.refreshViewport(true)

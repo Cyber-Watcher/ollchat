@@ -26,13 +26,16 @@ import (
 
 // kbJob — идущая индексация.
 type kbJob struct {
-	gen      int
-	title    string
-	cancel   context.CancelFunc
-	events   <-chan kb.Progress
-	last     kb.Progress
-	blockIdx int
-	started  time.Time
+	gen    int
+	title  string
+	cancel context.CancelFunc
+	events <-chan kb.Progress
+	last   kb.Progress
+	// blockID — номер блока хода в ленте. Номер, а не индекс: /clear или
+	// /resume посреди многочасовой индексации заменяют ленту, и по старому
+	// индексу ход задачи затирал вопрос человека (аудит 07.10.2026).
+	blockID uint64
+	started time.Time
 }
 
 // jobProgressMsg — очередное сообщение о ходе работы.
@@ -80,7 +83,7 @@ func (m *Model) startJob(title string, run func(ctx context.Context, report func
 
 	idx := m.addBlock(block{kind: blockNotice, text: title + ": подготовка…"})
 	m.job = &kbJob{gen: gen, title: title, cancel: cancel, events: events,
-		blockIdx: idx, started: time.Now()}
+		blockID: m.blocks[idx].id, started: time.Now()}
 
 	go func() {
 		defer close(events)
@@ -119,8 +122,19 @@ func (m *Model) stopJob(reason string) {
 
 	m.gen.job++
 	m.job = nil
-	m.updateBlock(job.blockIdx, block{kind: blockNotice,
+	m.jobBlock(job, block{kind: blockNotice,
 		text: fmt.Sprintf("%s — %s (за %s)", job.title, reason, since(job.started))})
+}
+
+// jobBlock показывает строку задачи: на месте её блока, а если блока в ленте
+// больше нет (её очистили посреди работы) — новой строкой в конце. Итог
+// многочасовой работы пропадать не должен.
+func (m *Model) jobBlock(job *kbJob, b block) {
+	if i := m.blockIndex(job.blockID); i >= 0 {
+		m.updateBlock(i, b)
+		return
+	}
+	job.blockID = m.blocks[m.addBlock(b)].id
 }
 
 // handleJobProgress обновляет блок хода на месте: лента не растёт, сколько бы
@@ -130,7 +144,7 @@ func (m *Model) handleJobProgress(msg jobProgressMsg) tea.Cmd {
 		return nil
 	}
 	m.job.last = msg.p
-	m.updateBlock(m.job.blockIdx, block{kind: blockNotice, text: jobLine(m.job.title, msg.p)})
+	m.jobBlock(m.job, block{kind: blockNotice, text: jobLine(m.job.title, msg.p)})
 	return waitForJob(m.gen.job, m.job.events)
 }
 
@@ -145,17 +159,17 @@ func (m *Model) handleJobDone(msg jobDoneMsg) {
 
 	switch {
 	case msg.err != nil:
-		m.updateBlock(job.blockIdx, block{kind: blockError,
+		m.jobBlock(job, block{kind: blockError,
 			text: fmt.Sprintf("%s — сбой: %s", job.title, msg.err.Error())})
 	case msg.p.Canceled:
-		m.updateBlock(job.blockIdx, block{kind: blockNotice,
+		m.jobBlock(job, block{kind: blockNotice,
 			text: fmt.Sprintf("%s — остановлено (за %s)", job.title, since(job.started))})
 	default:
 		p := msg.p
 		if p.DocsDone == 0 && job.last.DocsDone > 0 {
 			p = job.last
 		}
-		m.updateBlock(job.blockIdx, block{kind: blockNotice, text: jobResult(job, p)})
+		m.jobBlock(job, block{kind: blockNotice, text: jobResult(job, p)})
 	}
 	if m.kb.coll != nil {
 		m.kb.coll = nil // сведения о коллекции устарели, перечитаем при надобности
