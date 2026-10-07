@@ -248,6 +248,22 @@ func (w *Writer) Rollback(st StoreState) error {
 	w.pend = w.pend[:0]
 	w.pendDocs = w.pendDocs[:0]
 	w.pendOrds = w.pendOrds[:0]
+	// Откат только укорачивает. Truncate за конец файла дописал бы нули,
+	// и хранилище получило бы указатели на пустоту, а блоки — сдвиг; файл
+	// короче отметки журнала — это повреждение, о котором надо сказать.
+	for _, f := range []struct {
+		file *os.File
+		want int64
+	}{{w.dat, st.Dat}, {w.idx, st.Idx}} {
+		info, err := f.file.Stat()
+		if err != nil {
+			return err
+		}
+		if info.Size() < f.want {
+			return fmt.Errorf("%s короче последней отметки журнала: %d байт вместо %d — хранилище повреждено",
+				filepath.Base(f.file.Name()), info.Size(), f.want)
+		}
+	}
 	if err := w.dat.Truncate(st.Dat); err != nil {
 		return err
 	}

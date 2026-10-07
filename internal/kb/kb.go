@@ -538,7 +538,45 @@ func (c *Collection) load() error {
 	if err := c.loadDeleted(); err != nil {
 		return err
 	}
-	return c.reopenIndexLocked()
+	if err := c.reopenIndexLocked(); err != nil {
+		return err
+	}
+	c.reconcileNextDoc()
+	return nil
+}
+
+// reconcileNextDoc сверяет следующий номер книги с тем, что уже лежит
+// на диске: номер не может быть меньше любого выданного.
+//
+// NextDoc живёт только в meta.json и пишется после кусков книги. Обрыв между
+// ними оставлял счётчик позади: следующая книга получала номер уже выданный,
+// и выдача одной книги приписывалась другой — Result берёт название и путь
+// у первой записи реестра с этим номером. Поэтому при открытии счётчик
+// поднимается выше всех номеров реестра, пометок удалённых и кусков
+// хранилища. Записывается он при следующем коммите — открытие на чтение
+// ничего не пишет.
+func (c *Collection) reconcileNextDoc() {
+	next := c.meta.NextDoc
+	bump := func(id uint32) {
+		if id >= next && id+1 != 0 {
+			next = id + 1
+		}
+	}
+	for _, d := range c.docs {
+		bump(d.ID)
+	}
+	for id := range c.deleted {
+		bump(id)
+	}
+	if c.store != nil {
+		for _, r := range c.store.recs {
+			bump(r.Doc)
+		}
+	}
+	if next == 0 {
+		next = 1
+	}
+	c.meta.NextDoc = next
 }
 
 func (c *Collection) loadDocs() error {

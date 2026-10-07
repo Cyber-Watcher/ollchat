@@ -222,6 +222,12 @@ func (c *Collection) Merge(ctx context.Context, opt MergeOpts, report func(Progr
 		c.reopenIndexLocked()
 		return res, err
 	}
+	// Паспорт — тоже из нового каталога: в памяти остались прежние состояние
+	// хранилища и номер следующего сегмента, и первая же запись паспорта
+	// вернула бы их на диск.
+	if err := readJSON(filepath.Join(c.dir, "meta.json"), &c.meta); err != nil {
+		return res, err
+	}
 	if err := c.load(); err != nil {
 		return res, err
 	}

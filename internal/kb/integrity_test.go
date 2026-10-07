@@ -129,6 +129,118 @@ func TestSearchSkipsChunksOutsideRegistry(t *testing.T) {
 	}
 }
 
+// Номер книги не выдаётся повторно, даже если meta.json отстал от данных.
+//
+// NextDoc живёт только в meta.json и пишется после кусков и реестра. Обрыв
+// между ними оставлял счётчик позади, следующая книга получала уже выданный
+// номер — и выдача одной книги приписывалась другой.
+func TestOpenReconcilesNextDoc(t *testing.T) {
+	base, root := newBase(t)
+	books := filepath.Join(root, "books")
+	if err := os.MkdirAll(books, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeBook(t, books, "a.pdf", longPage("alphaword first book"))
+	makeBook(t, books, "b.pdf", longPage("bravoword second book"))
+	coll, err := base.Create("ids", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := coll.Add(ctx, []string{books}, IndexOpts{Workers: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Обрыв: куски и запись книги b на диске, а счётчик — как до неё.
+	meta := coll.Meta()
+	meta.NextDoc = bookID(t, coll, "b.pdf")
+	if err := writeJSON(filepath.Join(coll.Dir(), "meta.json"), meta); err != nil {
+		t.Fatal(err)
+	}
+	base.Close()
+
+	base2, err := OpenBase(base.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base2.Close()
+	c2, err := base2.Open("ids")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeBook(t, books, "c.pdf", longPage("charlieword third book"))
+	if _, err := c2.Add(ctx, []string{books}, IndexOpts{Workers: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, c := bookID(t, c2, "b.pdf"), bookID(t, c2, "c.pdf"); b == c {
+		t.Fatalf("номер %d выдан двум книгам", c)
+	}
+	hits, err := c2.Search("charlieword", DefaultSearchOpts())
+	if err != nil || len(hits) == 0 {
+		t.Fatalf("третья книга не находится: %v", err)
+	}
+	if got := filepath.Base(hits[0].Path); got != "c.pdf" {
+		t.Fatalf("выдача третьей книги приписана %s", got)
+	}
+}
+
+// Обрывок книги, прерванной первой после уплотнения, откатывается.
+//
+// Уплотнение начинает журнал коммитов заново, а пустой журнал значил
+// «откатывать не к чему», хотя состояние хранилища лежит в meta.json.
+func TestTornTailAfterMergeRolledBack(t *testing.T) {
+	base, coll, drop := mergeFixture(t)
+	if _, err := coll.Merge(context.Background(), MergeOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Паспорт в памяти — из нового каталога, а не прежний: его первая же
+	// запись вернула бы на диск состояние хранилища до уплотнения.
+	var disk Meta
+	if err := readJSON(filepath.Join(coll.Dir(), "meta.json"), &disk); err != nil {
+		t.Fatal(err)
+	}
+	if mem := coll.Meta(); mem.State != disk.State || mem.NextSeg != disk.NextSeg {
+		t.Fatalf("после уплотнения паспорт в памяти %+v/%d, в новом каталоге %+v/%d",
+			mem.State, mem.NextSeg, disk.State, disk.NextSeg)
+	}
+	// Удалённая книга ушла и с диска — иначе доливка взяла бы её как новую.
+	if err := os.Remove(drop); err != nil {
+		t.Fatal(err)
+	}
+	before := coll.ChunkCount()
+
+	// Обрыв: куски записаны, а ни журнал, ни реестр о них не знают.
+	w, err := CreateWriter(coll.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(77, chunksOf("обрывок после уплотнения tornword")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	books := filepath.Join(filepath.Dir(base.Dir()), "books", "books")
+	makeBook(t, books, "fresh.pdf", longPage("freshword new material"))
+	res, err := coll.Add(context.Background(), []string{books}, IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Added != 1 {
+		t.Fatalf("добавлено книг %d, ожидалась одна", res.Added)
+	}
+	for _, text := range texts0(t, coll) {
+		if strings.Contains(text, "tornword") {
+			t.Fatal("обрывок после уплотнения остался в хранилище")
+		}
+	}
+	if got, want := coll.ChunkCount(), before+int(res.Chunks); got != want {
+		t.Fatalf("кусков %d, ожидалось %d", got, want)
+	}
+}
+
 // texts0 — тексты всех кусков хранилища коллекции.
 func texts0(t *testing.T, c *Collection) []string {
 	t.Helper()

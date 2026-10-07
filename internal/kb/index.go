@@ -481,10 +481,17 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			if err != nil {
 				return res, err
 			}
-			if err := c.appendDoc(rec); err != nil {
+			// Журнал раньше реестра. Обратный порядок оставлял окно: запись
+			// реестра есть, отметки в журнале нет — и следующая доливка
+			// откатывала куски книги к прошлой отметке, а запись оставалась.
+			// Книга числилась прочитанной без единого куска, и сверка её больше
+			// не трогала: файл-то не менялся. Теперь обрыв в этом месте
+			// оставляет куски без записи — ничьи, невидимые поиску, — и книга
+			// просто прочитается заново.
+			if err := c.journal(state, rec.ID); err != nil {
 				return res, err
 			}
-			if err := c.journal(state, rec.ID); err != nil {
+			if err := c.appendDoc(rec); err != nil {
 				return res, err
 			}
 			res.Added++
@@ -904,17 +911,29 @@ func (c *Collection) journal(state StoreState, doc uint32) error {
 }
 
 // lastCommit возвращает состояние последнего успешного коммита.
+//
+// Журнал бывает пуст и у живого хранилища: уплотнение начинает его заново,
+// а состояние переписанного хранилища кладёт в meta.json (Meta.State). До
+// 07.10.2026 пустой журнал значил «откатывать не к чему», и обрывок книги,
+// прерванной первой после уплотнения, оставался в хранилище навсегда. Нулевое
+// состояние откатом не считается: у коллекции, которой коммитить ещё не
+// доводилось, оно отрезало бы и заголовок chunks.dat.
 func (c *Collection) lastCommit() (StoreState, bool) {
-	data, err := os.ReadFile(filepath.Join(c.dir, "journal.log"))
-	if err != nil {
-		return StoreState{}, false
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		var e journalEntry
-		if err := json.Unmarshal([]byte(lines[i]), &e); err == nil {
-			return e.State, true
+	if data, err := os.ReadFile(filepath.Join(c.dir, "journal.log")); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			var e journalEntry
+			if err := json.Unmarshal([]byte(lines[i]), &e); err == nil {
+				return e.State, true
+			}
 		}
+	}
+	// С диска, а не из памяти: в памяти паспорт мог отстать от каталога,
+	// который подменило уплотнение.
+	var meta Meta
+	if err := readJSON(filepath.Join(c.dir, "meta.json"), &meta); err == nil &&
+		(meta.State.Dat > 0 || meta.State.Idx > 0) {
+		return meta.State, true
 	}
 	return StoreState{}, false
 }
