@@ -217,3 +217,30 @@ func TestEmbedNewAfterRecountElsewhere(t *testing.T) {
 		t.Errorf("векторов %d, ожидалось 12", n)
 	}
 }
+
+// Векторы догонщика получают отпечатки текстов: иначе они навсегда
+// «неизвестны», и --graph-embed-stale не обновит их, когда к понятию придут
+// синонимы (аудит 07.10.2026, 4.5).
+func TestEmbedNewWritesStamps(t *testing.T) {
+	g := growGraph(t, 5)
+	ctx := context.Background()
+	emb := &countingEmbedder{model: "проба", dim: 4}
+	if _, err := g.EmbedNewEntities(ctx, emb, EmbedOpts{}, 3, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.EmbedNewEntities(ctx, emb, EmbedOpts{}, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	ids, unknown, have := g.StaleEntities()
+	if !have || unknown != 0 || len(ids) != 0 {
+		t.Fatalf("после догонщика: устаревших %v, неизвестных %d, отпечатки есть: %v — ожидалось 0, 0, да",
+			ids, unknown, have)
+	}
+	// К понятию пришёл синоним — его вектор устарел, и это видно.
+	ent, _ := g.Entities().Get(2)
+	must(t, g.Entities().AddAliases(ent.ID, ent.Name+" synonym"))
+	ids, _, _ = g.StaleEntities()
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("устаревшими названы %v, ожидалось [2]", ids)
+	}
+}
