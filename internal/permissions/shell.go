@@ -115,6 +115,11 @@ type commandScan struct {
 	// unknown — первая команда, чьё имя станет известно только при запуске
 	// (`$X -rf ~`, `$(echo rm) …`): сверить её с запретами нельзя.
 	unknown string
+	// named — первый ключ или переменная, которыми программа запустит другую
+	// (`go build -toolexec=…`, `git -c core.pager=…`, `GIT_EXTERNAL_DIFF=…`).
+	// Названная программа сверяется с запретами как найденная команда, а саму
+	// строку решает человек в любом режиме (слово владельца 08.10.2026).
+	named string
 }
 
 // scanCommands находит все команды, которые запустит строка cmd.
@@ -199,6 +204,13 @@ func (s *commandScan) markUnknown(text string) {
 	s.unknown = text
 }
 
+// markNamed запоминает первый ключ, которым программа запустит другую.
+func (s *commandScan) markNamed(key string) {
+	if s.named == "" {
+		s.named = key
+	}
+}
+
 // leadingKeywords — служебные слова, за которыми начинается команда:
 // `if rm …`, `then rm …`, `! rm …`, `do rm …`.
 var leadingKeywords = map[string]bool{
@@ -224,6 +236,7 @@ func (s *commandScan) command(words []shellWord, depth int) {
 		w := words[0]
 		switch {
 		case isAssignment(w.text):
+			s.assignment(w.text, depth)
 			words = words[1:]
 			continue
 		case !w.quoted && leadingKeywords[w.text]:
@@ -411,6 +424,20 @@ func (s *commandScan) unwrap(prog string, args []shellWord, depth int) {
 			return
 		}
 		s.command(rest, depth)
+	case "go":
+		s.goKeys(args, depth)
+	case "sort":
+		s.sortKeys(args, depth)
+	case "git":
+		s.gitKeys(args, depth)
+	case "export", "declare", "typeset", "local", "readonly":
+		// `export GOFLAGS=-toolexec=…; go build` — та же переменная, что
+		// и присваивание перед командой.
+		for _, a := range args {
+			if isAssignment(a.text) {
+				s.assignment(a.text, depth)
+			}
+		}
 	}
 }
 
@@ -469,6 +496,202 @@ func (s *commandScan) execClauses(args []shellWord, depth int, toEnd bool, flags
 		}
 		s.command(args[i+1:j], depth)
 		i = j
+	}
+}
+
+// ── Ключи, которыми программа запускает другую ───────────────────────────────
+//
+// Правила Bash(go build:*), Bash(git log:*) стоят в разрешённых по умолчанию,
+// а у go и git есть ключи и настройки, которыми они запускают названную
+// программу. Запрет сверялся только с первым словом команды, и в режиме noask
+// `go build -toolexec="rm -rf x"` выполнял rm при Bash(rm:*) в запретах
+// (проверка правок по аудиту, 08.10.2026). Теперь программа из такого ключа —
+// найденная команда, а сам ключ отмечается: строку решает человек в любом
+// режиме. Имена ключей go — из `go help build`, `go help test`, `go help vet`
+// (Go 1.26.5).
+
+// goRunKeys — ключи go, называющие программу. "line" — строка команды, которую
+// go делит на слова (-toolexec 'cmd args', -exec xprog); "prog" — путь
+// к программе (-vettool); "flags" — флаги gccgo, которыми он запускает
+// программы из названного каталога (-gccgoflags=-B…), — их не сверить.
+var goRunKeys = map[string]string{"toolexec": "line", "exec": "line", "vettool": "prog", "gccgoflags": "flags"}
+
+// goKeys ищет такие ключи в любом месте строки: и после пакетов, и после
+// -args. Ключ go пишется с одним или двумя дефисами, значение — через «=» или
+// следующим словом, у ключей теста бывает приставка test. Внешний компоновщик
+// прячется в значении -ldflags, а `go env -w` записывает GOFLAGS насовсем —
+// ключ сработает в каждой следующей сборке без единого слова в строке.
+func (s *commandScan) goKeys(args []shellWord, depth int) {
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if i > 0 && args[0].text == "env" && (t == "-w" || t == "-u") {
+			s.markNamed("go env " + t)
+			continue
+		}
+		if len(t) < 2 || t[0] != '-' {
+			continue
+		}
+		name, val, has := strings.Cut(strings.TrimPrefix(t[1:], "-"), "=")
+		name = strings.TrimPrefix(name, "test.")
+		kind := goRunKeys[name]
+		if kind == "" && name != "ldflags" {
+			continue
+		}
+		if !has && i+1 < len(args) {
+			i++
+			val = args[i].text
+		}
+		switch {
+		case name == "ldflags":
+			s.extLinker(val, depth)
+		case kind == "line":
+			s.markNamed("go -" + name)
+			s.command(s.splitWords(val, depth), depth)
+		case kind == "prog":
+			s.markNamed("go -" + name)
+			s.command([]shellWord{{text: val}}, depth)
+		default:
+			s.markNamed("go -" + name)
+		}
+	}
+}
+
+// extLinker ищет внешний компоновщик в значении -ldflags: -extld называет
+// программу, -extldflags — её флаги (-B каталог подменяет её программы).
+func (s *commandScan) extLinker(val string, depth int) {
+	words := s.splitWords(val, depth)
+	for i := 0; i < len(words); i++ {
+		name, v, has := strings.Cut(strings.TrimLeft(words[i].text, "-"), "=")
+		switch name {
+		case "extld":
+			if !has && i+1 < len(words) {
+				i++
+				v = words[i].text
+			}
+			s.markNamed("go -ldflags -extld")
+			s.command([]shellWord{{text: v}}, depth)
+		case "extldflags":
+			s.markNamed("go -ldflags -extldflags")
+		}
+	}
+}
+
+// sortKeys: --compress-program запускает названную программу на каждый
+// временный файл; getopt принимает и сокращение (--compress-prog).
+func (s *commandScan) sortKeys(args []shellWord, depth int) {
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if t == "--" {
+			return
+		}
+		name, v, has := strings.Cut(strings.TrimPrefix(t, "--"), "=")
+		if !strings.HasPrefix(t, "--") || len(name) < 2 || !strings.HasPrefix("compress-program", name) {
+			continue
+		}
+		if !has && i+1 < len(args) {
+			i++
+			v = args[i].text
+		}
+		s.markNamed("sort --compress-program")
+		s.command([]shellWord{{text: v}}, depth)
+	}
+}
+
+// gitKeys разбирает общие ключи git до подкоманды и `git config`. -c задаёт
+// настройку на один запуск, а через настройки git запускает программы
+// (core.fsmonitor, core.pager, diff.external, alias.*) и подгружает чужие
+// (include.path), поэтому любое -c решает человек; значение известной
+// «командной» настройки сверяется с запретами. --config-env берёт значение
+// из окружения, --exec-path подменяет каталог подкоманд git: их не сверить.
+// `git config` с командной настройкой записывает её насовсем, как `go env -w`.
+func (s *commandScan) gitKeys(args []shellWord, depth int) {
+	i := 0
+	for ; i < len(args) && strings.HasPrefix(args[i].text, "-"); i++ {
+		t := args[i].text
+		switch {
+		case t == "-C":
+			i++ // каталог — следующее слово
+		case t == "-c":
+			if i+1 < len(args) {
+				i++
+				s.gitSetting(args[i].text, depth)
+			}
+		case strings.HasPrefix(t, "--config-env"), strings.HasPrefix(t, "--exec-path"):
+			name, _, _ := strings.Cut(t, "=")
+			s.markNamed("git " + name)
+		}
+	}
+	if i >= len(args) || args[i].text != "config" {
+		return
+	}
+	var plain []string
+	for _, a := range args[i+1:] {
+		if !strings.HasPrefix(a.text, "-") {
+			plain = append(plain, a.text)
+		}
+	}
+	if len(plain) > 0 && plain[0] == "set" {
+		plain = plain[1:] // git config set <имя> <значение>
+	}
+	if len(plain) >= 2 && gitRunsSetting(plain[0]) {
+		s.markNamed("git config " + plain[0])
+		s.script(strings.TrimPrefix(plain[1], "!"), depth)
+	}
+}
+
+// gitSetting разбирает значение -c имя=значение.
+func (s *commandScan) gitSetting(kv string, depth int) {
+	key, val, _ := strings.Cut(kv, "=")
+	s.markNamed("git -c " + key)
+	if gitRunsSetting(key) {
+		s.script(strings.TrimPrefix(val, "!"), depth) // alias.x=!команда — строка оболочки
+	}
+}
+
+// gitRunsSetting — настройка git, чьё значение git запускает как команду.
+// Список не полный (их десятки), поэтому -c спрашивает при любом имени, а этот
+// список решает только, сверять ли значение с запретами.
+func gitRunsSetting(key string) bool {
+	k := strings.ToLower(key)
+	switch k {
+	case "core.fsmonitor", "core.pager", "core.editor", "core.sshcommand", "core.askpass",
+		"diff.external", "sequence.editor", "gpg.program", "credential.helper", "web.browser":
+		return true
+	}
+	if strings.HasPrefix(k, "alias.") || strings.HasPrefix(k, "pager.") {
+		return true
+	}
+	for _, suf := range []string{".command", ".textconv", ".clean", ".smudge", ".process",
+		".driver", ".cmd", ".helper", ".program"} {
+		if strings.HasSuffix(k, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// envRunsProgram — переменные окружения, значение которых go и git
+// запускают как команду; CC и CXX go зовёт при сборке с cgo.
+var envRunsProgram = map[string]bool{
+	"GIT_EXTERNAL_DIFF": true, "GIT_SSH_COMMAND": true, "GIT_SSH": true, "GIT_PAGER": true,
+	"GIT_EDITOR": true, "GIT_SEQUENCE_EDITOR": true, "GIT_ASKPASS": true, "CC": true, "CXX": true,
+}
+
+// assignment разбирает присваивание перед командой или в export: GOFLAGS
+// несёт ключи go, переменные из envRunsProgram — строку команды, а GOENV
+// и GIT_CONFIG_* подсовывают настройки, которых по строке не видно.
+func (s *commandScan) assignment(t string, depth int) {
+	name, val, _ := strings.Cut(t, "=")
+	switch {
+	case name == "GOFLAGS":
+		s.goKeys(s.splitWords(val, depth), depth)
+	case envRunsProgram[name], strings.HasPrefix(name, "GIT_CONFIG_VALUE_"):
+		s.markNamed(name)
+		s.script(val, depth)
+	case name == "GOENV", name == "GIT_CONFIG_PARAMETERS", name == "GIT_CONFIG_COUNT",
+		name == "GIT_EXEC_PATH", name == "GIT_CONFIG_GLOBAL", name == "GIT_CONFIG_SYSTEM",
+		strings.HasPrefix(name, "GIT_CONFIG_KEY_"):
+		s.markNamed(name)
 	}
 }
 

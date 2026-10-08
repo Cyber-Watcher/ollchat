@@ -603,6 +603,17 @@ xclip -selection clipboard -t TARGETS -o         # при картинке в б
 `tar`, `chmod` — им разрешение не даётся вовсе. Ключи `sort` разбираются как у самой программы:
 слитное значение — тот же ключ (`sort -ofile` и `sort -rofile` пишут в `file`, `-original` — это
 `-o riginal`), сокращение `--out=` — это `--output=`. А файл с именем `*-delete-me*` не ключ `-delete`.
+То же у `go` и `git` из разрешённых по умолчанию: вопрос возвращают ключи, которыми они запускают
+программу или пишут по выбранному пути, — `go build -toolexec`, `go test -exec`, `go vet -vettool`,
+`-ldflags` с `-extld`, `-gccgoflags`, `-o`, `-pkgdir`, ключи профилей теста (`-coverprofile`, `-cpuprofile`,
+`-memprofile`, `-trace`, `-outputdir` и другие, в том числе с приставкой `test.`), `go env -w`; у git —
+`--output` (с `--format` он пишет любой текст в любой файл), `--no-index` (читает файлы вне репозитория)
+и общие ключи до подкоманды `-c`, `--config-env`, `--exec-path`; у `sort` — `--compress-program`.
+Поэтому `go build -o путь` теперь спрашивает, а `go build` без `-o` — нет.
+Ключи, которыми программа запускает другую (`-toolexec`, `-exec`, `-vettool`, `-extld` в `-ldflags`,
+`sort --compress-program`, `git -c`, а также `GOFLAGS`, `GIT_EXTERNAL_DIFF`, `CC` перед командой),
+спрашивают **в любом режиме**, включая noask, а названная ими программа сверяется с `deny`:
+`go build -toolexec="rm -rf x"` при `Bash(rm:*)` в запретах отклоняется.
  Посмотреть действующие — `/permissions`.
 
 **Песочница.** Выход за пределы рабочего каталога, `../` и символические ссылки наружу

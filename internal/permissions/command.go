@@ -160,18 +160,26 @@ func OnlySafePipeline(cmd string) bool {
 var writingFlags = map[string]writingKeys{
 	"find": {words: []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}},
 	// Короткие ключи sort со значением: -k, -o, -S, -t, -T.
-	"sort":  {short: "o", valued: "kSTt", long: []string{"output"}},
+	// --compress-program запускает названную программу на каждый временный
+	// файл: при Bash(sort:*) это был запуск чего угодно без вопроса.
+	"sort":  {short: "o", valued: "kSTt", long: []string{"output", "compress-program"}},
 	"cp":    {all: true},
 	"mv":    {all: true},
 	"tee":   {all: true},
 	"tar":   {all: true},
 	"chmod": {all: true},
+	// go и git стоят в разрешённых по умолчанию, и у обоих есть ключи,
+	// которыми сборка или чтение истории запускают программу, пишут файл
+	// по выбранному пути или читают файл вне проекта.
+	"go":  {scan: goRunsOrWrites},
+	"git": {scan: gitRunsOrWrites},
 }
 
 // writingKeys — чем читающая программа пишет.
 type writingKeys struct {
-	all   bool     // пишет всегда, какие ключи ни дай
-	words []string // ключи целым словом, как у find: -delete, -exec
+	all   bool                     // пишет всегда, какие ключи ни дай
+	scan  func(args []string) bool // свой разбор ключей, когда таблицы мало
+	words []string                 // ключи целым словом, как у find: -delete, -exec
 	// short — короткие пишущие ключи. Разбираются как у getopt: связка
 	// `-rofile` — это `-r -o file`, и `sort -ofile` пишет в file так же,
 	// как `sort -o file`. Сравнение слова целиком такое пропускало.
@@ -210,6 +218,9 @@ func (k writingKeys) writes(args []string) bool {
 	if k.all {
 		return true
 	}
+	if k.scan != nil {
+		return k.scan(args)
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		for _, w := range k.words {
@@ -217,7 +228,7 @@ func (k writingKeys) writes(args []string) bool {
 				return true
 			}
 		}
-		if k.short == "" {
+		if k.short == "" && len(k.long) == 0 {
 			continue
 		}
 		switch {
@@ -245,6 +256,81 @@ func (k writingKeys) writes(args []string) bool {
 		}
 	}
 	return false
+}
+
+// goWriteKeys — ключи go, которыми сборка или тест пишут файл по названному
+// пути. Имена — из `go help build`, `go help test`, `go help testflag`
+// и cmd/go/internal/work/build.go (Go 1.26.5). Правила Bash(go build:*)
+// и Bash(go test:*) стоят в разрешённых по умолчанию, и `go test
+// -coverprofile=~/.bashrc` проходил без вопроса (проверка правок по аудиту,
+// 08.10.2026). `go build` без -o пишет бинарь в рабочий каталог — это
+// разрешено правилом; -o выбирает любой путь. Ключи, которыми go запускает
+// программу (-toolexec, -exec, -vettool), — goRunKeys в shell.go: их
+// программа сверяется ещё и с запретами.
+var goWriteKeys = map[string]bool{
+	"o": true, "pkgdir": true, "outputdir": true,
+	"coverprofile": true, "cpuprofile": true, "memprofile": true,
+	"blockprofile": true, "mutexprofile": true, "trace": true,
+	"debug-actiongraph": true, "debug-runtime-trace": true, "debug-trace": true,
+}
+
+// goRunsOrWrites ищет такие ключи в любом месте строки: и до пакетов, и после
+// -args, где их получает уже тестовый бинарь (-test.cpuprofile пишет файл и
+// там). Ключ go пишется с одним или двумя дефисами, значение — через «=» или
+// следующим словом; у ключей теста бывает приставка test.
+func goRunsOrWrites(args []string) bool {
+	for i, a := range args {
+		// go env -w записывает настройку в файл окружения go насовсем:
+		// GOFLAGS=-toolexec=… сработает в каждой следующей сборке.
+		if i > 0 && args[0] == "env" && (a == "-w" || a == "-u") {
+			return true
+		}
+		// Внешний компоновщик из -ldflags (-extld, -extldflags) — любая
+		// программа; значение -ldflags приходит одним словом.
+		if strings.Contains(a, "-extld") {
+			return true
+		}
+		if len(a) < 2 || a[0] != '-' {
+			continue
+		}
+		name := strings.TrimPrefix(a[1:], "-")
+		name, _, _ = strings.Cut(name, "=")
+		name = strings.TrimPrefix(name, "test.")
+		if goWriteKeys[name] || goRunKeys[name] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// gitOutputKeys — длинные ключи git после подкоманды: --output пишет вывод
+// log, diff и show в любой файл, а с --format — любой текст (в ~/.bashrc
+// тоже); --no-index даёт diff читать файлы вне репозитория, мимо запрета
+// Read(~/.ssh/**). На git 2.53.0 сокращений `--outp=` git не принимает, но
+// сверяем и их: вопрос дешевле, чем разница версий.
+var gitOutputKeys = writingKeys{long: []string{"output", "no-index"}}
+
+// gitRunsOrWrites сверяет общие ключи git до подкоманды и ключи после неё.
+// До подкоманды -c и --config-env задают настройку, а через настройку
+// (core.fsmonitor, core.pager, diff.external) git запускает любую программу;
+// --exec-path подменяет каталог его команд. Это важно при Bash(git:*): у
+// Bash(git log:*) подкоманда стоит первым словом. -c ПОСЛЕ подкоманды —
+// другой ключ (вид diff у log), его не трогаем.
+func gitRunsOrWrites(args []string) bool {
+	i := 0
+	for ; i < len(args) && strings.HasPrefix(args[i], "-"); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-c") || strings.HasPrefix(a, "--config-env") || strings.HasPrefix(a, "--exec-path") {
+			return true
+		}
+		if a == "-C" {
+			i++ // каталог — следующее слово
+		}
+	}
+	if i >= len(args) {
+		return false
+	}
+	return gitOutputKeys.writes(args[i+1:])
 }
 
 // CommandName возвращает имя запускаемой программы — первое слово команды

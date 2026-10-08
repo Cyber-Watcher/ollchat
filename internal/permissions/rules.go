@@ -324,6 +324,9 @@ type bashVerdict struct {
 	// unknown — команда, имя которой станет известно только при запуске:
 	// сверить её с запретами нельзя, и решать должен человек.
 	unknown string
+	// named — ключ, которым программа запускает другую (`go -toolexec`):
+	// названная программа сверена с запретами, а решает человек.
+	named string
 }
 
 // bashDeny сверяет с запретами каждую команду, которую запустит строка:
@@ -344,7 +347,9 @@ func (s *Set) bashDeny(target string) bashVerdict {
 	}
 	if !hasBash {
 		// Сверять не с чем: имя, вычисляемое при запуске, тоже ничего не обходит.
-		return bashVerdict{}
+		// Но ключ, которым программа запускает другую, решает человек и без
+		// запретов (слово владельца 08.10.2026).
+		return bashVerdict{named: scanCommands(target).named}
 	}
 	scan := scanCommands(target)
 	for _, c := range scan.found {
@@ -354,7 +359,7 @@ func (s *Set) bashDeny(target string) bashVerdict {
 			}
 		}
 	}
-	return bashVerdict{unknown: scan.unknown}
+	return bashVerdict{unknown: scan.unknown, named: scan.named}
 }
 
 // Rules возвращает все правила по категориям — для команды /permissions.

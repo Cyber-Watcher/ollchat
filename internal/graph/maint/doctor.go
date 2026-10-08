@@ -102,6 +102,16 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		stage.done()
 		return err
 	}
+	// Журналы на сдвиг записей — по сырым файлам: доктор иначе видит только
+	// принятые записи, а чтение журналов принимает любые (journalshift.go).
+	// Реестр — все записи коллекции, с удалёнными: отметка удалённой книги —
+	// законный след, а не мусор сдвига.
+	stage.say("проверяю журналы графа на сдвиг записей")
+	inRegistry := map[uint32]bool{}
+	for _, b := range coll.Books() {
+		inRegistry[b.ID] = true
+	}
+	shift, shiftErr := g.JournalShift(func(doc uint32) bool { return inRegistry[doc] })
 
 	stage.done()
 	fmt.Fprintf(stdout, "коллекция %s · граф\n", name)
@@ -134,6 +144,11 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	if ms.Gone > 0 {
 		fmt.Fprintf(stdout, "    отметок книг, которых в коллекции НЕТ: %d (в %d книгах) — "+
 			"в счёт выше не входят\n", ms.Gone, ms.GoneBooks)
+	}
+	if shiftErr != nil {
+		fmt.Fprintf(stdout, "  журналы: проверка на сдвиг записей не удалась — %v\n", shiftErr)
+	} else {
+		printJournalShift(stdout, shift)
 	}
 
 	fmt.Fprintf(stdout, "  %s\n", g.PromptLine())
@@ -378,6 +393,24 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 	if g.Locked() {
 		fmt.Fprintln(stdout, "  сейчас идёт сборка — советы ниже выполняйте после её остановки")
 	}
+	// Сдвиг журналов — первым: любой следующий шаг (сборка, чистка,
+	// уплотнение) пишет поверх испорченного и запутывает разбор. Без шага
+	// доктор сказал бы «всё в порядке» под строкой со сдвигом.
+	if shiftErr != nil {
+		step(fmt.Sprintf("ollchat --graph-doctor %s", name),
+			"журналы графа на сдвиг записей не проверены (см. «журналы» выше) — повторить, а до того граф не править")
+	}
+	if shift.Bad() > 0 {
+		step(fmt.Sprintf("ollchat --graph-archive %s — и больше ничего: граф не править", name),
+			"в журналах записи с недопустимыми полями — они прочитаны со сдвигом (см. «журналы» выше); "+
+				"снять архив и разобрать с владельцем, до того ни сборки, ни чистки, ни уплотнения")
+	}
+	// Без отметки во время сборки — её же хвост: отметки ещё в её буфере.
+	if shift.Unmarked() > 0 && shift.Bad() == 0 && !g.Locked() {
+		step(fmt.Sprintf("ollchat --graph-archive %s — и разобрать с владельцем, граф не править", name),
+			"упоминания или связи из кусков без отметки разбора (см. «журналы» выше): след последнего жёсткого обрыва "+
+				"или сдвиг на 4 и 8 байт, которого поля записи не выдают; что из двух — решает место первой и доля после неё")
+	}
 	if cov.pending > 0 {
 		// Называем настоящие каталоги, а не «<каталог>»: ключ --graph-folder
 		// отбирает книги по куску пути **внутри библиотеки**, и человеку
@@ -443,6 +476,55 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 		fmt.Fprintln(stdout, "  ничего — граф, темы и векторы в порядке")
 	}
 	return nil
+}
+
+// printJournalShift печатает раздел «журналы»: сдвиг записей двоичных
+// журналов графа (graph.JournalShift).
+//
+// Строки до « — » сверяет второй прибор (ollscripts/graphdoctorcheck.py)
+// своим разбором тех же файлов, поэтому их вид менять только вместе с ним.
+// Первая строка печатается всегда, и с нулём: молчание о проверке
+// неотличимо от непроведённой проверки. Сдвигом называется только первый
+// счёт — недопустимые поля; куски без отметки, книги не из реестра и
+// нецелый хвост печатаются рядом, но законные причины у них есть.
+func printJournalShift(stdout io.Writer, r graph.JournalShiftReport) {
+	fmt.Fprintf(stdout, "  журналы: записей с недопустимыми полями %d (mentions.log %d, edges.log %d, progress.log %d)\n",
+		r.Bad(), r.Mentions.Bad, r.Edges.Bad, r.Progress.Bad)
+	for _, c := range r.All() {
+		if c.Bad == 0 {
+			continue
+		}
+		fmt.Fprintf(stdout, "    ВНИМАНИЕ: %s читается со сдвигом: первая недопустимая запись на смещении %d байт, "+
+			"последняя на %d; после первой недопустимых %d из %d (%d%%)\n",
+			c.File, c.BadFirst, c.BadLast, c.Bad, c.BadAfter, 100*c.Bad/max(c.BadAfter, 1))
+	}
+	if r.Bad() > 0 {
+		fmt.Fprintln(stdout, "      обрыв — на этом месте или до одной записи раньше: у первой сдвинутой записи поля бывают целы")
+	}
+	fmt.Fprintf(stdout, "  журналы: записей из кусков без отметки разбора %d (mentions.log %d, edges.log %d)\n",
+		r.Unmarked(), r.Mentions.Unmarked, r.Edges.Unmarked)
+	for _, c := range []graph.JournalCheck{r.Mentions, r.Edges} {
+		if c.Unmarked == 0 {
+			continue
+		}
+		fmt.Fprintf(stdout, "    %s: первая на смещении %d байт, после неё таких %d из %d (%d%%)\n",
+			c.File, c.UnmarkedFirst, c.Unmarked, c.UnmarkedAfter, 100*c.Unmarked/max(c.UnmarkedAfter, 1))
+	}
+	if r.Unmarked() > 0 {
+		fmt.Fprintln(stdout, "      законно так бывает на хвосте идущей сборки, на кусках последнего жёсткого обрыва и при сдвинутых отметках;")
+		fmt.Fprintln(stdout, "      сплошь после одного места — сдвиг упоминаний на 4 или 8 байт: поля записи его не выдают")
+	}
+	if r.Unknown() > 0 {
+		fmt.Fprintf(stdout, "  журналы: записей с книгой не из реестра %d (mentions.log %d, edges.log %d, progress.log %d) — "+
+			"след перечитанных книг и уплотнённой коллекции, сам по себе не сдвиг\n",
+			r.Unknown(), r.Mentions.Unknown, r.Edges.Unknown, r.Progress.Unknown)
+	}
+	for _, c := range r.All() {
+		if c.Tail > 0 {
+			fmt.Fprintf(stdout, "  журналы: нецелый хвост %s %d байт — оборванная запись: срежется перед следующей дозаписью, "+
+				"чтению не мешает (во время сборки — её недописанная запись)\n", c.File, c.Tail)
+		}
+	}
 }
 
 // repartitionDue — пора ли пересчитывать разметку тем.

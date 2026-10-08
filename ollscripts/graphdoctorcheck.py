@@ -13,7 +13,7 @@
 # ~/.config/ollchat/config.toml), иначе ~/.local/share/ollchat/kb. До 07.10.2026
 # последний путь был вписан намертво, и на машине с другим kb.dir прибор
 # сверял не ту базу — или падал, не найдя её.
-import argparse, collections, json, os, pathlib, re, struct, sys
+import argparse, collections, json, os, pathlib, re, struct, sys, zlib
 
 
 def config_path(flag):
@@ -245,6 +245,136 @@ if gone:
 if other:
     print(f"  отметок у кусков, которых в коллекции нет, при живой книге: {other}")
 print(f"  (числа — как у доктора, по кускам живых книг; отметок в журнале всего {len(marks)})")
+
+# --- журналы на сдвиг записей -------------------------------------------------
+# До 07.10.2026 после жёсткого обрыва (kill -9) в хвосте двоичного журнала
+# оставался обрывок записи, а новые записи ложились ПОСЛЕ него: всё дописанное
+# читается со сдвигом — мусорные номера понятий, книг, типов. Программа
+# принимает любые значения, поэтому сдвиг ищется здесь по формату записей,
+# своим разбором, без кода программы:
+#   mentions.log, 12 байт: понятие, книга, кусок (u32 LE);
+#   edges.log, 24 байта: начало, конец (u32), тип (u8, 1..7), три нулевых
+#     байта, вес (f32), книга, кусок (u32);
+#   progress.log, 12 байт: книга, кусок, признак (u32, 1..4).
+# Три счёта, как у доктора:
+#   недопустимые поля — признак сдвига: понятие 0 или дальше границы,
+#     у связи тип вне 1..7, ненулевое дополнение, концы 0 или равные,
+#     у отметки признак вне 1..4;
+#   кусок без отметки — упоминание или связь, чей кусок не отмечен в
+#     progress.log: при сдвиге упоминаний на 4 и 8 байт (настоящие обрывки:
+#     65536 % 12 = 4) поля остаются допустимыми, а пара «книга, кусок» — мусор;
+#   книга не из реестра — не сдвиг (перечитанные книги), считается отдельно.
+# Запись с недопустимыми полями во второй и третий счёт не идёт. Граница
+# номера понятия — своим чтением реестра: наибольший номер в entities.jsonl,
+# отметка entities.maxid и число векторов по паспорту (если паспорт принят:
+# тот же признак формата, данных не меньше, сумма сходится), плюс 65536.
+def entity_limit():
+    top = max((i for i in ents if isinstance(i, int)), default=0)
+    mx, _ = read_json(gdir/"entities.maxid")
+    if isinstance(mx, dict) and isinstance(mx.get("max_id"), int):
+        top = max(top, mx["max_id"])
+    vm, _ = read_json(gdir/"entities.vecmeta")
+    if isinstance(vm, dict) and vm.get("magic") == "OLLGRV1":
+        count, dim = vm.get("count") or 0, vm.get("dim") or 0
+        want = count*dim
+        vec = gdir/"entities.vec"
+        # Паспорт важен, только когда он дальше реестра: тогда его и сверяем.
+        if count > top and want > 0 and size_of(vec) >= want:
+            with vec.open("rb") as fh:
+                body = fh.read(want)
+            if not vm.get("crc") or zlib.crc32(body) == vm["crc"]:
+                top = count
+    return top + 65536
+
+
+def new_check(fname):
+    return {"file": fname, "records": 0, "tail": 0, "bad": 0, "bad_first": -1, "bad_last": -1,
+            "unmarked": 0, "unmarked_first": -1, "unknown": 0}
+
+
+def records_of(fname, size, fmt):
+    """(отчёт, записи с их смещениями) — целые записи, хвост отдельно."""
+    c = new_check(fname)
+    p = gdir/fname
+    raw = p.read_bytes() if p.exists() else b""
+    n = len(raw)//size
+    c["records"], c["tail"] = n, len(raw) - n*size
+    return c, ((i*size, rec) for i, rec in enumerate(struct.iter_unpack(fmt, memoryview(raw)[:n*size])))
+
+
+def mark_bad(c, off):
+    if c["bad"] == 0:
+        c["bad_first"] = off
+    c["bad"] += 1
+    c["bad_last"] = off
+
+
+def mark_chunk(c, off, doc, ord_):
+    if (doc, ord_) not in good_marks:
+        if c["unmarked"] == 0:
+            c["unmarked_first"] = off
+        c["unmarked"] += 1
+    if doc not in registry:
+        c["unknown"] += 1
+
+
+def after(c, n, first, size):
+    return c["records"] - first//size if n else 0
+
+
+limit = entity_limit()
+# Реестр — все записи о книгах, с удалёнными: отметка удалённой книги — след,
+# а не мусор. Запись без номера у программы — книга 0.
+registry = {v if v is not None else 0 for v in by_path.values()}
+good_marks = set()
+prog, recs = records_of("progress.log", 12, "<III")
+for off, (d, o, m) in recs:
+    if not 1 <= m <= 4:
+        mark_bad(prog, off)
+        continue
+    good_marks.add((d, o))
+    if d not in registry:
+        prog["unknown"] += 1
+ment, recs = records_of("mentions.log", 12, "<III")
+for off, (e, d, o) in recs:
+    if e == 0 or e > limit:
+        mark_bad(ment, off)
+        continue
+    mark_chunk(ment, off, d, o)
+edge, recs = records_of("edges.log", 24, "<IIBBBBxxxxII")
+for off, (s, t, typ, p0, p1, p2, d, o) in recs:
+    if s == 0 or s > limit or t == 0 or t > limit or s == t or not 1 <= typ <= 7 or p0 | p1 | p2:
+        mark_bad(edge, off)
+        continue
+    if d == 0:                           # связь без подтверждения: кусок не назван
+        continue
+    mark_chunk(edge, off, d, o)
+
+sizes = {"mentions.log": 12, "edges.log": 24, "progress.log": 12}
+journals = [ment, edge, prog]
+bad = sum(c["bad"] for c in journals)
+print(f"журналы: записей с недопустимыми полями {bad} "
+      f"(mentions.log {ment['bad']}, edges.log {edge['bad']}, progress.log {prog['bad']})")
+for c in journals:
+    if c["bad"]:
+        a = after(c, c["bad"], c["bad_first"], sizes[c["file"]])
+        print(f"  ВНИМАНИЕ: {c['file']} читается со сдвигом: первая недопустимая запись на смещении {c['bad_first']} байт, "
+              f"последняя на {c['bad_last']}; после первой недопустимых {c['bad']} из {a} ({100*c['bad']//max(a, 1)}%)")
+unmarked = ment["unmarked"] + edge["unmarked"]
+print(f"журналы: записей из кусков без отметки разбора {unmarked} "
+      f"(mentions.log {ment['unmarked']}, edges.log {edge['unmarked']})")
+for c in (ment, edge):
+    if c["unmarked"]:
+        a = after(c, c["unmarked"], c["unmarked_first"], sizes[c["file"]])
+        print(f"  {c['file']}: первая на смещении {c['unmarked_first']} байт, "
+              f"после неё таких {c['unmarked']} из {a} ({100*c['unmarked']//max(a, 1)}%)")
+unknown = sum(c["unknown"] for c in journals)
+if unknown:
+    print(f"журналы: записей с книгой не из реестра {unknown} "
+          f"(mentions.log {ment['unknown']}, edges.log {edge['unknown']}, progress.log {prog['unknown']}) — не сдвиг")
+for c in journals:
+    if c["tail"]:
+        print(f"журналы: нецелый хвост {c['file']} {c['tail']} байт — оборванная запись")
 
 # --- темы ---------------------------------------------------------------------
 comm, why = read_json(gdir/"communities.json")

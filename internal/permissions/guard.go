@@ -225,6 +225,15 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 			"имя программы в «%s» станет известно только при запуске, "+
 				"и сверить его с запретами нельзя: требуется подтверждение", verdict.unknown)}
 	}
+	// Ключ, которым разрешённая программа запускает другую (`go build
+	// -toolexec=…`, `git -c core.pager=…`): названная программа уже сверена
+	// с запретами выше, но решает человек — в любом режиме, при любых
+	// сеансовых разрешениях и правилах allow (слово владельца 08.10.2026).
+	if verdict.named != "" {
+		return Result{Decision: DecisionAsk, Reason: fmt.Sprintf(
+			"ключ «%s» запускает другую программу: она сверена с запретами, "+
+				"но требуется подтверждение в любом режиме", verdict.named)}
+	}
 
 	segments := SplitCommand(req.Target)
 	if len(segments) == 0 {
@@ -275,9 +284,10 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 	decision, rule := g.set.Check(KindBash, req.Target)
 	if decision == DecisionAllow && WritesSomething(req.Target) {
 		// Разрешение дано читающей программе, а ключ делает её пишущей:
-		// `find … -delete`, `sort -o файл`. Спрашиваем.
+		// `find … -delete`, `sort -o файл`, `go build -toolexec=…`,
+		// `git diff --no-index ~/.ssh/…`. Спрашиваем.
 		return Result{Decision: applyMode(DecisionAsk, KindBash, mode),
-			Reason: "команда разрешена, но этот её ключ пишет или запускает чужое"}
+			Reason: "команда разрешена, но этот её ключ пишет, читает вне проекта или запускает чужое"}
 	}
 	if decision == DecisionAllow {
 		return Result{Decision: DecisionAllow, Rule: rule,
