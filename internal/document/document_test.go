@@ -128,6 +128,37 @@ func TestDetectByContentNotExtension(t *testing.T) {
 	}
 }
 
+// TestIndexCodeWithPDFSignatureIsText закрепляет, что файл с расширением кода
+// при индексации остаётся текстом, даже если в его первом килобайте написано
+// «%PDF-». Так выглядит тест сборщика PDF (internal/pdf/pdf_test.go): по
+// содержимому он принимался за документ PDF, разбор не находил в нём страниц,
+// и файл в 27 КБ пропадал из поиска по проекту (замер 08.10.2026: один такой
+// файл из 1451 текстовых). Проверка идёт теми же вызовами, что зовёт индексация
+// (Probe и Parts), а не одним detectForIndex.
+func TestIndexCodeWithPDFSignatureIsText(t *testing.T) {
+	code := []byte("package pdf\n\n// build собирает документ вручную.\nfunc build() []byte {\n" +
+		"\treturn []byte(\"%PDF-1.7\\n\")\n}\n" + strings.Repeat("// строка для объёма куска.\n", 20))
+	for _, name := range []string{"pdf_test.go", "make_pdf.py", "probe.sh"} {
+		path := writeTemp(t, name, code)
+		if got := detectForIndex(path); got != KindText {
+			t.Errorf("%s: detectForIndex → %q, ожидался текст", name, got)
+		}
+		if d, err := Probe(path, 1<<20, 5); err != nil || d.Kind != KindText {
+			t.Errorf("%s: Probe → (%v, %v), ожидался текст без ошибки", name, d, err)
+		}
+		if d, _, err := Parts(path, 1<<20); err != nil || d.Kind != KindText {
+			t.Errorf("%s: Parts → (%v, %v), ожидался текст без ошибки", name, d, err)
+		}
+	}
+	// Расширение кода решает только для кода: настоящий PDF по-прежнему
+	// узнаётся по содержимому, с расширением или без.
+	for _, name := range []string{"doc.pdf", "документ"} {
+		if got := detectForIndex(writeTemp(t, name, samplePDF())); got != KindPDF {
+			t.Errorf("%s: detectForIndex → %q, ожидался PDF", name, got)
+		}
+	}
+}
+
 // Книга со сжатым mimetype узнаётся по оглавлению архива, а архив, который
 // не книга, в память целиком не читается: прежде любой файл с «PK» в начале
 // читался весь ещё до проверки размера.
