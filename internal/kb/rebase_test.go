@@ -196,6 +196,64 @@ func TestRebaseReportsMissingButSucceeds(t *testing.T) {
 	}
 }
 
+// Помеченная удалённой книга не должна попадать в предупреждение «не нашлось».
+//
+// Запись удалённой книги остаётся в реестре, а файла у неё давно нет (переименована,
+// старое расположение): так на втором компьютере приём печатал `project_plan.md`
+// и `stage01.md` как потерянные, хотя нужные файлы лежали на месте под новыми именами.
+// Пути удалённых по-прежнему переписываются (`Books` их считает), но в `Missing`
+// их нет, а число их без файла отдаётся отдельно.
+func TestRebaseMissingSkipsDeleted(t *testing.T) {
+	c, oldRoot, _ := rebaseFixture(t)
+	nowhere := filepath.Join(t.TempDir(), "нет-такого")
+	if err := c.markDeleted(1); err != nil {
+		t.Fatal(err)
+	}
+	deletedPath := filepath.Join(nowhere, "go", "first.pdf")
+	livePath := filepath.Join(nowhere, "second.pdf")
+
+	res, err := c.Rebase(oldRoot, nowhere, false)
+	if err != nil {
+		t.Fatalf("перенос обязан пройти даже без файлов на месте: %v", err)
+	}
+	if res.Books != 2 {
+		t.Errorf("переписано %d книг, ожидалось 2: путь удалённой тоже переписывается", res.Books)
+	}
+	if len(res.Missing) != 1 || res.Missing[0] != livePath {
+		t.Errorf("в предупреждении %v; ожидалась одна живая книга %q", res.Missing, livePath)
+	}
+	for _, p := range res.Missing {
+		if p == deletedPath {
+			t.Errorf("удалённая книга названа пропавшей: %q", p)
+		}
+	}
+	if res.MissingDeleted != 1 {
+		t.Errorf("удалённых без файла насчитано %d, ожидалась 1", res.MissingDeleted)
+	}
+}
+
+// Все пропавшие — удалённые: предупреждения нет вовсе, но счёт отдаётся.
+func TestRebaseAllMissingDeletedGivesNoWarning(t *testing.T) {
+	c, oldRoot, _ := rebaseFixture(t)
+	nowhere := filepath.Join(t.TempDir(), "нет-такого")
+	for _, id := range []uint32{1, 2} {
+		if err := c.markDeleted(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := c.Rebase(oldRoot, nowhere, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Missing) != 0 {
+		t.Errorf("все пропавшие удалены, а предупреждение названо: %v", res.Missing)
+	}
+	if res.MissingDeleted != 2 {
+		t.Errorf("удалённых без файла насчитано %d, ожидалось 2", res.MissingDeleted)
+	}
+}
+
 // Перенос между машинами не должен делать книгу «изменившейся».
 //
 // ResilioSync переносит время правки только до секунды. Замер 05.09.2026 на одном

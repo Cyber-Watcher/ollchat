@@ -1019,6 +1019,11 @@ func Rebase(stdout io.Writer, cfg *config.Config, name, from, to string, dry boo
 		}
 		fmt.Fprintln(stdout, "  поиск, векторы(смыслы) и граф от этого не пострадают — файлы нужны только доливке")
 	}
+	if res.MissingDeleted > 0 {
+		// Отдельно и без списка: это старые записи, помеченные удалёнными
+		// (переименованные и перенесённые файлы), потерей они не являются.
+		fmt.Fprintf(stdout, "  помечены удалёнными и без файла по новому пути: %d — это не потеря, их файлы не нужны\n", res.MissingDeleted)
+	}
 	if dry {
 		fmt.Fprintln(stdout, "применить: та же команда без --kb-dry-run")
 	}

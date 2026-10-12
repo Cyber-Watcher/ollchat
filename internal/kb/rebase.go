@@ -45,7 +45,10 @@ type RebaseResult struct {
 	Roots   int      // корней коллекции с переписанным путём
 	Skipped int      // книг, чей путь не начинался со старого корня
 	Missing []string // из переписанных не нашлось на диске (первые несколько)
-	DryRun  bool
+	// MissingDeleted — переписанных, которых нет на диске, но книга помечена
+	// удалённой: файла у такой записи и не должно быть, предупреждать не о чем.
+	MissingDeleted int
+	DryRun         bool
 }
 
 // Rebase переписывает старый корень на новый в реестре книг и в паспорте.
@@ -91,8 +94,18 @@ func (c *Collection) Rebase(from, to string, dry bool) (RebaseResult, error) {
 		}
 		changed[i].Path = np
 		res.Books++
-		if _, err := os.Stat(np); err != nil && len(res.Missing) < 5 {
-			res.Missing = append(res.Missing, np)
+		if _, err := os.Stat(np); err != nil {
+			// Удалённая книга остаётся в реестре, а файла у неё давно нет
+			// (переименована, перенесена): это не потеря, и называть её
+			// пропавшей значило бы пугать там, где всё на месте. Признак
+			// `BookRec.Deleted` здесь не заполнен, поэтому смотрим набор
+			// коллекции; c.mu не держится — isDeleted берёт его сам.
+			switch {
+			case c.isDeleted(changed[i].ID):
+				res.MissingDeleted++
+			case len(res.Missing) < 5:
+				res.Missing = append(res.Missing, np)
+			}
 		}
 	}
 
