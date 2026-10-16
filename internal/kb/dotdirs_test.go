@@ -57,3 +57,45 @@ func TestCollectSkipsDotDirs(t *testing.T) {
 		t.Errorf("в индекс попала копия из .sync: %s", paths[0])
 	}
 }
+
+// Корень с точкой в имени обходится целиком — его назвал человек, — а каталоги
+// с точкой ВНУТРИ корня по-прежнему пропускаются (14.10.2026: до правки корень
+// вроде `~/.notes` молча давал пустую коллекцию).
+func TestCollectDotRootIsWalked(t *testing.T) {
+	base, root := newBase(t)
+	doc := filepath.Join(root, "plan")
+	dotRoot := filepath.Join(t.TempDir(), ".hidden")
+	inner := filepath.Join(dotRoot, ".git")
+	for _, d := range []string{doc, dotRoot, inner} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := "# Заголовок\n\n" + strings.Repeat("Строка документа о сборке графа и журналах шагов.\n", 40)
+	for _, p := range []string{filepath.Join(doc, "a.md"), filepath.Join(dotRoot, "b.md"),
+		filepath.Join(inner, "c.md")} {
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	books := func(name string, roots ...string) []string {
+		c, err := base.Create(name, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Add(context.Background(), roots, IndexOpts{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, b := range c.LiveBooks() {
+			out = append(out, filepath.Base(b.Path))
+		}
+		return out
+	}
+	if got := books("docs", root); len(got) != 1 || got[0] != "a.md" {
+		t.Errorf("обычный корень: %v", got)
+	}
+	if got := books("dot", dotRoot); len(got) != 1 || got[0] != "b.md" {
+		t.Errorf("корень с точкой в имени: ждали только b.md (без .git внутри), взято %v", got)
+	}
+}

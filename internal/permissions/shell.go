@@ -120,6 +120,10 @@ type commandScan struct {
 	// Названная программа сверяется с запретами как найденная команда, а саму
 	// строку решает человек в любом режиме (слово владельца 08.10.2026).
 	named string
+	// truncates — цели перенаправлений `>` и `>|`, которые обнулят файл перед
+	// записью (этап 112, Т9: перезапись существующего файла необратима; `>>`
+	// дописывает и сюда не идёт). Цель с подстановкой не записывается.
+	truncates []string
 }
 
 // scanCommands находит все команды, которые запустит строка cmd.
@@ -860,6 +864,7 @@ type shellLexer struct {
 	brace   bool // в слове была «{» без кавычек — возможно, раскрытие скобок
 
 	redirect bool      // следующее слово — цель перенаправления, не аргумент
+	redirOp  string    // знак этого перенаправления: «>», «>>», «>|», «>&», «<»…
 	heredoc  int       // 1 — следующее слово ограничитель <<, 2 — <<-
 	pending  []hereDoc // тела, которые начнутся после перевода строки
 
@@ -1223,7 +1228,7 @@ func (l *shellLexer) angle() {
 	switch {
 	case c == '<' && l.peek(0) == '<' && l.peek(1) == '<':
 		l.pos += 2 // <<< — строка на вход; её подстановки разберутся как у слова
-		l.redirect = true
+		l.redirect, l.redirOp = true, "<<<"
 	case c == '<' && l.peek(0) == '<':
 		l.pos++
 		l.heredoc = 1
@@ -1232,10 +1237,12 @@ func (l *shellLexer) angle() {
 			l.heredoc = 2
 		}
 	default:
+		op := string(c)
 		if n := l.peek(0); n == '>' || n == '|' || n == '&' || c == '<' && n == '>' {
+			op += string(n)
 			l.pos++
 		}
-		l.redirect = true
+		l.redirect, l.redirOp = true, op
 	}
 }
 
@@ -1324,6 +1331,9 @@ func (l *shellLexer) endWord() {
 		l.heredoc = 0
 	case l.redirect:
 		l.redirect = false
+		if (l.redirOp == ">" || l.redirOp == ">|") && !w.dynamic && l.scan != nil {
+			l.scan.truncates = append(l.scan.truncates, text)
+		}
 	case !w.quoted && (text == "{" || text == "}"):
 		// Группа команд: { rm -rf x; } — скобка отделяет команды, как «;».
 		l.endCommand()

@@ -3,6 +3,7 @@ package graph
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
@@ -249,6 +250,7 @@ func RenderEntity(src Chunks, e FoundEntity, chunks []ChunkKey, opt RenderOpts) 
 	}
 	if len(chunks) > 0 && src != nil {
 		b.WriteString("\nГде об этом написано:\n")
+		names := append([]string{e.Name}, e.Aliases...)
 		var i int
 		for _, k := range chunks {
 			info, ok := src.ChunkByRef(k.Doc, k.Ord)
@@ -261,7 +263,7 @@ func RenderEntity(src Chunks, e FoundEntity, chunks []ChunkKey, opt RenderOpts) 
 				fmt.Fprintf(&b, " · id=%s/%d#%d", opt.Collection, k.Doc, k.Ord)
 			}
 			b.WriteString("\n")
-			b.WriteString(indent(cut(info.Text, opt.SnippetRunes), "    "))
+			b.WriteString(indent(EntitySnippet(info.Text, names, opt.SnippetRunes), "    "))
 			b.WriteString("\n")
 		}
 	}
@@ -551,6 +553,70 @@ func around(text string, words []string, runes int) string {
 		out = "…" + out
 	}
 	return out
+}
+
+// EvidenceWindow — окно куска, где оба конца связи стоят ближе всего, той же
+// длины и тем же правилом, что выдержка под связью в выдаче (`around`). Нужно
+// приборам, которые показывают связь человеку для разметки (этап 112, О3).
+func EvidenceWindow(text, src, dst string, runes int) string {
+	return cut(around(text, []string{src, dst}, runes), runes)
+}
+
+// EntitySnippet — выдержка карточки понятия: окно вокруг первого вхождения имени
+// или синонима (имена по порядку списка, имя понятия первым), а не начало куска.
+//
+// **Зачем.** Карточка печатала первые 400 знаков куска, а понятие стоит в куске
+// где угодно: разметка 120 показанных выдержек карточек 30 понятий (этап 112, О5,
+// 16.10.2026) признала «про понятие» только 41, с этим окном на тех же кусках — 92
+// (лучше у 27 понятий из 30, хуже ни у одного). Окно берётся
+// так же, как у выдержки связи (`around`): с отступом влево на треть, чтобы фраза
+// не начиналась с самого слова. Имени в куске нет — начало куска, как прежде.
+func EntitySnippet(text string, names []string, runes int) string {
+	if at := NameAt(text, names); at >= 0 {
+		r := []rune(text)
+		from := max(len([]rune(text[:at]))-runes/3, 0)
+		if from > 0 {
+			return "…" + cut(string(r[from:]), runes)
+		}
+	}
+	return cut(text, runes)
+}
+
+// NameAt — байтовое место первого вхождения первого из имён, стоящего в тексте
+// отдельным словом (без учёта регистра): «Go» внутри «good» не считается.
+// -1 — ни одного.
+func NameAt(text string, names []string) int {
+	low := strings.ToLower(text)
+	for _, n := range names {
+		w := strings.ToLower(strings.TrimSpace(n))
+		if w == "" {
+			continue
+		}
+		for _, i := range allIndexes(low, w) {
+			if wordEdge(low, i, i+len(w)) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// wordEdge — слово low[i:j] не продолжает соседнее: слева и справа не буква
+// и не цифра.
+func wordEdge(low string, i, j int) bool {
+	if i > 0 {
+		r, _ := utf8.DecodeLastRuneInString(low[:i])
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return false
+		}
+	}
+	if j < len(low) {
+		r, _ := utf8.DecodeRuneInString(low[j:])
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // cut обрезает текст по знакам, а не по байтам: библиотека двуязычная,

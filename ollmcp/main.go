@@ -35,6 +35,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/mcp"
 	"os"
 
+	"github.com/Cyber-Watcher/ollchat/internal/buildinfo"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 )
 
@@ -110,6 +111,10 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 		}
 		return nil
 	}
+	// Начало сеанса службы (этап 112, Е6, Ц2): сборка и отпечаток набора
+	// инструментов — по ним видно, каким набором отвечали клиенту.
+	steps.Write(steplog.Step{Kind: steplog.KindSession, Extra: map[string]any{
+		"build": buildinfo.Describe(""), "tools": srv.Fingerprint(), "tools_n": len(srv.Tools())}})
 
 	// Режим stdio — то, ради чего эта программа и существует отдельно:
 	// клиент MCP запускает её сам и говорит через стандартные потоки, а

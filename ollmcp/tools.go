@@ -19,6 +19,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/mcp"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
@@ -57,6 +58,9 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 	if len(cfg.Servers) > 0 {
 		fallback, headers = cfg.Servers[0].URL, cfg.Servers[0].Headers
 	}
+	// Один переводчик на службу: его кэш общий у инструментов и у /api/v1.
+	// nil — kb.translate выключен.
+	tr := qtranslate.New(cfg, fallback, headers)
 
 	enabled := make([]string, 0, len(readOnlyTools))
 	for _, name := range readOnlyTools {
@@ -136,6 +140,7 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 		SearxURL:       cfg.Web.SearxngURL,
 		SearxTimeout:   cfg.Web.TimeoutDuration(),
 		Embedder:       kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
+		Translator:     tr,
 	})
 	if err != nil {
 		return nil, kbserve.Opts{}, err
@@ -151,6 +156,7 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 			RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
 			Base:       base,
 			Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
+			Translator: tr,
 			Default:    cfg.KB.Default,
 			Token:      kbserve.Token(),
 		}, nil

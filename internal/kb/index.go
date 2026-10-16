@@ -292,7 +292,13 @@ func (c *Collection) collect(paths []string, opt IndexOpts) ([]candidate, error)
 				return nil // недоступную папку молча пропускаем
 			}
 			if d.IsDir() {
-				if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
+				// Внутри корня каталоги с точкой пропускаются (`.git`, `.sync/Archive`
+				// Resilio, этап 105, М3), а сам корень, названный человеком, обходится
+				// всегда. До 14.10.2026 проверка смотрела и на корень: WalkDir зовёт
+				// функцию сперва для него, и корень вроде `~/.notes` молча давал
+				// пустую коллекцию (исключение `d.Name() != "."` не срабатывало —
+				// путь приходит абсолютным).
+				if p != abs && strings.HasPrefix(d.Name(), ".") {
 					return filepath.SkipDir
 				}
 				return nil

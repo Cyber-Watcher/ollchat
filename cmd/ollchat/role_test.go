@@ -69,8 +69,9 @@ var (
 		"--graph-summaries-force", "--graph-summaries-min", "--kb-eval-gen-n", "--kb-seed",
 		"--kb-eval-collection", "--kb-eval-k", "--kb-eval-wide", "--kb-eval-dedupe",
 		"--kb-eval-keep-adjacent", "--kb-eval-weight", "--kb-eval-table-boost",
-		"--kb-eval-rrfk", "--kb-eval-only", "--kb-eval-rerank", "--kb-eval-candidates",
-		"--kb-eval-expand", "--kb-eval-snippet", "--graph-embed-recount",
+		"--kb-eval-rrfk", "--kb-eval-graph-merge", "--kb-eval-window", "--kb-eval-window-self", "--kb-eval-only", "--kb-eval-rerank", "--kb-eval-candidates",
+		"--kb-eval-expand", "--kb-eval-snippet", "--kb-eval-out", "--kb-eval-books", "--kb-eval-prf", "--kb-eval-translate", "--kb-eval-translate-workers", "--kb-ground", "--kb-ground-refs",
+		"--graph-embed-recount",
 		"--graph-findings-min-rating", "--graph-findings-min-members",
 		"--graph-findings-redo", "--graph-findings-dry", "--graph-communities-fresh",
 		"--graph-carry-similarity", "--graph-bench-models", "--graph-bench-keep",
@@ -89,6 +90,8 @@ var (
 		"--tools", "--temperature", "--seed", "--num-ctx", "--think", "--kb-use", "--mcp",
 		"--graph-sense", "--graph-pool", "--mix-entities", "--mix-neighbors", "--kb-topk",
 		"--kb-max-per-book", "--kb-min-cosine", "--kb-semantic-weight",
+		"--mix-pin", "--mix-full", "--mix-sense-snippet", "--mix-only", "--kb-eval-gen-must", "--kb-eval-gen-code", "--logprobs",
+		"--kb-eval-gen-distract", "--tool-perturb", "--kb-eval-part",
 	}
 )
 

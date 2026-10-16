@@ -38,11 +38,23 @@ func NewService(registry *tools.Registry, extra []Tool, o ServiceOptions) (*Serv
 		return nil, fmt.Errorf("%s: %w", o.Settings, err)
 	}
 	s := NewServer(registry, extra...)
+	// Набор до выключения: сверять disabled_tools надо с ним, а не со списком,
+	// из которого выключенное уже убрано.
+	names := s.toolNames()
+	if err := st.CheckDisabled(names); err != nil {
+		return nil, fmt.Errorf("%s: %w", o.Settings, err)
+	}
 	s.Policy, s.Steps = pol, o.Steps
 	if o.Settings != "" && st.Watch() {
 		path := o.Settings
 		s.WatchFiles = []string{path}
-		s.Validate = func() error { _, err := LoadSettings(path); return err }
+		s.Validate = func() error {
+			st, err := LoadSettings(path)
+			if err != nil {
+				return err
+			}
+			return st.CheckDisabled(names)
+		}
 	}
 	return s, nil
 }

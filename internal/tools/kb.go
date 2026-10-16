@@ -133,7 +133,8 @@ func (t *kbSearchTool) run(ctx context.Context, name, query, book string, topK i
 	// Одно ядро с /search (этап 91, R2.4): модель и человек видят одну выдачу.
 	// Ищется дополненным запросом, а переранжируется исходным: кросс-энкодер
 	// читает вопрос вместе с куском, и приписанные синонимы для него шум.
-	deps := find.Deps{Source: coll, Embedder: t.opts.embedder(), Reranker: t.opts.reranker()}
+	deps := find.Deps{Source: coll, Embedder: t.opts.embedder(), Reranker: t.opts.reranker(),
+		Translator: t.opts.Translator}
 	hits, _, err := find.Books(ctx, deps, search, query, o)
 	if err != nil {
 		return "", err

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
@@ -20,6 +21,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/mixer"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"github.com/Cyber-Watcher/ollchat/internal/session"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
@@ -53,6 +55,13 @@ type askOpts struct {
 	Repeat    int
 	JSON      bool
 	ShowMix   bool
+	// MixOnly — собрать подмес и не спрашивать модель: замер выдачи ровно
+	// тем путём, каким она уходит модели, без минуты карты на ответ
+	// (этап 112, О7).
+	MixOnly bool
+	// Logprobs — просить у сервера логарифмы вероятностей токенов и вывести
+	// сводку по ответу (logprob_*): замер уверенности модели (этап 112, Ч15).
+	Logprobs bool
 
 	Temperature float64
 	HasTemp     bool
@@ -79,6 +88,13 @@ type askOpts struct {
 	SemanticWeight float64
 	HasSemWeight   bool
 
+	// Прибор «потолка поиска» (этап 112, О7): куски вместо найденных
+	// и куски целиком вместо выдержек.
+	Pin        []string
+	FullChunks bool
+	// SenseSnippet — выдержка из предложений, лучших по реранкеру (этап 112, Ч21).
+	SenseSnippet bool
+
 	// Инструменты, если их разрешили ключом: реестр и правила собирает main —
 	// там же, где они собираются для диалога, чтобы песочница и правила deny
 	// были теми же самыми.
@@ -98,11 +114,20 @@ type askAnswer struct {
 	PromptTokens int `json:"prompt_tokens"`
 	EvalTokens   int `json:"eval_tokens"`
 
-	MixText      string `json:"mix_text,omitempty"`
-	MixEntities  int    `json:"mix_entities,omitempty"`
-	MixRelations int    `json:"mix_relations,omitempty"`
-	MixChunks    int    `json:"mix_chunks,omitempty"`
-	MixTokens    int    `json:"mix_tokens,omitempty"`
+	// Сводка по логарифмам вероятностей токенов ответа (только с --logprobs):
+	// сколько токенов, средний и наименьший логарифм, токенов с вероятностью
+	// ниже 0,5. Сигнал «насколько модель уверена» (этап 112, Ч15).
+	LogprobTokens int     `json:"logprob_tokens,omitempty"`
+	LogprobMean   float64 `json:"logprob_mean,omitempty"`
+	LogprobMin    float64 `json:"logprob_min,omitempty"`
+	LogprobLow    int     `json:"logprob_low,omitempty"`
+
+	MixText      string   `json:"mix_text,omitempty"`
+	MixEntities  int      `json:"mix_entities,omitempty"`
+	MixRelations int      `json:"mix_relations,omitempty"`
+	MixChunks    int      `json:"mix_chunks,omitempty"`
+	MixTokens    int      `json:"mix_tokens,omitempty"`
+	MixRefs      []string `json:"mix_refs,omitempty"` // поданные куски в порядке подачи
 
 	Tools []string `json:"tools,omitempty"`
 	Error string   `json:"error,omitempty"`
@@ -127,6 +152,16 @@ func runAsk(cfg *config.Config, srv *config.Server, model string, o askOpts) err
 
 	// Числа отбора: конфиг, поверх — ключи.
 	set := askSettings(cfg, o)
+	// Закреплённый кусок без коллекции молча не подмешался бы, и замер потолка
+	// сравнил бы ответ «по эталону» с ответом без книг вовсе.
+	if len(o.Pin) > 0 && !askMixBooks(cfg, o) {
+		return fmt.Errorf("--mix-pin подаёт куски книг: нужен --mix books или --mix all")
+	}
+	// Без подмеса --mix-only не напечатал бы ничего, и пустые строки
+	// выглядели бы как «поиск ничего не нашёл».
+	if o.MixOnly && !askMixWanted(cfg, o) {
+		return fmt.Errorf("--mix-only печатает подмес: нужен --mix books, graph или all")
+	}
 
 	// Коллекция и граф открываются один раз на весь прогон: открытие графа
 	// стоит секунды, а вопросов в файле бывают сотни.
@@ -162,6 +197,16 @@ func runAsk(cfg *config.Config, srv *config.Server, model string, o askOpts) err
 			} else {
 				if len(questions) > 1 || repeat > 1 {
 					fmt.Fprintf(out, "── %s%s ──\n", q, askRunSuffix(i, repeat))
+				}
+				if o.MixOnly {
+					// Ответа не было: печатается то, что ушло бы модели.
+					if ans.MixText == "" {
+						fmt.Fprintln(out, "подмес пуст")
+					} else {
+						fmt.Fprintf(out, "%s\nкуски по порядку: %s\n", ans.MixText, strings.Join(ans.MixRefs, ", "))
+					}
+					out.Flush()
+					continue
 				}
 				if o.ShowMix && ans.MixText != "" {
 					fmt.Fprintf(out, "%s\n── ответ ──\n", ans.MixText)
@@ -199,19 +244,24 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 
 	if coll != nil {
 		mix := mixer.Build(question, mixer.Deps{
-			Coll:     coll,
-			Graph:    g,
-			Embedder: kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), srv.Headers),
-			Reranker: kbrerank.New(cfg.KB.RerankOptions()),
-			BooksOn:  askMixBooks(cfg, o),
-			GraphOn:  askMixGraph(cfg, o),
+			Coll:       coll,
+			Graph:      g,
+			Embedder:   kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), srv.Headers),
+			Translator: qtranslate.New(cfg, srv.URL, srv.Headers),
+			Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
+			BooksOn:    askMixBooks(cfg, o),
+			GraphOn:    askMixGraph(cfg, o),
 		}, set)
 		if !mix.Empty() {
 			conv.Append(ollama.Message{Role: ollama.RoleUser, Content: mix.Text})
 			ans.MixText = mix.Text
 			ans.MixEntities, ans.MixRelations = mix.Entities, mix.Relations
 			ans.MixChunks, ans.MixTokens = mix.Chunks, mix.Tokens
+			ans.MixRefs = mix.Refs
 		}
+	}
+	if o.MixOnly {
+		return ans
 	}
 	conv.Append(ollama.Message{Role: ollama.RoleUser, Content: question})
 
@@ -220,6 +270,11 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 	stepsPattern, _ := cfg.Log.StepsPattern()
 	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollchat-ask", cfg.Log.Enabled)
 	defer steps.Close()
+	var sreg *tools.Registry
+	if o.Tools {
+		sreg = o.registry
+	}
+	steps.Write(sessionStep(cfg, srv, model, sreg))
 	runner := &agent.Runner{
 		Client:        client,
 		Model:         model,
@@ -229,7 +284,17 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 		MaxIterations: cfg.Agent.MaxIterations,
 		MaxRetries:    cfg.Agent.MaxRetries,
 		Steps:         steps,
-		Turn:          "ask",
+		// Свой идентификатор хода, как у диалога (этап 112, В1): с константой «ask»
+		// два запуска в одну секунду писали в один файл журнала, и записи двух ходов
+		// сливались в один ход для stepstat.py, который группирует по (файл, turn).
+		Turn:     chatlog.FormatTurnID(chatlog.NewSessionID(), 1),
+		Logprobs: o.Logprobs,
+		// Защита и пределы хода (этап 112) — те же, что в диалоге.
+		JournalFailClosed:  cfg.Agent.JournalFailClosed,
+		UntrustedGate:      cfg.Agent.UntrustedGate,
+		PrivateEgressCheck: cfg.Agent.PrivateEgressCheck,
+		MaxWritesNoask:     cfg.Agent.MaxWritesNoask,
+		MaxTurnTokens:      cfg.Agent.MaxTurnTokens,
 	}
 	if o.Tools && o.registry != nil {
 		runner.Tools = o.registry
@@ -260,6 +325,10 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 			}
 		case agent.EventStats:
 			ans.PromptTokens, ans.EvalTokens = ev.Stats.PromptEvalCount, ev.Stats.EvalCount
+			if ev.Stats.LogprobN > 0 {
+				ans.LogprobTokens, ans.LogprobMean = ev.Stats.LogprobN, ev.Stats.MeanLogprob()
+				ans.LogprobMin, ans.LogprobLow = ev.Stats.LogprobMin, ev.Stats.LogprobLow
+			}
 		case agent.EventError:
 			if ev.Err != nil {
 				ans.Error = ev.Err.Error()
@@ -365,6 +434,7 @@ func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 	if o.HasSemWeight {
 		s.SemanticWeight = o.SemanticWeight
 	}
+	s.Pin, s.FullChunks, s.SenseSnippet = o.Pin, o.FullChunks, o.SenseSnippet
 	return s
 }
 
@@ -394,6 +464,21 @@ func askSettingsMap(o askOpts, s mixer.Settings, cfg *config.Config) map[string]
 	if o.NumCtx > 0 {
 		m["num_ctx"] = o.NumCtx
 	}
+	if len(s.Pin) > 0 {
+		m["mix_pin"] = s.Pin
+	}
+	if s.FullChunks {
+		m["mix_full"] = true
+	}
+	if s.SenseSnippet {
+		m["mix_sense_snippet"] = true
+	}
+	if o.MixOnly {
+		m["mix_only"] = true
+	}
+	if o.Logprobs {
+		m["logprobs"] = true
+	}
 	return m
 }
 
@@ -402,6 +487,18 @@ func askCollection(cfg *config.Config, o askOpts) string {
 		return strings.TrimSpace(o.Collection)
 	}
 	return cfg.KB.Default
+}
+
+// splitList — значение ключа через запятую в список; пустые элементы
+// (лишние запятые, пробелы по краям) пропускаются.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // askMixName — что просили подмешивать.

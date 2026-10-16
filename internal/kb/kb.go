@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Коллекции — верхний уровень базы знаний.
@@ -317,6 +319,9 @@ func OpenBase(dir string) (*Base, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("не задан каталог базы знаний")
 	}
+	// «~» без развёртки (конфиг без config.Load) создавал каталог «~» внутри
+	// текущего — так появился internal/ui/~/.local/share/ollchat/kb (найден 15.10.2026).
+	dir = fsx.ExpandHome(dir)
 	if err := os.MkdirAll(filepath.Join(dir, "collections"), 0o755); err != nil {
 		return nil, err
 	}
@@ -1141,7 +1146,11 @@ func (c *Collection) hybrid(ctx context.Context, query string, opt SearchOpts, e
 	if opt.TopK <= 0 {
 		opt = opt.withDefaults()
 	}
-	words, err := c.index.Candidates(query, opt)
+	lex := query
+	if opt.WordsExtra != "" {
+		lex = query + " " + opt.WordsExtra
+	}
+	words, err := c.index.Candidates(lex, opt)
 	if err != nil {
 		return nil, "", err
 	}

@@ -55,9 +55,16 @@ type SearchOpts struct {
 	//
 	// В работе умолчание прежнее: соседей выбрасываем.
 	KeepAdjacent bool
-	Exact        string  // требовать точного вхождения этой подстроки
-	Semantic     bool    // добавлять к словам поиск по смыслу
-	MinCosine    float64 // отсекать совпадения по смыслу слабее этого; 0 — не отсекать
+
+	// WordsExtra — слова, дописываемые ТОЛЬКО к словесной ветке (отбор
+	// кандидатов BM25); вектор вопроса и доводка выдачи видят вопрос как есть.
+	// Нужен замеру PRF (этап 112, О8, --kb-eval-prf): дописанное в сам вопрос
+	// уходит и в эмбеддер и меняет векторную ветку. Пусто — как всегда.
+	WordsExtra string
+
+	Exact     string  // требовать точного вхождения этой подстроки
+	Semantic  bool    // добавлять к словам поиск по смыслу
+	MinCosine float64 // отсекать совпадения по смыслу слабее этого; 0 — не отсекать
 	// SemanticWeight — сколько стоит мнение смыслового поиска против словесного.
 	// Единица — поровну; 0.5 — словесный вдвое весомее. Ноль означает «по
 	// умолчанию», а не «выключить»: выключает Semantic.
@@ -313,6 +320,7 @@ func (s *searcher) refine(hits []Hit, query string, opt SearchOpts) ([]Hit, erro
 	perDoc := map[uint32]int{}
 	taken := map[uint32][]uint32{} // книга → порядковые номера взятых кусков
 	seen := make([]string, 0, opt.TopK)
+	seenDoc := make([]uint32, 0, opt.TopK) // книга каждой цитаты из seen
 	out := make([]Hit, 0, opt.TopK)
 	for _, h := range head {
 		rec := s.store.Rec(h.Chunk)
@@ -332,12 +340,19 @@ func (s *searcher) refine(hits []Hit, query string, opt SearchOpts) ([]Hit, erro
 		// его дважды незачем. Измерено на двух изданиях «The Anatomy of Go»
 		// в живой коллекции.
 		snippet := Snippet(texts[h.Chunk], query, snippetRunes)
-		if nearDuplicate(snippet, seen) {
+		// Но если тот же абзац в ДРУГОЙ книге называет другие значения (число,
+		// версию, порт, имя с цифрой), это не повтор, а противоречие изданий,
+		// и его надо показать, а не спрятать (этап 112, О13: 15.10.2026 из
+		// 8 пар изданий второе издание выпало в 2 — абзацы различались одним
+		// значением, и модель молча назвала одно).
+		if j := nearDuplicate(snippet, seen); j >= 0 &&
+			(seenDoc[j] == doc || !valuesDiffer(snippet, seen[j])) {
 			continue
 		}
 		perDoc[doc]++
 		taken[doc] = append(taken[doc], rec.Ord)
 		seen = append(seen, snippet)
+		seenDoc = append(seenDoc, doc)
 		out = append(out, h)
 		if len(out) >= opt.TopK {
 			break
@@ -364,14 +379,48 @@ func chunkIDs(hits []Hit) []int {
 	return out
 }
 
+// valuesDiffer — в двух почти одинаковых цитатах разные значения: слова с цифрами
+// (числа, версии, порты, `AES-128`) у одной есть, у другой нет. Годы (1900–2099)
+// не в счёт: год издания стоит у ссылки и сам по себе противоречием не является.
+func valuesDiffer(a, b string) bool {
+	va, vb := digitWords(a), digitWords(b)
+	if len(va) != len(vb) {
+		return true
+	}
+	for w := range va {
+		if !vb[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// digitWords — слова цитаты, в которых есть цифра, кроме одиночных годов.
+func digitWords(text string) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range strings.Fields(strings.ToLower(text)) {
+		w = strings.Trim(w, ".,;:!?()[]{}«»\"'`*—–-")
+		if !strings.ContainsAny(w, "0123456789") {
+			continue
+		}
+		if len(w) == 4 && (strings.HasPrefix(w, "19") || strings.HasPrefix(w, "20")) &&
+			strings.Trim(w, "0123456789") == "" {
+			continue
+		}
+		out[w] = true
+	}
+	return out
+}
+
 // nearDuplicate ловит почти одинаковые куски: перекрытие соседних кусков и одно
-// и то же место в разных изданиях книги.
-func nearDuplicate(text string, seen []string) bool {
+// и то же место в разных изданиях книги. Возвращает номер цитаты из seen,
+// которую text почти повторяет (70 % общих троек слов); −1 — повтора нет.
+func nearDuplicate(text string, seen []string) int {
 	a := shingles(text)
 	if len(a) == 0 {
-		return false
+		return -1
 	}
-	for _, s := range seen {
+	for i, s := range seen {
 		b := shingles(s)
 		if len(b) == 0 {
 			continue
@@ -387,10 +436,10 @@ func nearDuplicate(text string, seen []string) bool {
 			smaller = len(b)
 		}
 		if common*10 >= smaller*7 {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // shingles — множество троек слов: устойчивый отпечаток текста.

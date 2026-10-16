@@ -13,7 +13,9 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"github.com/Cyber-Watcher/ollchat/internal/textx"
 	"runtime/debug"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
@@ -37,7 +39,48 @@ const (
 	EventRetry                        // сбой до начала ответа, запрос повторяется
 	EventNotice                       // предупреждение по ходу обмена, ответ продолжается
 	EventError                        // ошибка
+	EventSteer                        // реплика человека из очереди легла в историю (Х1)
 )
+
+// SteerQueue — реплики, набранные человеком посреди хода (этап 112, Х1; у Pi —
+// очередь steer: «Injects before the next assistant response; the current
+// assistant's tools finish first», «Learning Agent Engineering from Pi», 2026,
+// разд. 15). Интерфейс кладёт, цикл агента забирает после результатов
+// инструментов; что не забрано до конца хода, интерфейс отправит следующим
+// вопросом (follow-up) или по Esc вернёт в поле ввода.
+type SteerQueue struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+// Push ставит реплику в очередь.
+func (q *SteerQueue) Push(text string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.msgs = append(q.msgs, text)
+}
+
+// Drain забирает все реплики и очищает очередь.
+func (q *SteerQueue) Drain() []string {
+	if q == nil {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := q.msgs
+	q.msgs = nil
+	return out
+}
+
+// Len — сколько реплик ждёт.
+func (q *SteerQueue) Len() int {
+	if q == nil {
+		return 0
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.msgs)
+}
 
 // Event — событие агента.
 type Event struct {
@@ -95,6 +138,15 @@ const (
 	AnswerAlwaysTool               // разрешить инструмент целиком до конца сеанса
 )
 
+// RejectedNoRetry — приписка к результату вызова, отклонённого человеком:
+// её видит только модель (этап 112, Ч1).
+const RejectedNoRetry = "Не повторяй этот вызов."
+
+// DeniedNoBypass — приписка к результату вызова, запрещённого правилами
+// настроек: её видит только модель (этап 112, Ч1, журналы рабочей машины).
+const DeniedNoBypass = "Не пытайся обойти запрет другой командой или другим инструментом: " +
+	"скажи пользователю, что это действие запрещено настройками, и что нужно сделать ему самому."
+
 // ConfirmRequest — запрос подтверждения у пользователя.
 // Интерфейс обязан ровно один раз отправить ответ в Reply.
 type ConfirmRequest struct {
@@ -125,6 +177,10 @@ type Runner struct {
 	Tools         *tools.Registry
 	Guard         *permissions.Guard
 	MaxIterations int
+	// Logprobs — просить у сервера логарифмы вероятностей токенов; сводка по
+	// ответу придёт в Stats события EventStats. Только для замеров (`--ask
+	// --logprobs`, этап 112, Ч15): в работе выключено.
+	Logprobs bool
 	// MaxRetries — сколько раз повторить обмен, если сервер сорвал генерацию
 	// до того, как начал приходить ответ.
 	MaxRetries int
@@ -138,6 +194,28 @@ type Runner struct {
 	// с исходом. nil — выключен. Turn — идентификатор обмена для этих записей.
 	Steps *steplog.Writer
 	Turn  string
+
+	// Защита и пределы хода (этап 112; ключи agent.* — см. config.Agent).
+	// JournalFailClosed — запись, bash и сеть не исполняются, если журнал шагов
+	// перестал писаться (Н6). UntrustedGate — после чужого текста в разговоре
+	// исходящие инструменты только с вопросом (Т7, О15). PrivateEgressCheck —
+	// отказ при частном адресе или имени хоста в исходящем вызове (Н16).
+	// MaxWritesNoask — после стольких правок за ход в noask следующая
+	// спрашивается (Ч3; 0 и меньше — без предела). MaxTurnTokens — потолок
+	// входных токенов за ход (Т11; 0 и меньше — без предела).
+	JournalFailClosed  bool
+	UntrustedGate      bool
+	PrivateEgressCheck bool
+	MaxWritesNoask     int
+	MaxTurnTokens      int
+
+	// Steer — очередь реплик, набранных посреди хода (этап 112, Х1); nil — нет.
+	Steer *SteerQueue
+
+	// writes — правок файлов в текущем ходе (для MaxWritesNoask); tainted — в
+	// разговор вошёл чужой текст (для UntrustedGate).
+	writes  int
+	tainted bool
 }
 
 // retryPause — сколько ждать перед повторной попыткой обмена.
@@ -145,9 +223,11 @@ type Runner struct {
 // Без паузы быстрый отказ сервера (5xx за миллисекунды) съедал все попытки
 // подряд, и повтор ничего не давал. Формула та же, что у эмбеддера в kbembed:
 // растущая пауза, чтобы занятому чужой работой серверу не добавлять нагрузки.
+// С 16.10.2026 — удвоение со случайной добавкой (ollama.Backoff, этап 112, А2):
+// 1, 2, 4 с плюс 0…0,5 с вместо ровных 1 и 2 с.
 // Переменная, а не функция, — шов для тестов: им ждать секунды незачем.
 var retryPause = func(attempt int) time.Duration {
-	return time.Duration(attempt+1) * time.Second
+	return ollama.Backoff(attempt, time.Second)
 }
 
 // Run отправляет историю модели и обрабатывает вызовы инструментов.
@@ -212,13 +292,34 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 	warnedImages := false
 	var stats ToolStats
 	step := 0
+	// Что сделано за ход — для отчёта на потолке шагов (этап 112, Ф1, О18).
+	byTool := map[string]int{}
+	var lastTool, lastResult string
+	// Состояние проверок хода (этап 112): правки считаются заново, а чужой текст,
+	// вошедший раньше, остаётся в разговоре — значит, и в силе.
+	r.writes = 0
+	r.tainted = tainted(conv.Messages())
+	tokensIn := 0
 
 	// Дата в системном сообщении берётся один раз на ход: иначе цепочка
 	// вызовов, пересёкшая полночь, получала бы разные системные сообщения
 	// в соседних итерациях одного и того же хода.
 	now := time.Now()
 
+	// Конец хода и его причина — запись журнала шагов (этап 112, Ф2). Пишется
+	// отложенным вызовом, чтобы без записи не остался ни один выход из цикла;
+	// выход, не названный ниже явно, — снятие хода (контекст отменён).
+	exchanges, lengthCuts := 0, 0
+	reason := steplog.TurnCancelled
+	defer func() {
+		r.Steps.Write(steplog.Step{Turn: r.Turn, Kind: steplog.KindTurn, Model: r.Model,
+			Outcome: reason, MS: time.Since(now).Milliseconds(),
+			Extra: map[string]any{"steps": step, "exchanges": exchanges, "tool_calls": stats.Calls,
+				"rejected": stats.Rejected, "failed": stats.Failed}})
+	}()
+
 	for iter := 0; unlimited || iter < maxIter; iter++ {
+		exchanges = iter + 1
 		msgs := conv.RequestAt(now)
 		// Модель могли сменить посреди диалога, а картинки в истории остались.
 		// Сервер на такой запрос отвечает 400 целиком, и продолжать разговор
@@ -244,6 +345,7 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			Think:     r.Think,
 			KeepAlive: r.KeepAlive,
 			Options:   r.Options,
+			Logprobs:  r.Logprobs,
 		}
 
 		res, err := r.exchangeWithRetry(ctx, req, maxRetries, out)
@@ -266,6 +368,10 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			}
 		}
 		if err != nil {
+			reason = steplog.TurnError
+			if errors.Is(err, ollama.ErrCanceled) || ctx.Err() != nil {
+				reason = steplog.TurnCancelled
+			}
 			// Сохраняем то, что успело прийти до ошибки, чтобы история
 			// не потеряла частичный ответ.
 			if res.content.Len() > 0 {
@@ -292,13 +398,75 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 		step++
 		r.Steps.Write(steplog.Step{Turn: r.Turn, Step: step, Kind: steplog.KindChat, Model: r.Model,
 			TokensIn: res.stats.PromptEvalCount, TokensOut: res.stats.EvalCount,
-			MS:    res.stats.TotalDuration / 1e6,
-			Extra: map[string]any{"tool_calls": len(toolCalls), "done": res.stats.DoneReason}})
+			MS: res.stats.TotalDuration / 1e6,
+			// Время чтения промпта и загрузки модели — отдельно от общего: по ним
+			// делятся попадание в кеш префикса и холодный старт (этап 112, У10, Ц12;
+			// до 15.10.2026 они лежали в ollama.Stats и в журнал не уходили).
+			Extra: map[string]any{"tool_calls": len(toolCalls), "done": res.stats.DoneReason,
+				"prompt_eval_ms": res.stats.PromptEvalDuration / 1e6, "load_ms": res.stats.LoadDuration / 1e6}})
 
+		// Т11: потолок входных токенов за ход. Один ход на рабочей машине съел
+		// 15,7 % всех входных токенов за месяц журналов; после потолка новые
+		// вызовы не исполняются — человек получает отчёт и решает сам.
+		tokensIn += res.stats.PromptEvalCount
+		if r.MaxTurnTokens > 0 && tokensIn > r.MaxTurnTokens && len(toolCalls) > 0 {
+			reason = steplog.TurnLimit
+			emit(ctx, out, Event{Kind: EventError,
+				Err: fmt.Errorf("превышен потолок входных токенов за ход (agent.max_turn_tokens = %d, набрано %d): "+
+					"модель продолжает запрашивать инструменты.\n%s"+
+					"Поднять или снять (-1): agent.max_turn_tokens в файле настроек",
+					r.MaxTurnTokens, tokensIn, limitReport(stats, byTool, lastTool, lastResult))})
+			return
+		}
+
+		cut := res.stats.DoneReason == doneLength
 		if len(toolCalls) == 0 {
+			reason = steplog.TurnAnswer
+			if cut {
+				reason = steplog.TurnLength
+				if !emit(ctx, out, Event{Kind: EventNotice, Text: lengthNotice}) {
+					return
+				}
+			}
 			emit(ctx, out, Event{Kind: EventTurnDone, Tools: &stats})
 			return
 		}
+
+		// Ответ оборван пределом вывода, а в нём вызовы инструментов: их
+		// аргументы могли не дописаться, и исполнять их нельзя (этап 112, Х2;
+		// «The call does not execute; an output-limit error toolResult is
+		// generated for each call, and a retry in the next turn is allowed»,
+		// «Learning Agent Engineering from Pi», 2026, разд. 15). Каждый вызов
+		// получает результат-пояснение, иначе история с вызовом без ответа
+		// сломала бы следующий запрос, и модель может повторить вызов короче.
+		// Второй обрыв подряд — ход заканчивается: предел вывода не даёт
+		// дописать вызов, и повторы только жгут карту.
+		if cut {
+			lengthCuts++
+			for _, call := range toolCalls {
+				step++
+				r.Steps.Write(steplog.Step{Turn: r.Turn, Step: step, Kind: steplog.KindTool, Model: r.Model,
+					Tool: call.Function.Name, Outcome: steplog.OutcomeInvalid, Note: "ответ оборван пределом вывода (length), вызов не выполнен"})
+				conv.Append(ollama.Message{
+					Role:       ollama.RoleTool,
+					ToolName:   call.Function.Name,
+					ToolCallID: call.ID,
+					Content:    lengthToolResult,
+				})
+			}
+			if lengthCuts >= 2 {
+				reason = steplog.TurnLength
+				emit(ctx, out, Event{Kind: EventError, Err: errors.New(lengthNotice)})
+				return
+			}
+			if !emit(ctx, out, Event{Kind: EventNotice, Text: fmt.Sprintf(
+				"Ответ модели оборван пределом длины вывода, вызовов в нём %d — не выполнены. "+
+					"Модель получила пояснение и может повторить вызов.", len(toolCalls))}) {
+				return
+			}
+			continue
+		}
+		lengthCuts = 0
 
 		// Модель запросила инструменты — выполняем их и возвращаем результаты.
 		for _, call := range toolCalls {
@@ -308,6 +476,8 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			}
 			result, images, info := r.executeCall(ctx, call, out)
 			stats.Calls++
+			byTool[call.Function.Name]++
+			lastTool, lastResult = call.Function.Name, result
 			switch info.outcome {
 			case callRejected:
 				stats.Rejected++
@@ -315,9 +485,23 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 				stats.Failed++
 			}
 			step++
+			// Что ушло модели (этап 112, С2): до 16.10.2026 выход инструмента был
+			// только в журнале чата, где исход сведён к «успешно/ошибка», и по
+			// журналу шагов нельзя было сказать, на чём сломался разбор результата
+			// (Ч10). Начало — не целиком: журнал шагов читают сводки по всем дням.
+			extra := map[string]any{"out_bytes": len(result)}
+			if !info.hidden {
+				extra["out_head"] = textx.Shorten(result, toolOutHead)
+			}
+			if info.confirm != "" {
+				extra["confirm"], extra["confirm_ms"] = info.confirm, info.confirmMs
+			}
+			if info.decision != "" {
+				extra["kind"], extra["target"], extra["decision"] = info.kind, info.target, info.decision
+			}
 			r.Steps.Write(steplog.Step{Turn: r.Turn, Step: step, Kind: steplog.KindTool, Model: r.Model,
 				Tool: call.Function.Name, Args: info.args,
-				Outcome: info.status, MS: info.ms, Note: info.note})
+				Outcome: info.status, MS: info.ms, Note: info.note, Extra: extra})
 			if ctx.Err() != nil {
 				// Ход прерван, пока работал инструмент. Дописывать историю
 				// нельзя: интерфейс этот ход уже закрыл и мог начать новый.
@@ -347,14 +531,79 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 				})
 			}
 		}
+
+		// Реплика человека, набранная посреди хода (Х1): результаты всех вызовов
+		// уже в истории, значит, она встаёт после них — перед следующим ответом
+		// модели, и цепочка assistant{tool_calls} → tool не рвётся.
+		for _, text := range r.Steer.Drain() {
+			conv.Append(ollama.Message{Role: ollama.RoleUser, Content: text})
+			if !emit(ctx, out, Event{Kind: EventSteer, Text: text}) {
+				return
+			}
+		}
 	}
 
 	// Сюда попадаем только с конечным пределом: при -1 цикл не кончается сам.
+	reason = steplog.TurnLimit
 	emit(ctx, out, Event{Kind: EventError,
 		Err: fmt.Errorf("превышено ограничение agent.max_iterations (%d): модель продолжает запрашивать инструменты.\n"+
+			"%s"+
 			"Поднять на сеанс: /tools iterations 50 (или /tools iterations off — без ограничения).\n"+
-			"Насовсем: agent.max_iterations в файле настроек; -1 означает без ограничения", maxIter)})
+			"Насовсем: agent.max_iterations в файле настроек; -1 означает без ограничения",
+			maxIter, limitReport(stats, byTool, lastTool, lastResult))})
 }
+
+// limitReport — частичный итог хода, упёршегося в потолок шагов (этап 112,
+// Ф1, О18): сколько вызовов и каких, что отклонено и упало, чем кончился
+// последний. Собирается кодом, без обращения к модели: модель, у которой
+// кончились шаги, дописала бы недостающее сама («Agent Systems», `706#521`).
+// Ход не продолжается — человек решает, поднять потолок или сменить просьбу.
+func limitReport(stats ToolStats, byTool map[string]int, lastTool, lastResult string) string {
+	if stats.Calls == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(byTool))
+	for n := range byTool {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if byTool[names[i]] != byTool[names[j]] {
+			return byTool[names[i]] > byTool[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = fmt.Sprintf("%s ×%d", n, byTool[n])
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Сделано за ход: вызовов %d (%s)", stats.Calls, strings.Join(parts, ", "))
+	if stats.Rejected > 0 || stats.Failed > 0 {
+		fmt.Fprintf(&b, "; отклонено %d, с ошибкой %d", stats.Rejected, stats.Failed)
+	}
+	b.WriteString(".\n")
+	if lastTool != "" {
+		last := strings.Join(strings.Fields(lastResult), " ")
+		if rs := []rune(last); len(rs) > 200 {
+			last = string(rs[:200]) + "…"
+		}
+		fmt.Fprintf(&b, "Последний вызов — %s: %s\n", lastTool, last)
+	}
+	b.WriteString("Ответа модель не дала: итог выше собран из журнала хода, без догадок.\n")
+	return b.String()
+}
+
+// doneLength — done_reason Ollama, когда генерацию оборвал предел вывода
+// (options.num_predict), а не модель закончила сама.
+const doneLength = "length"
+
+// lengthNotice — что сказать человеку об оборванном ответе.
+const lengthNotice = "Ответ модели оборван пределом длины вывода (num_predict): дальше она не писала. " +
+	"Поднять предел: options.num_predict в настройках сервера; -1 — без предела."
+
+// lengthToolResult — что получает модель вместо результата недописанного вызова.
+const lengthToolResult = "Вызов не выполнен: твой ответ оборван пределом длины вывода, " +
+	"аргументы могли не дописаться. Повтори вызов короче или ответь словами."
 
 // exchangeResult — то, что удалось получить за один обмен с моделью.
 type exchangeResult struct {
@@ -375,6 +624,7 @@ func (r *Runner) exchangeWithRetry(ctx context.Context, req ollama.ChatRequest,
 	maxRetries int, out chan<- Event) (*exchangeResult, error) {
 
 	for attempt := 0; ; attempt++ {
+		started := time.Now()
 		res, err := r.exchange(ctx, req, out)
 		if err == nil {
 			return res, nil
@@ -385,6 +635,8 @@ func (r *Runner) exchangeWithRetry(ctx context.Context, req ollama.ChatRequest,
 			ctx.Err() == nil &&
 			res.content.Len() == 0 &&
 			len(res.toolCalls) == 0
+		pause := retryPause(attempt)
+		r.logRetry(ctx, attempt, maxRetries, err, canRetry, pause, time.Since(started))
 
 		if !canRetry {
 			if attempt > 0 {
@@ -402,11 +654,38 @@ func (r *Runner) exchangeWithRetry(ctx context.Context, req ollama.ChatRequest,
 		}
 
 		select {
-		case <-time.After(retryPause(attempt)):
+		case <-time.After(pause):
 		case <-ctx.Done():
 			return res, ollama.ErrCanceled
 		}
 	}
+}
+
+// logRetry пишет в журнал шагов неудавшуюся попытку обмена (этап 112, М5).
+//
+// До 13.10.2026 повтор уходил только событием в интерфейс, а журнал получал
+// лишь удачный обмен: ни stepstat.py, ни любой подсчёт не видел ни одного
+// обрыва, и замеры «сколько обрывов в сутки», «доля успеха со второй попытки»
+// (А1–А3) снять было нечем. Снятие хода человеком — не сбой и не пишется:
+// его видно по записи конца хода.
+func (r *Runner) logRetry(ctx context.Context, attempt, maxRetries int, err error, again bool, pause, took time.Duration) {
+	if errors.Is(err, ollama.ErrCanceled) || ctx.Err() != nil {
+		return
+	}
+	outcome := steplog.RetryGaveUp
+	if again {
+		outcome = steplog.RetryAgain
+	} else {
+		pause = 0
+	}
+	note := err.Error()
+	if rs := []rune(note); len(rs) > 300 {
+		note = string(rs[:300]) + "…"
+	}
+	r.Steps.Write(steplog.Step{Turn: r.Turn, Kind: steplog.KindRetry, Model: r.Model,
+		Outcome: outcome, MS: took.Milliseconds(), Note: note,
+		Extra: map[string]any{"attempt": attempt + 1, "of": maxRetries + 1,
+			"retryable": ollama.Retryable(err), "pause_ms": pause.Milliseconds()}})
 }
 
 // exchange проводит один обмен с моделью и собирает результат.
@@ -463,7 +742,48 @@ type callInfo struct {
 	// args — что писать о вызове в журнал шагов: аргументы модели или то,
 	// что инструмент дал вместо них (tools.Plan.LogArgs).
 	args string
+	// hidden — аргументы подменены (LogArgs, SafeArgs): инструмент работает
+	// с персональными данными, и начало его вывода в журнал шагов не идёт.
+	hidden bool
+	// confirm — ответ человека на вопрос о вызове («yes», «no», «always»,
+	// «always_tool», «cancel»); пусто — вопроса не было. confirmMs — сколько он
+	// думал: по ним видно «пролистывание» подтверждений (этап 112, Н14, О16).
+	confirm   string
+	confirmMs int64
+	// kind, target, decision — вид и цель действия и решение правил до человека
+	// («allow», «ask», «deny»; этап 112, И6): по ним в журнале видно, разрешён
+	// вызов правилом или одобрен человеком; пусто — до проверки прав не дошло.
+	kind, target, decision string
 }
+
+// decisionName — решение правил словом для журнала шагов.
+func decisionName(d permissions.Decision) string {
+	switch d {
+	case permissions.DecisionAllow:
+		return "allow"
+	case permissions.DecisionDeny:
+		return "deny"
+	}
+	return "ask"
+}
+
+// answerName — ответ человека словом для журнала шагов.
+func answerName(a Answer) string {
+	switch a {
+	case AnswerNo:
+		return "no"
+	case AnswerYes:
+		return "yes"
+	case AnswerAlways:
+		return "always"
+	case AnswerAlwaysTool:
+		return "always_tool"
+	}
+	return "?"
+}
+
+// toolOutHead — сколько рун вывода инструмента пишется в запись вызова (С2).
+const toolOutHead = 200
 
 func rejected(status, note string) callInfo {
 	return callInfo{outcome: callRejected, status: status, note: note}
@@ -516,7 +836,17 @@ func noteOf(err error) string {
 func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan<- Event) (_ string, _ []string, info callInfo) {
 	name := call.Function.Name
 	argsJSON := call.Function.ArgumentsJSON()
-	defer func() { info.args = argsJSON }()
+	var confirm string
+	var asked time.Time
+	var audit [3]string // вид, цель, решение правил (И6)
+	defer func() {
+		info.args = argsJSON
+		info.hidden = argsJSON != call.Function.ArgumentsJSON()
+		if !asked.IsZero() {
+			info.confirm, info.confirmMs = confirm, time.Since(asked).Milliseconds()
+		}
+		info.kind, info.target, info.decision = audit[0], audit[1], audit[2]
+	}()
 
 	if r.Tools == nil {
 		msg := "Инструменты отключены в настройках."
@@ -573,15 +903,23 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 			decision = d
 		}
 	}
+	// Защита и пределы хода (этап 112) — только ужесточают решение правил.
+	decision = r.gate(name, plan, call.Function.ArgumentsJSON(), decision)
+	audit = [3]string{string(plan.Req.Kind), textx.Shorten(plan.Req.Target, 200), decisionName(decision.Decision)}
 	switch decision.Decision {
 	case permissions.DecisionDeny:
 		msg := fmt.Sprintf("Действие запрещено настройками: %s", decision.Reason)
 		emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
 			Output: msg, Reason: decision.Reason, Skipped: true}})
-		return msg, nil, rejected(steplog.OutcomeDenied, decision.Reason)
+		// Модели — запрет обходить (этап 112, Ч1, журналы рабочей машины 14.10.2026:
+		// после запрета правилом в 29 случаях из 35 модель сразу звала тот же
+		// инструмент с другими доводами — перебор apt-get/wget/sudo/curl).
+		// Человек видит прежний текст: фраза обращена к модели.
+		return msg + " " + DeniedNoBypass, nil, rejected(steplog.OutcomeDenied, decision.Reason)
 
 	case permissions.DecisionAsk:
 		reply := make(chan Answer, 1)
+		asked, confirm = time.Now(), "cancel"
 		if !emit(ctx, out, Event{Kind: EventToolConfirm, Confirm: &ConfirmRequest{
 			Tool:    name,
 			Title:   plan.Title,
@@ -597,6 +935,7 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 		var answer Answer
 		select {
 		case answer = <-reply:
+			confirm = answerName(answer)
 		case <-ctx.Done():
 			msg := "Пользователь прервал выполнение."
 			emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
@@ -609,7 +948,12 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 			msg := "Пользователь отклонил выполнение этого действия."
 			emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
 				Output: msg, Skipped: true, Reason: "отклонено пользователем"}})
-			return msg, nil, rejected(steplog.OutcomeRejected, "отклонено пользователем")
+			// Модели — с запретом повторять («AI Agents, Built by Hand», 2026,
+			// разд. 14: «The user did not allow this action. Do not retry it.»).
+			// Человек видит прежний текст: фраза обращена к модели, не к нему.
+			// Замер этапа 112, Ч1: в журналах шагов повтора после отказа 0 из 9,
+			// но ходы интерактивного клиента туда почти не пишутся.
+			return msg + " " + RejectedNoRetry, nil, rejected(steplog.OutcomeRejected, "отклонено пользователем")
 		case AnswerAlways:
 			for _, req := range append([]permissions.Request{plan.Req}, plan.Extra...) {
 				if err := r.Guard.GrantSession(req.Kind, req.Target); err != nil {
@@ -630,11 +974,21 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 	}
 
 	started := time.Now()
-	output, err := guarded(func() (string, error) { return plan.Run(ctx) })
+	// Журнал и ход — с контекстом: поиск под инструментом пишет свою запись (Ч17).
+	runCtx := steplog.NewContext(ctx, r.Steps, r.Turn)
+	output, err := guarded(func() (string, error) { return plan.Run(runCtx) })
 	ms := time.Since(started).Milliseconds()
 	var images []string
 	if plan.Images != nil && err == nil {
 		images, err = guarded(func() ([]string, error) { return plan.Images(), nil })
+	}
+	// Чужой текст помечается здесь, в одном месте, а не в каждом инструменте:
+	// так новый источник не остаётся непомеченным по забывчивости. И на ветке
+	// ошибки тоже: упавший инструмент мог успеть вернуть чужой текст, и до
+	// 15.10.2026 он уходил модели без пометки (этап 112, Ч4,
+	// TestFakeForeignOutputOnFailureIsMarked).
+	if plan.Foreign && (err == nil || strings.TrimSpace(output) != "") {
+		output = tools.MarkUntrusted(output)
 	}
 	if err != nil {
 		msg := fmt.Sprintf("Ошибка выполнения: %v", err)
@@ -645,14 +999,17 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 			Output: msg, Reason: err.Error()}})
 		return msg, nil, callInfo{outcome: callFailed, status: steplog.OutcomeFailed, note: noteOf(err), ms: ms}
 	}
-	// Чужой текст помечается здесь, в одном месте, а не в каждом инструменте:
-	// так новый источник не остаётся непомеченным по забывчивости.
-	if plan.Foreign {
-		output = tools.MarkUntrusted(output)
-	}
 
 	emit(ctx, out, Event{Kind: EventToolResult, Tool: &ToolEvent{Name: name, Title: plan.Title, Args: argsJSON,
 		Output: output, OK: true}})
+	// Для проверок хода (этап 112): правка файла — к пределу Ч3, вывод
+	// источника чужого текста — к UntrustedGate (Т7, О15).
+	if plan.Req.Kind == permissions.KindWrite {
+		r.writes++
+	}
+	if foreignSources[name] {
+		r.tainted = true
+	}
 	return output, images, callInfo{outcome: callOK, status: steplog.OutcomeOK, ms: ms}
 }
 

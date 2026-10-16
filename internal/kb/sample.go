@@ -26,6 +26,9 @@ type SampleOpts struct {
 	Seed     int64 // зерно случайности; замер должен повторяться
 	MinWords int   // короче не брать: по обрывку не составить вопрос; 0 — 90
 	SkipCode bool  // не брать куски, помеченные кодом
+	// OnlyCode — брать ТОЛЬКО куски, помеченные кодом: кодовый поднабор для замера
+	// поиска по коду (этап 112, Ф6; в обычных наборах кода нет из-за SkipCode).
+	OnlyCode bool
 }
 
 func (o SampleOpts) norm() SampleOpts {
@@ -92,6 +95,9 @@ func (c *Collection) SampleChunks(o SampleOpts) ([]Sample, error) {
 		}
 		if o.SkipCode && around[0].Code {
 			continue // вопрос по голому коду выходит про синтаксис, а не про смысл
+		}
+		if o.OnlyCode && !around[0].Code {
+			continue
 		}
 		out = append(out, Sample{
 			ID: id, Book: around[0].Book, Page: around[0].UnitFrom,

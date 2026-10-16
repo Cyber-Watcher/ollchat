@@ -370,6 +370,9 @@ func (m *Model) resumeSession(id string) tea.Cmd {
 // applyResumed заполняет диалог и ленту сохранённой сессией.
 func (m *Model) applyResumed(rec *session.Saved) {
 	m.conv.Restore(rec)
+	// Возобновлённый диалог продолжается в своём файле (этап 112, Х3), а откатывать
+	// /retry в нём нечего: вопрос последнего обмена знает только живой сеанс.
+	m.autosaveID, m.lastExchange = rec.ID, -1
 	m.blocks = nil
 	m.rendered = nil
 	m.meter.Reset()

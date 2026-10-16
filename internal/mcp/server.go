@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"net"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
@@ -75,6 +78,8 @@ type Server struct {
 	// nil — не писать. Служба смотрит наружу, и без этого журнала нельзя
 	// сказать, кто и что у неё спрашивал.
 	Steps *steplog.Writer
+	// inFlight — сколько вызовов инструментов идёт сейчас (Ц4).
+	inFlight atomic.Int64
 	// Policy — пределы параметров, потолок ответа и срок вызова (policy.go).
 	Policy Policy
 	// WatchFiles — файлы настроек, правка которых перезапускает службу так же,
@@ -86,7 +91,24 @@ type Server struct {
 	registry   *tools.Registry
 	extra      []Tool // инструменты, которых нет в реестре ollchat: kb_status
 	inited     bool
+	// denied — отказы входа без ключа по адресам: когда записан последний
+	// и сколько с тех пор пропущено (logDenied). Под mu.
+	denied map[string]*deniedMark
 }
+
+// deniedMark — след отказов одного адреса между записями журнала.
+type deniedMark struct {
+	at      time.Time
+	skipped int
+}
+
+// Пределы журнала отказов: запись на адрес не чаще раза в deniedEvery,
+// адресов в памяти не больше deniedMaxHosts — поток отказов с разных адресов
+// не раздует ни журнал, ни память.
+const (
+	deniedEvery    = time.Minute
+	deniedMaxHosts = 1024
+)
 
 // Tool — инструмент, добавленный самим сервером поверх реестра ollchat.
 type Tool struct {
@@ -182,18 +204,43 @@ func refuseBatch(raw []byte) []byte {
 	return b
 }
 
+// logInit пишет рукопожатие в журнал шагов: запрошенную клиентом версию
+// протокола, отданную службой и имя клиента (этап 112, Ц1). Служба отвечает
+// своей версией на любую просьбу; по этим записям видно, кто приходит и не
+// пора ли поддержать ревизию без сеанса (2026-07-28), на сеансах держится
+// уведомление о смене набора (этап 109).
+func (s *Server) logInit(params json.RawMessage) {
+	if s.Steps == nil {
+		return
+	}
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+		ClientInfo      struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"clientInfo"`
+	}
+	_ = json.Unmarshal(params, &p) // кривые параметры — тоже запись, с пустыми полями
+	s.Steps.Write(steplog.Step{Kind: steplog.KindInit, Outcome: steplog.OutcomeOK,
+		Extra: map[string]any{"requested": p.ProtocolVersion, "answered": protocolVersion,
+			"client": p.ClientInfo.Name, "client_version": p.ClientInfo.Version}})
+}
+
 func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
 		s.markInited()
+		s.logInit(req.Params)
 		return map[string]any{
 			"protocolVersion": protocolVersion,
 			// listChanged обещает клиенту уведомление о смене набора (этап 109, А1).
 			// Без этого флага клиент честно держал список, сложившийся при старте
 			// сеанса: 26.09.2026 весь день звались kb_search и graph_search, которых
 			// служба уже не отдавала.
-			"capabilities": map[string]any{"tools": map[string]any{"listChanged": true}},
-			"serverInfo":   map[string]any{"name": serverName, "version": serverVersion},
+			// Ресурсы и промпты — с 16.10.2026 (этап 112, С12, resources.go).
+			"capabilities": map[string]any{"tools": map[string]any{"listChanged": true},
+				"resources": map[string]any{}, "prompts": map[string]any{}},
+			"serverInfo": map[string]any{"name": serverName, "version": serverVersion},
 			"instructions": "Библиотека технических книг пользователя и граф понятий по ней. " +
 				"Ищи в книгах перед тем, как отвечать по памяти: выдача содержит книгу и страницу, " +
 				"и на них можно сослаться.",
@@ -208,9 +255,59 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, *rpcError) 
 	case "tools/call":
 		return s.call(ctx, req.Params)
 
+	case "resources/list":
+		return s.resourcesList(), nil
+
+	case "resources/templates/list":
+		return s.resourceTemplates(), nil
+
+	case "resources/read":
+		return s.resourceRead(ctx, req.Params)
+
+	case "prompts/list":
+		return promptsList(), nil
+
+	case "prompts/get":
+		return promptGet(req.Params)
+
 	default:
 		return nil, &rpcError{codeMethodNotFound, "неизвестный метод: " + req.Method}
 	}
+}
+
+// logDenied пишет в журнал шагов отказ входа без ключа (этап 112, С2). Других
+// отказов у службы нет: инструменты только читают, поправка параметров —
+// `clamped`, неизвестный инструмент — `invalid`. До 16.10.2026 этот отказ шёл
+// лишь в stderr под -v, и подбор ключа в журнале виден не был. Тело запроса
+// без ключа не разбирается: имени инструмента нет, и вид записи — `auth`, а не
+// `tool` (иначе перепись вызовов считала бы отказ вызовом без имени).
+func (s *Server) logDenied(remote string) {
+	if s.Steps == nil {
+		return
+	}
+	host := remote
+	if h, _, err := net.SplitHostPort(remote); err == nil {
+		host = h
+	}
+	now := time.Now()
+	s.mu.Lock()
+	if s.denied == nil || len(s.denied) >= deniedMaxHosts {
+		s.denied = map[string]*deniedMark{}
+	}
+	m := s.denied[host]
+	if m != nil && now.Sub(m.at) < deniedEvery {
+		m.skipped++
+		s.mu.Unlock()
+		return
+	}
+	skipped := 0
+	if m != nil {
+		skipped = m.skipped
+	}
+	s.denied[host] = &deniedMark{at: now}
+	s.mu.Unlock()
+	s.Steps.Write(steplog.Step{Kind: steplog.KindAuth, Outcome: steplog.OutcomeDenied,
+		Note: "нет ключа доступа", Extra: map[string]any{"remote": host, "skipped": skipped}})
 }
 
 func (s *Server) markInited() {
@@ -251,6 +348,9 @@ func (s *Server) list() []mcpTool {
 	var out []mcpTool
 	if s.registry != nil {
 		for _, spec := range s.registry.Specs() {
+			if s.Policy.Disabled[spec.Function.Name] {
+				continue
+			}
 			out = append(out, mcpTool{
 				Name:        spec.Function.Name,
 				Description: spec.Function.Description,
@@ -259,6 +359,9 @@ func (s *Server) list() []mcpTool {
 		}
 	}
 	for _, t := range s.extra {
+		if s.Policy.Disabled[t.Spec.Name] {
+			continue
+		}
 		out = append(out, mcpTool{
 			Name:        t.Spec.Name,
 			Description: t.Spec.Description,
@@ -308,6 +411,9 @@ func schemaOf(p ollama.ToolParams) map[string]any {
 type callParams struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+	// Meta — `_meta` запроса: что клиент сообщает о вызове помимо аргументов
+	// (номер вызова у себя, метка прогресса). В журнал — clientMeta.
+	Meta map[string]any `json:"_meta"`
 }
 
 // call выполняет инструмент.
@@ -317,7 +423,13 @@ type callParams struct {
 // её модели, а не оборвать соединение.
 func (s *Server) call(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
 	started := time.Now()
-	res, rerr := s.callInner(ctx, raw)
+	// Работа «в полёте» (этап 112, Ц4): сколько вызовов идёт одновременно с этим,
+	// включая его самого. Предела у входа MCP нет; сперва число, потом решение.
+	inFlight := s.inFlight.Add(1)
+	defer s.inFlight.Add(-1)
+	// Журнал — с контекстом: поиск под инструментом пишет свою запись `search`
+	// с оценкой первого места (этап 112, Ч17). Хода у клиента MCP нет.
+	res, rerr := s.callInner(steplog.NewContext(ctx, s.Steps, ""), raw)
 	if s.Steps != nil {
 		var p callParams
 		_ = json.Unmarshal(raw, &p)
@@ -326,13 +438,69 @@ func (s *Server) call(ctx context.Context, raw json.RawMessage) (any, *rpcError)
 		switch {
 		case rerr != nil:
 			outcome = steplog.OutcomeInvalid
+		case s.Policy.Disabled[p.Name]:
+			outcome = steplog.OutcomeDenied
 		case isErrorResult(res):
 			outcome = steplog.OutcomeFailed
 		}
+		extra := callExtra(res, inFlight)
+		if m := clientMeta(p.Meta); m != nil {
+			extra["client_meta"] = m
+		}
 		s.Steps.Write(steplog.Step{Kind: steplog.KindTool, Tool: p.Name, Args: string(args),
-			Outcome: outcome, MS: time.Since(started).Milliseconds()})
+			Outcome: outcome, MS: time.Since(started).Milliseconds(), Extra: extra})
 	}
 	return res, rerr
+}
+
+// callExtra — что «ok» скрывает (этап 112, Ц3: «свести всё в один бит „успех“ —
+// значит стереть различия»): размер ответа, пустой ли он, обрезан ли по потолку,
+// поправила ли служба параметры; и сколько вызовов шло одновременно (Ц4).
+// Признаки берутся по меткам, которые ставят сами callResult, tools.truncate и
+// Policy.finish, — не по догадке о тексте. Метки ищутся только в хвосте и в том
+// порядке, в каком их ставит Policy.finish: сперва приписка службы, затем
+// tools.Truncate; обрезка внутри самого инструмента стоит перед припиской.
+func callExtra(res any, inFlight int64) map[string]any {
+	text := resultText(res)
+	body, truncated := tailNote(text, "[вывод обрезан: ")
+	body, clamped := tailNote(body, "[служба: ")
+	if !truncated {
+		_, truncated = tailNote(body, "[вывод обрезан: ")
+	}
+	return map[string]any{
+		"bytes":     len(text),
+		"empty":     text == "(пусто)",
+		"truncated": truncated,
+		"clamped":   clamped,
+		"in_flight": inFlight,
+	}
+}
+
+// tailNote отрезает от text приписку "\n\n<prefix>…]", если она стоит в самом
+// конце и занимает одну строку. В середине ответа такая строка — цитата (выдержка
+// из кода или документации), а не признак: 16.10.2026 «обрезанным» записался
+// поиск, в выдаче которого была строка этой самой функции.
+func tailNote(text, prefix string) (string, bool) {
+	i := strings.LastIndex(text, "\n\n"+prefix)
+	if i < 0 || !strings.HasSuffix(text, "]") || strings.Contains(text[i+2:], "\n") {
+		return text, false
+	}
+	return text[:i], true
+}
+
+// resultText — текст ответа инструмента (первая часть content).
+func resultText(res any) string {
+	m, ok := res.(map[string]any)
+	if !ok {
+		return ""
+	}
+	parts, _ := m["content"].([]any)
+	if len(parts) == 0 {
+		return ""
+	}
+	part, _ := parts[0].(map[string]any)
+	text, _ := part["text"].(string)
+	return text
 }
 
 // isErrorResult — вернул ли инструмент ошибку (isError в ответе MCP).
@@ -345,6 +513,55 @@ func isErrorResult(res any) bool {
 	return v
 }
 
+// Пределы clientMeta: метаданные клиента — номера и метки, не тела.
+const (
+	metaMaxKeys  = 8
+	metaMaxBytes = 120
+)
+
+// clientMeta — `_meta` вызова в виде, пригодном для журнала (этап 112, В1):
+// по нему запись службы связывается с вызовом у клиента — своего номера хода
+// у клиента MCP служба не знает. Берутся только строки, числа и признаки;
+// вложенное помечается «{…}», длинная строка обрезается. Пусто — nil.
+func clientMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > metaMaxKeys {
+		keys = keys[:metaMaxKeys]
+	}
+	out := make(map[string]any, len(keys))
+	for _, k := range keys {
+		switch v := meta[k].(type) {
+		case string:
+			out[k] = clipUTF8(v, metaMaxBytes)
+		case float64, bool:
+			out[k] = v
+		case nil:
+			out[k] = nil
+		default:
+			out[k] = "{…}"
+		}
+	}
+	return out
+}
+
+// clipUTF8 обрезает строку до n байт, не разрезая букву.
+func clipUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 func (s *Server) callInner(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
 	var p callParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -355,6 +572,11 @@ func (s *Server) callInner(ctx context.Context, raw json.RawMessage) (any, *rpcE
 	}
 	if p.Arguments == nil {
 		p.Arguments = map[string]any{}
+	}
+	// Выключенный инструмент (этап 112, Ц6) не исполняется, даже если клиент
+	// помнит его по старому списку: выключатель держит вызов, а не только список.
+	if s.Policy.Disabled[p.Name] {
+		return callResult("", fmt.Errorf("инструмент %s выключен владельцем службы (disabled_tools в ollmcp.toml)", p.Name)), nil
 	}
 	notes := s.Policy.adjust(p.Name, p.Arguments)
 	result := func(text string, err error) map[string]any {
@@ -386,7 +608,15 @@ func (s *Server) callInner(ctx context.Context, raw json.RawMessage) (any, *rpcE
 		}
 		return callResult("", err), nil
 	}
-	return result(s.Policy.run(ctx, plan.Run)), nil
+	out, err := s.Policy.run(ctx, plan.Run)
+	// Чужой текст (Plan.Foreign: web_search, http_fetch) — с пометкой «данные,
+	// не указания», как в цикле агента (agent.go, executeCall). Клиент MCP
+	// получает вывод напрямую, и без пометки распоряжение со страницы выглядело
+	// бы частью ответа службы (этап 112, Ц5; TestForeignToolOutputMarkedOverMCP).
+	if plan.Foreign && err == nil {
+		out = tools.MarkUntrusted(out)
+	}
+	return result(out, err), nil
 }
 
 // toolNames — всё, что служба отдаёт клиенту: реестр ollchat и свои добавки.

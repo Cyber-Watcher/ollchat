@@ -23,7 +23,9 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"github.com/Cyber-Watcher/ollchat/internal/session"
+	"github.com/Cyber-Watcher/ollchat/internal/textx"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 	"github.com/Cyber-Watcher/ollchat/internal/vram"
 )
@@ -49,6 +51,11 @@ type kbState struct {
 	autoOn bool   // подмешивать найденное перед каждым вопросом
 	emb    *kbembed.Embedder
 	embURL string // адрес, под который собран эмбеддер
+
+	// tr — перевод вопроса для словесной ветки (kb.translate); trKey —
+	// настройки, под которые он собран: сменились — собирается заново.
+	tr    *qtranslate.Translator
+	trKey string
 }
 
 // graphState — открытый граф и подмешивание карты понятий.
@@ -176,6 +183,21 @@ type Model struct {
 	compacting    bool
 	compactText   string
 	compactCancel context.CancelFunc
+
+	// autosaveID — файл сессии, который автосохранение (этап 112, Х3,
+	// agent.autosave) переписывает после каждого хода; пусто — ещё не заведён.
+	autosaveID string
+	// lastExchange — с какого сообщения истории начался последний обмен (подмес
+	// и вопрос), и сам вопрос: по ним /retry (этап 112, Х4) откатывает обмен
+	// целиком. -1 — откатывать нечего или история с тех пор переписана.
+	lastExchange     int
+	lastQuestion     string
+	lastQuestionImgs bool
+
+	// steer — реплики, набранные Enter посреди хода (этап 112, Х1): цикл агента
+	// забирает их после результатов инструментов; остаток уходит следующим
+	// вопросом, по Esc и при ошибке хода возвращается в поле ввода.
+	steer *agent.SteerQueue
 
 	// Подтверждение действия.
 	confirm       *agent.ConfirmRequest
@@ -872,6 +894,8 @@ func (m *Model) send(text string) tea.Cmd {
 	// Enter, видел ровно ничего — ни своего вопроса, ни признака работы.
 	// Больше всех платил первый вопрос после запуска: граф ещё не открыт.
 	if job, ok := m.mixPlan(); ok {
+		job.query = m.followupQuery(text)
+		job.deps.Steps, job.deps.Turn = m.steps, m.turnID // запись поиска для отчёта о пробелах (Ч17)
 		m.gen.mix++
 		m.mixing = true
 		m.mixOpening = job.needsOpen()
@@ -891,6 +915,9 @@ func (m *Model) send(text string) tea.Cmd {
 // Отделено от send потому, что между ними лежит ожидание: подмешивание
 // считается командой, и продолжить обмен можно только когда она ответит.
 func (m *Model) startExchange(text string, images []pendingImage, mix mixResult) tea.Cmd {
+	// Отсюда начинается обмен в истории — /retry откатит до этого места.
+	m.lastExchange, m.lastQuestion, m.lastQuestionImgs = m.conv.Len(), text, len(images) > 0
+
 	// Карта понятий и выдержки из книг уходят отдельным сообщением ПЕРЕД
 	// вопросом. Так библиотека работает и с моделями без поддержки
 	// инструментов. Серая строка под вопросом говорит, что именно ушло.
@@ -929,6 +956,13 @@ func (m *Model) startExchange(text string, images []pendingImage, mix mixResult)
 		VisionSupported: !m.visionUnsupported(),
 		Steps:           m.steps,
 		Turn:            m.turnID,
+		Steer:           m.steerQueue(),
+		// Защита и пределы хода (этап 112).
+		JournalFailClosed:  m.cfg.Agent.JournalFailClosed,
+		UntrustedGate:      m.cfg.Agent.UntrustedGate,
+		PrivateEgressCheck: m.cfg.Agent.PrivateEgressCheck,
+		MaxWritesNoask:     m.cfg.Agent.MaxWritesNoask,
+		MaxTurnTokens:      m.cfg.Agent.MaxTurnTokens,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1031,6 +1065,11 @@ func (m *Model) stopStreaming() {
 	m.flushHeldAttach()
 }
 
+// turnSummary — строка итога хода (этап 112, Ц8; agent.turn_summary).
+func turnSummary(s agent.ToolStats) string {
+	return fmt.Sprintf("Итог хода: вызовов инструментов %d, отклонено %d, с ошибкой %d", s.Calls, s.Rejected, s.Failed)
+}
+
 // finishTurn завершает обмен: пишет ответ в журнал и сбрасывает состояние.
 func (m *Model) finishTurn() {
 	m.streaming = false
@@ -1072,6 +1111,83 @@ func (m *Model) finishTurn() {
 	// Придержанные заметки об архиве и о состоянии графа — теперь: в середину
 	// ответа влезать нельзя, а забывать о беде — тем более.
 	m.flushHeldNotes()
+	m.autosave()
+}
+
+// steerQueue — очередь реплик посреди хода; заводится один раз на сеанс, до
+// первого хода: агент получает указатель при запуске и другой не увидит.
+func (m *Model) steerQueue() *agent.SteerQueue {
+	if m.steer == nil {
+		m.steer = &agent.SteerQueue{}
+	}
+	return m.steer
+}
+
+// queueSteer — Enter посреди хода (этап 112, Х1). Раньше он только просил
+// подождать, и вмешаться в длинную цепочку вызовов, не оборвав её, было нельзя.
+// Теперь реплика встаёт в очередь: модель получит её после текущих инструментов,
+// а если ход кончится без новых вызовов — она уйдёт следующим вопросом.
+func (m *Model) queueSteer() tea.Cmd {
+	text := strings.TrimSpace(m.ta.Value())
+	// Команда — не реплика модели: посреди хода она по-прежнему ждёт его конца.
+	if text == "" || strings.HasPrefix(text, "/") {
+		m.statusMsg = "дождитесь ответа или нажмите Esc"
+		return nil
+	}
+	if len(m.imagesFor(text)) > 0 {
+		m.statusMsg = "картинку приложите после ответа: посреди хода она не уйдёт"
+		return nil
+	}
+	text = m.expandPastes(text)
+	m.pastes = nil
+	m.steerQueue().Push(text)
+	m.ta.Reset()
+	m.addBlock(block{kind: blockNotice, text: "в очереди: «" + textx.Shorten(text, 80) +
+		"» — модель получит после текущих инструментов, иначе уйдёт следующим вопросом; Esc вернёт в поле"})
+	return nil
+}
+
+// sendFollowUp — реплики, которые ход не забрал (модель ответила без новых
+// вызовов), уходят следующим вопросом: у Pi это очередь follow-up — «Starts
+// another turn for an agent that would otherwise end».
+func (m *Model) sendFollowUp() tea.Cmd {
+	q := m.steer.Drain()
+	if len(q) == 0 {
+		return nil
+	}
+	return m.send(strings.Join(q, "\n\n"))
+}
+
+// restoreSteer возвращает непереданные реплики в поле ввода — по Esc и при
+// ошибке хода (у Pi Esc «restores queued messages, clears the session queue»):
+// оборванный ход не должен ни терять набранное, ни отправлять его сам.
+func (m *Model) restoreSteer() {
+	q := m.steer.Drain()
+	if len(q) == 0 {
+		return
+	}
+	if cur := strings.TrimSpace(m.ta.Value()); cur != "" {
+		q = append(q, cur)
+	}
+	m.ta.SetValue(strings.Join(q, "\n"))
+	m.statusMsg = fmt.Sprintf("реплики из очереди возвращены в поле ввода: %d", len(q))
+}
+
+// autosave — сеанс сохраняется сам после каждого хода (этап 112, Х3,
+// agent.autosave): обрыв ssh или двойной Ctrl+C больше не теряют диалог, а
+// /resume находит его первым в списке. Файл один на сеанс и переписывается
+// целиком атомарно (session.Store.SaveAs). Диалог без ответа модели файла
+// не заводит — как у Pi, файл появляется после первого ответа.
+func (m *Model) autosave() {
+	if !m.cfg.Agent.Autosave || m.store == nil || !m.conv.HasAnswer() {
+		return
+	}
+	id, _, err := m.store.SaveAs(m.autosaveID, m.conv, m.server.Name, m.modelName)
+	if err != nil {
+		m.statusMsg = "автосохранение: " + err.Error()
+		return
+	}
+	m.autosaveID = id
 }
 
 // stampTurn помечает блоки ответа завершившегося хода временем и моделью.

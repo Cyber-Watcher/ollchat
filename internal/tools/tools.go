@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
@@ -108,6 +109,11 @@ type Options struct {
 	BashTimeout time.Duration
 	MaxOutputKB int
 
+	// Backup — копия файла перед правкой write_file и edit_file (этап 112, Н5:
+	// путь отката, internal/backup). Ошибка — правка не выполняется. nil — без
+	// копий, как до 16.10.2026.
+	Backup func(path string) error
+
 	// Isolation — изоляция команд bash средствами ОС (sandbox.isolation).
 	// Нулевое значение — выключена: команды запускаются как раньше.
 	Isolation Isolation
@@ -183,6 +189,8 @@ type Options struct {
 	SemanticWeight float64
 	AnswerStyle    string // пусто — встроенная политика kb.DefaultAnswerStyle
 	Embedder       kb.Embedder
+	// Translator — перевод вопроса для словесной ветки (kb.translate); nil — без.
+	Translator find.Translator
 
 	// Reranker — вторая ступень поиска по книгам. Необязательна: без неё
 	// выдача остаётся такой, какой её собрала первая ступень.

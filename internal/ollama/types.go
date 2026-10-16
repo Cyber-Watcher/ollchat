@@ -93,6 +93,16 @@ type ChatRequest struct {
 	Think     *bool          `json:"think,omitempty"`
 	KeepAlive string         `json:"keep_alive,omitempty"`
 	Options   map[string]any `json:"options,omitempty"`
+	// Logprobs — попросить у сервера логарифм вероятности каждого выданного
+	// токена (Ollama 0.32 отдаёт их в чанках потока). Нужен замеру «насколько
+	// модель уверена в ответе» (этап 112, Ч15); в работе выключен.
+	Logprobs bool `json:"logprobs,omitempty"`
+}
+
+// TokenLogprob — один токен ответа и логарифм его вероятности.
+type TokenLogprob struct {
+	Token   string  `json:"token"`
+	Logprob float64 `json:"logprob"`
 }
 
 // ChatResponse — один чанк NDJSON-потока (или полный ответ при stream=false).
@@ -103,6 +113,8 @@ type ChatResponse struct {
 	Done       bool    `json:"done"`
 	DoneReason string  `json:"done_reason,omitempty"`
 	Error      string  `json:"error,omitempty"`
+	// Logprobs — токены этого чанка, если в запросе просили.
+	Logprobs []TokenLogprob `json:"logprobs,omitempty"`
 
 	TotalDuration      int64 `json:"total_duration,omitempty"`
 	LoadDuration       int64 `json:"load_duration,omitempty"`

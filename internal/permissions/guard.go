@@ -13,13 +13,15 @@ const (
 	ModeAutoEdit = "auto-edit"
 	ModeNoAsk    = "noask"
 
-	// ModeYolo — прежнее имя режима no-ask.
+	// ModeYolo — не спрашивать ничего: ни про необратимое, ни проверки хода
+	// (чужой текст, предел правок). Запрет deny действует и здесь — это отказ,
+	// а не вопрос.
 	//
-	// «yolo» (You Only Live Once, «живём один раз») — шутка из чужих
-	// инструментов, и человеку в строке состояния она не говорит ничего:
-	// по ней не понять, что подтверждения выключены. Имя заменено 31.08.2026,
-	// старое продолжает работать — в чужих конфигах оно уже записано,
-	// и ломать их из-за переименования нельзя.
+	// С 31.08.2026 по 16.10.2026 «yolo» было прежним именем noask. Когда noask
+	// стал спрашивать про необратимое (этап 112, Т9), владелец вернул yolo
+	// отдельным режимом (16.10.2026) — для старых конфигов смысл тот же:
+	// «не спрашивать». В круг Shift+Tab он не входит: только /mode yolo,
+	// конфиг или ключ запуска, чтобы не попасть в него случайным нажатием.
 	ModeYolo = "yolo"
 )
 
@@ -28,7 +30,7 @@ const (
 // Пустая строка возвращается как есть: «не задано» решает вызывающий.
 func NormalizeMode(mode string) string {
 	switch mode {
-	case ModeYolo, "no-ask", "dont-ask", "no_ask":
+	case "no-ask", "dont-ask", "no_ask":
 		return ModeNoAsk
 	}
 	return mode
@@ -58,6 +60,9 @@ type Result struct {
 	Decision Decision
 	Rule     *Rule  // сработавшее правило, если было
 	Reason   string // пояснение для пользователя
+	// Irreversible — действие из класса «необратимое» (irreversible.go):
+	// окно подтверждения говорит об этом, и сеансовых разрешений оно не даёт.
+	Irreversible bool
 }
 
 // Guard объединяет правила, песочницу, режим и разрешения, выданные на сеанс.
@@ -72,6 +77,12 @@ type Guard struct {
 	// grantedTools — инструменты, разрешённые целиком до конца сеанса.
 	// Правила deny и границы песочницы продолжают действовать и для них.
 	grantedTools map[string]bool
+
+	// WriteIrreversible — почему правку этого файла не откатить (копию перед
+	// ней сделать нельзя: больше предела, каталог копий недоступен); пусто —
+	// откатить можно. nil — копий нет вовсе, и правка считается обратимой, как
+	// до 16.10.2026. Задаёт тот, кто делает копии (backup.Store.Irreversible).
+	WriteIrreversible func(path string) string
 }
 
 // NewGuard создаёт охранника действий.
@@ -105,9 +116,9 @@ func (g *Guard) Mode() string {
 func (g *Guard) SetMode(mode string) error {
 	mode = NormalizeMode(mode)
 	switch mode {
-	case ModeSafe, ModeAutoEdit, ModeNoAsk:
+	case ModeSafe, ModeAutoEdit, ModeNoAsk, ModeYolo:
 	default:
-		return fmt.Errorf("неизвестный режим %q (ожидается safe, auto-edit или noask)", mode)
+		return fmt.Errorf("неизвестный режим %q (ожидается safe, auto-edit, noask или yolo)", mode)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -148,11 +159,17 @@ func (g *Guard) Check(req Request) Result {
 		return Result{Decision: DecisionDeny, Rule: r,
 			Reason: fmt.Sprintf("запрещено правилом %s", r.Source)}
 	}
+	if why := ownDir(req, g.sandbox); why != "" {
+		return Result{Decision: DecisionDeny, Reason: why}
+	}
 	// Цель, заданная настройкой, а не моделью: спрашивать не о чем.
 	// Проверка идёт после deny — запрет остаётся сильнее всего.
 	if req.Fixed {
 		return Result{Decision: DecisionAllow,
 			Reason: "цель задана настройками, а не моделью"}
+	}
+	if res, ok := g.irreversible(req, mode); ok {
+		return res
 	}
 	// Инструмент, разрешённый целиком, не спрашивает про каждую цель отдельно.
 	if toolGranted {
@@ -216,11 +233,14 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 		return Result{Decision: DecisionDeny, Rule: verdict.rule,
 			Reason: fmt.Sprintf("запрещено правилом %s (часть команды: %s)", verdict.rule.Source, verdict.part)}
 	}
+	if why := ownDir(req, g.sandbox); why != "" {
+		return Result{Decision: DecisionDeny, Reason: why}
+	}
 	// Имя программы станет известно только при запуске (`$X -rf ~`,
 	// `$(echo rm) …`, `{rm,-rf,~}`): сверить его с запретами нельзя. Решает
 	// человек — в любом режиме, при любых сеансовых разрешениях и правилах
 	// allow: иначе `X=rm; $X -rf ~` проходил бы в noask молча.
-	if verdict.unknown != "" {
+	if verdict.unknown != "" && mode != ModeYolo {
 		return Result{Decision: DecisionAsk, Reason: fmt.Sprintf(
 			"имя программы в «%s» станет известно только при запуске, "+
 				"и сверить его с запретами нельзя: требуется подтверждение", verdict.unknown)}
@@ -229,10 +249,13 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 	// -toolexec=…`, `git -c core.pager=…`): названная программа уже сверена
 	// с запретами выше, но решает человек — в любом режиме, при любых
 	// сеансовых разрешениях и правилах allow (слово владельца 08.10.2026).
-	if verdict.named != "" {
+	if verdict.named != "" && mode != ModeYolo {
 		return Result{Decision: DecisionAsk, Reason: fmt.Sprintf(
 			"ключ «%s» запускает другую программу: она сверена с запретами, "+
-				"но требуется подтверждение в любом режиме", verdict.named)}
+				"но требуется подтверждение в любом режиме, кроме yolo", verdict.named)}
+	}
+	if res, ok := g.irreversible(req, mode); ok {
+		return res
 	}
 
 	segments := SplitCommand(req.Target)
@@ -297,6 +320,28 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 		Reason: reasonForMode(KindBash, mode)}
 }
 
+// irreversible — решение для действия класса «необратимое» (Н5, Т9): вопрос
+// в любом режиме, кроме yolo, мимо правил allow и сеансовых разрешений.
+// ok == false — действие обратимо, решают обычные правила.
+func (g *Guard) irreversible(req Request, mode string) (Result, bool) {
+	root := ""
+	if g.sandbox != nil {
+		root = g.sandbox.RealRoot()
+	}
+	why := g.set.IrreversibleBy(req.Kind, req.Target, root)
+	if why == "" && req.Kind == KindWrite && g.WriteIrreversible != nil {
+		why = g.WriteIrreversible(req.Target)
+	}
+	if why == "" {
+		return Result{}, false
+	}
+	if mode == ModeYolo {
+		return Result{Decision: DecisionAllow, Irreversible: true, Reason: "режим yolo: без вопроса (" + why + ")"}, true
+	}
+	return Result{Decision: DecisionAsk, Irreversible: true,
+		Reason: why + " — откат дольше 10 минут или невозможен: спрашивается каждый раз"}, true
+}
+
 // applyMode превращает «спросить» в «разрешить» там, где это допускает режим.
 // Решение «запрещено» режимом не меняется никогда.
 func applyMode(d Decision, kind Kind, mode string) Decision {
@@ -304,7 +349,7 @@ func applyMode(d Decision, kind Kind, mode string) Decision {
 		return d
 	}
 	switch mode {
-	case ModeNoAsk:
+	case ModeNoAsk, ModeYolo:
 		return DecisionAllow
 	case ModeAutoEdit:
 		if kind == KindWrite {
@@ -318,6 +363,8 @@ func reasonForMode(kind Kind, mode string) string {
 	switch mode {
 	case ModeNoAsk:
 		return "режим noask: подтверждение не запрашивается"
+	case ModeYolo:
+		return "режим yolo: подтверждения выключены"
 	case ModeAutoEdit:
 		if kind == KindWrite {
 			return "режим auto-edit: правка файлов без подтверждения"

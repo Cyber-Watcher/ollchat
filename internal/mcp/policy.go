@@ -32,6 +32,9 @@ type Policy struct {
 	OutputBytes int
 	// CallTimeout — общий срок вызова; 0 — без срока.
 	CallTimeout time.Duration
+	// Disabled — выключенные инструменты (disabled_tools, этап 112, Ц6): их нет
+	// в tools/list, вызов отвечает отказом.
+	Disabled map[string]bool
 }
 
 // limitOf — предел параметра, если он задан.

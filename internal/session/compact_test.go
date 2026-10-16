@@ -84,6 +84,14 @@ func TestSummarizeFailures(t *testing.T) {
 	if _, _, err := Summarize(context.Background(), cut, "m", history(), "", nil); err == nil {
 		t.Fatal("оборванный поток должен быть ошибкой")
 	}
+	// Поток завершён, но генерацию оборвал предел вывода: сводка неполна (этап 112, Х2).
+	limited := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: "- файл настроек: config.toml\n- порт"},
+		{Kind: ollama.EventDone, Stats: ollama.Stats{DoneReason: "length"}},
+	}}
+	if _, _, err := Summarize(context.Background(), limited, "m", history(), "", nil); err == nil || !strings.Contains(err.Error(), "num_predict") {
+		t.Fatalf("сводка, оборванная пределом вывода, принята: %v", err)
+	}
 }
 
 // Сводка уходит с окном и сроком жизни диалога. Без num_ctx сервер поднял бы

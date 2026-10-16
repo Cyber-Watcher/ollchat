@@ -172,9 +172,10 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 			return nil, err
 		}
 		// Пауза растёт: если сервер занят чужой работой, частые повторы
-		// только добавляют ему нагрузки.
+		// только добавляют ему нагрузки; случайная добавка разводит повторы
+		// многих клиентов (ollama.Backoff, этап 112, А2).
 		select {
-		case <-time.After(time.Duration(attempt+1) * time.Second):
+		case <-time.After(ollama.Backoff(attempt, time.Second)):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

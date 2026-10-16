@@ -77,6 +77,14 @@ func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Mess
 	if !done {
 		return "", stats, errors.New("модель не завершила сводку")
 	}
+	// Сводка, оборванная пределом вывода, выглядит полной, а хвоста истории
+	// в ней нет: принятая, она молча заменила бы собой сжатые сообщения
+	// (этап 112, Х2; «summarization … rejects … length-limited results»,
+	// «Learning Agent Engineering from Pi», 2026, разд. 20).
+	if stats.DoneReason == "length" {
+		return "", stats, errors.New("сводка оборвана пределом длины вывода (num_predict) и не принята: " +
+			"поднимите options.num_predict в настройках сервера (-1 — без предела)")
+	}
 	out := strings.TrimSpace(b.String())
 	if out == "" {
 		return "", stats, errors.New("модель вернула пустую сводку")

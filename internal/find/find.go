@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,6 +44,16 @@ type Deps struct {
 	Graph    *graph.Graph // nil — графа нет, показываем одни выдержки
 	Embedder kb.Embedder  // nil — смысловой поиск не настроен
 	Reranker kb.Reranker  // nil — второй ступени нет
+
+	// Translator — перевод вопроса на английский для словесной ветки
+	// (kb.translate, этап 112, шаг 2); nil — без перевода.
+	Translator Translator
+}
+
+// Translator переводит вопрос для словесной ветки. Пустой перевод без ошибки —
+// переводить не нужно (вопрос уже не русский или перевод выключен).
+type Translator interface {
+	Translate(ctx context.Context, question string) (string, error)
 }
 
 // Opts — числа отбора и оформления. Приходят из настроек и от ключей команды.
@@ -73,6 +84,12 @@ type Opts struct {
 	RRFK       float64
 	Collection string // имя для ссылок вида «books/12#37»
 
+	// MergeRRFK — как сливать выдержки книг с подтверждениями графа (этап 112, П7).
+	// 0 — как в работе: сперва книги, граф дописывается в хвост; > 0 — RRF
+	// с этой постоянной, оба списка на равных. Только для замера
+	// (`--kb-eval-graph-merge`): в работу не идёт, пока замер не покажет пользу.
+	MergeRRFK float64
+
 	// Книги.
 	TopK       int
 	MaxPerBook int // не больше стольких кусков из одной книги; 0 — умолчание коллекции, < 0 — без предела
@@ -80,6 +97,10 @@ type Opts struct {
 	// KeepAdjacent — не выбрасывать соседние куски одной книги (этап 105, З5);
 	// умолчание false — доводка выдачи работает как всегда.
 	KeepAdjacent bool
+
+	// WordsExtra — слова только для словесной ветки (kb.SearchOpts.WordsExtra,
+	// этап 112, О8); пусто — как всегда.
+	WordsExtra string
 
 	// DedupeCosine — порог близости, выше которого кусок считается повтором
 	// уже отобранного и в выдачу не идёт (kb.dedupe_cosine; 0 — не проверять).
@@ -317,6 +338,14 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 	}
 	d = d.clean()
 	o = o.norm()
+	// Инструмент поиска журнала в Deps не несёт: он приходит с контекстом вызова
+	// от агента и службы MCP (steplog.NewContext, этап 112, Ч17).
+	if w, turn := steplog.FromContext(ctx); d.Steps == nil && w != nil {
+		d.Steps = w
+		if o.Turn == "" {
+			o.Turn = turn
+		}
+	}
 	res := Result{Query: query, Collection: o.Collection}
 	started := time.Now()
 	var msGraph, msBooks int64
@@ -330,6 +359,10 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 			Extra: map[string]any{"mode": o.Mode, "ms_graph": msGraph, "ms_books": msBooks,
 				"entities": len(res.Entities), "excerpts": len(res.Excerpts), "ids": ids,
 				"hits": res.Signals.Hits, "top1_gap": res.Signals.Top1Gap,
+				// Оценка первого места и признак реранкера — для отчёта о пробелах
+				// библиотеки (этап 112, Ч17): вопросы, где top1 ниже kb.abstain_score,
+				// — то, чего в книгах нет (`stepstat.py --gaps`).
+				"top1": res.Signals.Top1, "reranked": o.Rerank && d.Reranker != nil,
 				"words_only": res.WordsOnly, "collection": o.Collection}})
 	}()
 
@@ -427,6 +460,17 @@ func Books(ctx context.Context, d Deps, search, question string, o Opts) ([]kb.R
 	d = d.clean()
 	o = o.norm()
 	_, emb, why := QueryVector(ctx, d, question, o)
+	// Перевод вопроса идёт только к словам: вектор уже посчитан по вопросу
+	// как есть. Не ответила модель — ищем без перевода и говорим об этом.
+	if d.Translator != nil {
+		if en, err := d.Translator.Translate(ctx, question); err != nil {
+			if why == "" {
+				why = "перевод вопроса не получен (" + err.Error() + ") — искал без него"
+			}
+		} else if en != "" {
+			o.WordsExtra = strings.TrimSpace(o.WordsExtra + " " + en)
+		}
+	}
 	hits, note, err := d.books(ctx, search, question, emb, o)
 	if note == "" {
 		note = why
@@ -462,6 +506,7 @@ func (d Deps) books(ctx context.Context, search, question string, emb kb.Embedde
 	opt.Docs = o.Docs
 	opt.Exact = o.Exact
 	opt.KeepAdjacent = o.KeepAdjacent
+	opt.WordsExtra = o.WordsExtra
 
 	// Вторая ступень читает вопрос вместе с куском и переставляет верхушку.
 	// Ей нужны кандидаты сверх того, что показываем: первая ступень отдаёт
@@ -600,6 +645,7 @@ func merge(hits []kb.Result, fromG []Excerpt, o Opts) []Excerpt {
 			Text: h.Text, Snippet: snippet, Code: h.Code,
 		})
 	}
+	nBooks := len(out)
 	for _, e := range fromG {
 		if seen[e.ID] {
 			continue
@@ -607,10 +653,48 @@ func merge(hits []kb.Result, fromG []Excerpt, o Opts) []Excerpt {
 		seen[e.ID] = true
 		out = append(out, e)
 	}
+	if o.MergeRRFK > 0 {
+		out = rrfOrder(out, nBooks, fromG, o.MergeRRFK)
+	}
 	if o.TopK > 0 && len(out) > o.TopK {
 		out = out[:o.TopK]
 	}
 	return out
+}
+
+// Remerge сливает выдержки готового результата заново по правилам o — для замера
+// правил слияния (этап 112, П7) без повторного поиска. Совпадает с тем, что
+// сделал бы Search: книги — res.Hits, граф — fromGraph по res.Evidence, ровно как
+// в Search перед merge.
+func Remerge(coll *kb.Collection, res Result, o Opts) []Excerpt {
+	return merge(res.Hits, fromGraph(coll, res.Evidence, o), o)
+}
+
+// rrfOrder переставляет слитые выдержки по RRF (этап 112, П7): балл куска —
+// сумма 1/(k + место) по обоим спискам, место считается с единицы. Кусок,
+// найденный и книгами, и графом, получает оба голоса; выдержка в out — та,
+// что пришла первой (из книг), поэтому текст и поля не меняются. При равных
+// баллах — прежний порядок: книги впереди графа.
+func rrfOrder(out []Excerpt, nBooks int, fromG []Excerpt, k float64) []Excerpt {
+	score := make(map[string]float64, len(out))
+	for i := range nBooks {
+		score[out[i].ID] += 1 / (k + float64(i+1))
+	}
+	gRank := 0
+	gSeen := make(map[string]bool, len(fromG))
+	for _, e := range fromG {
+		if gSeen[e.ID] {
+			continue
+		}
+		gSeen[e.ID] = true
+		gRank++
+		score[e.ID] += 1 / (k + float64(gRank))
+	}
+	sorted := append([]Excerpt(nil), out...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return score[sorted[i].ID] > score[sorted[j].ID]
+	})
+	return sorted
 }
 
 // cut обрезает текст до n знаков по границе слова.

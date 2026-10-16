@@ -13,8 +13,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 )
 
 // Команды /kb — управление базой знаний по книгам.
@@ -783,6 +785,21 @@ func (m *Model) embedder() kb.Embedder {
 		return nil
 	}
 	return m.kb.emb
+}
+
+// translator — перевод вопроса для словесной ветки (kb.translate) или nil.
+// Один на сеанс: его кэш общий у подмеса и у /search; настройки или сервер
+// сменились — собирается заново.
+func (m *Model) translator() find.Translator {
+	key := fmt.Sprintf("%v|%s|%s|%s", m.cfg.KB.Translate, m.cfg.KB.TranslateModel, m.cfg.Graph.SummaryModel, m.server.URL)
+	if m.kb.trKey != key {
+		m.kb.tr = qtranslate.New(m.cfg, m.server.URL, m.server.Headers)
+		m.kb.trKey = key
+	}
+	if m.kb.tr == nil {
+		return nil
+	}
+	return m.kb.tr
 }
 
 // folderBreakdown показывает состав коллекции по подпапкам.

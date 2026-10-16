@@ -6,6 +6,7 @@ import (
 	"fmt"
 	gmaint "github.com/Cyber-Watcher/ollchat/internal/graph/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"net/http"
 	"os"
 	"os/signal"
@@ -135,6 +136,7 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 		RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
 		Base:       base,
 		Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
+		Translator: qtranslate.New(cfg, fallback, headers),
 		Default:    cfg.KB.Default,
 		Token:      token,
 		Graph:      &graphService{cfg: cfg, registry: graphReg, base: base, cache: cache},

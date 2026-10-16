@@ -123,7 +123,7 @@ func (t *searchTool) run(ctx context.Context, name, query, book string, topK int
 		kbTopK = min(topK, 20)
 	}
 	deps := find.Deps{Coll: coll, Source: src, Graph: g,
-		Embedder: t.opts.embedder(), Reranker: t.opts.reranker()}
+		Embedder: t.opts.embedder(), Reranker: t.opts.reranker(), Translator: t.opts.Translator}
 	if t.opts.Library == nil {
 		deps.Source = coll // одна и та же коллекция: и книги, и подтверждения
 	}

@@ -11,23 +11,32 @@ import (
 
 // fakeColl — коллекция из нескольких кусков, отдающая их в заданном порядке.
 type fakeColl struct {
-	hits []kb.Result
-	got  kb.SearchOpts
+	hits     []kb.Result
+	got      kb.SearchOpts
+	searched int                  // сколько раз искали
+	byID     map[string]kb.Result // что отдаёт Around по ссылке
 }
 
 func (c *fakeColl) Name() string { return "проба" }
 func (c *fakeColl) SearchWith(_ context.Context, _ string, opt kb.SearchOpts, _ kb.Embedder) ([]kb.Result, error) {
 	c.got = opt
+	c.searched++
 	out := append([]kb.Result(nil), c.hits...)
 	if opt.TopK > 0 && len(out) > opt.TopK {
 		out = out[:opt.TopK]
 	}
 	return out, nil
 }
-func (c *fakeColl) Around(string, int) ([]kb.Result, error) { return nil, nil }
-func (c *fakeColl) Books() []kb.BookRec                     { return nil }
-func (c *fakeColl) Stats() kb.Stats                         { return kb.Stats{} }
-func (c *fakeColl) SearchNote() string                      { return "" }
+func (c *fakeColl) Around(id string, _ int) ([]kb.Result, error) {
+	r, ok := c.byID[id]
+	if !ok {
+		return nil, errors.New("куска нет")
+	}
+	return []kb.Result{r}, nil
+}
+func (c *fakeColl) Books() []kb.BookRec { return nil }
+func (c *fakeColl) Stats() kb.Stats     { return kb.Stats{} }
+func (c *fakeColl) SearchNote() string  { return "" }
 
 // reverser — реранкер, переворачивающий выдачу: так видно, применили его или нет.
 type reverser struct{}

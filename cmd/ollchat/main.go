@@ -22,6 +22,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Cyber-Watcher/ollchat/internal/backup"
 	"github.com/Cyber-Watcher/ollchat/internal/buildinfo"
 	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
@@ -32,6 +33,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/kbremote"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"github.com/Cyber-Watcher/ollchat/internal/redact"
 	"github.com/Cyber-Watcher/ollchat/internal/session"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
@@ -174,6 +176,9 @@ type cliFlags struct {
 	graphSumMin           *int
 	kbEvalGen             *string
 	kbEvalGenN            *int
+	kbEvalGenMust         *bool
+	kbEvalGenCode         *bool
+	kbEvalGenDistract     *string
 	kbSeed                *int64
 	kbSample              *string
 	kbEval                *string
@@ -182,14 +187,25 @@ type cliFlags struct {
 	kbEvalWide            *int
 	kbEvalDedupe          *float64
 	kbEvalKeepAdj         *bool
+	kbEvalPart            *string
+	kbEvalWindow          *bool
+	kbEvalWindowSelf      *bool
 	kbEvalWeight          *float64
 	kbEvalTable           *float64
 	kbEvalRRFK            *float64
+	kbEvalGraphMerge      *string
 	kbEvalOnly            *string
 	kbEvalRerank          *bool
 	kbEvalCands           *int
 	kbEvalSnippet         *bool
 	kbEvalExpand          *int
+	kbEvalOut             *string
+	kbEvalBooks           *int
+	kbEvalPRF             *int
+	kbEvalTranslate       *string
+	kbEvalTranslateW      *int
+	kbGround              *string
+	kbGroundRefs          *string
 	graphEmbedRecount     *bool
 	graphFindings         *string
 	graphFindingsRating   *int
@@ -264,6 +280,12 @@ type cliFlags struct {
 	askRep                *int
 	askMixK               *string
 	askShow               *bool
+	askPin                *string
+	askFull               *bool
+	askSenseSnip          *bool
+	askMixOnly            *bool
+	askLogprobs           *bool
+	toolPerturb           *string
 	askTools              *bool
 	askTemp               *float64
 	askSeed               *int
@@ -365,7 +387,7 @@ func parseFlagsNoParse() *cliFlags {
 	f.serverName = flag.String("server", "", "имя сервера из конфига (перекрывает general.default_server)")
 	f.modelName = flag.String("model", "", "модель на сервере (перекрывает настройку сервера)")
 	f.workDir = flag.String("cwd", "", "рабочий каталог — корень песочницы (перекрывает sandbox.root)")
-	f.modeFlag = flag.String("mode", "", "режим подтверждений: safe, auto-edit или noask")
+	f.modeFlag = flag.String("mode", "", "режим подтверждений: safe, auto-edit, noask (спрашивает только необратимое) или yolo (не спрашивает ничего)")
 	f.showVer = flag.Bool("version", false, "показать версию и выйти")
 	f.stepsFile = flag.String("steps-file", "", "куда писать журнал шагов этого запуска (перекрывает log.steps_file_pattern; для замеров)")
 
@@ -480,6 +502,12 @@ func parseFlagsNoParse() *cliFlags {
 		"собрать замерный набор: слепая выборка кусков и вопрос к каждому")
 	f.kbEvalGenN = flag.Int("kb-eval-gen-n", 200,
 		"с --kb-eval-gen: сколько кусков отобрать")
+	f.kbEvalGenCode = flag.Bool("kb-eval-gen-code", false,
+		"с --kb-eval-gen: брать ТОЛЬКО куски-код (обычно они пропускаются) — кодовый поднабор для замера поиска по коду (Ф6)")
+	f.kbEvalGenMust = flag.Bool("kb-eval-gen-must", false,
+		"с --kb-eval-gen: к каждому вопросу факт из куска (поле must) — набор для проверки ответов модели, privatescripts/kbanswers.py")
+	f.kbEvalGenDistract = flag.String("kb-eval-gen-distract", "",
+		"с --kb-eval-gen: взять куски из этого набора (с chunk_id) и составить к каждому вопрос-отвлекатель — к куску A подбираются два ближайших по вектору куска B и C, вопрос пользуется их словами, а отвечает только A (этап 112, Ч8)")
 	f.kbSeed = flag.Int64("kb-seed", 0,
 		"зерно случайности для выборки; 0 — взять текущее время и напечатать его")
 	f.kbSample = flag.String("kb-sample", "",
@@ -496,12 +524,21 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-eval: отбрасывать из выдачи куски, похожие на уже отобранные (порог близости, kb.dedupe_cosine): --kb-eval-dedupe 0.9")
 	f.kbEvalKeepAdj = flag.Bool("kb-eval-keep-adjacent", false,
 		"с --kb-eval: не выбрасывать соседние куски одной книги — отделяет «поиск не нашёл» от «выбросила наша доводка» (этап 105, З5)")
+	f.kbEvalWindow = flag.Bool("kb-eval-window", false,
+		"с --kb-eval: второй векторный вид — окна из трёх соседних кусков (сумма векторов), слитые с выдачей по RRF (С9)")
+	f.kbEvalWindowSelf = flag.Bool("kb-eval-window-self", false,
+		"с --kb-eval: КОНТРОЛЬ к --kb-eval-window — второй список из векторов самих кусков, без соседей (С9)")
+	f.kbEvalPart = flag.String("kb-eval-part", "",
+		"с --kb-eval: мерить только часть набора — dev (70 % вопросов, для подбора порогов и весов) или holdout (30 %, для вывода перед выкладкой); часть решает хеш текста вопроса")
 	f.kbEvalWeight = flag.Float64("kb-eval-weight", 0,
 		"с --kb-eval: вес смыслового списка при слиянии (0 — как в работе)")
 	f.kbEvalTable = flag.Float64("kb-eval-table-boost", 0,
 		"с --kb-eval: надбавка кускам-таблицам (0 — как в работе, 1 — без надбавки)")
 	f.kbEvalRRFK = flag.Float64("kb-eval-rrfk", 0,
 		"с --kb-eval: постоянная слияния k (0 — как в работе)")
+	f.kbEvalGraphMerge = flag.String("kb-eval-graph-merge", "",
+		"с --kb-eval: мерить слитый поиск (книги + граф, как /search) и правила слияния двух списков:\n"+
+			"список k через запятую, 0 — граф в хвост (как в работе), > 0 — RRF с этой k (этап 112, П7)")
 	f.kbEvalOnly = flag.String("kb-eval-only", "",
 		"с --kb-eval: мерить только один режим — слова, векторы(смыслы) или слияние")
 	f.kbEvalRerank = flag.Bool("kb-eval-rerank", false,
@@ -510,6 +547,20 @@ func parseFlagsNoParse() *cliFlags {
 		"с --kb-eval-rerank: сколько кусков отдавать второй ступени (по умолчанию 40)")
 	f.kbEvalExpand = flag.Int("kb-eval-expand", 0,
 		"с --kb-eval: расширять вопрос именами понятий графа, как делают kb_search и подмес (0 — без расширения, 3 — как в работе)")
+	f.kbEvalTranslate = flag.String("kb-eval-translate", "",
+		"с --kb-eval: файл-кэш английских переводов вопросов (строки JSON); перевод дописывается только к словесной ветке, недостающие переводит модель graph.summary_model — карта занята лишь на перевод: --kb-eval-translate en.jsonl")
+	f.kbEvalTranslateW = flag.Int("kb-eval-translate-workers", 0,
+		"с --kb-eval-translate: сколько вопросов переводить разом (по умолчанию 4); 1 — замер задержки одного перевода, время вызова пишется в кэш полем ms")
+	f.kbGround = flag.String("kb-ground", "",
+		"проверка ответов реранкером (этап 112, О11): файл ответов kbanswers.py; каждое предложение ответа сверяется с поданными модели кусками, итог — отделяет ли оценка верные ответы от неверных (AUC). Нужен --kb-ground-refs; коллекция — --kb-eval-collection, строки по ответам — --kb-eval-out")
+	f.kbGroundRefs = flag.String("kb-ground-refs", "",
+		"с --kb-ground: файл подмесов kbanswers.py (рука refs, поле mix_refs) — какие куски поданы модели")
+	f.kbEvalOut = flag.String("kb-eval-out", "",
+		"с --kb-eval: записать по строке JSON на каждый вопрос и режим — место эталона, оценка первого места, разрыв, выдача с оценками: --kb-eval-out rows.jsonl")
+	f.kbEvalBooks = flag.Int("kb-eval-books", 0,
+		"с --kb-eval: ступень «в какой книге искать» — книги по близости вопроса к вектору книги (среднему векторов её кусков), куски только в первых N, в отчёте место книги эталона: --kb-eval-books 20 (0 — по всем книгам, как в работе)")
+	f.kbEvalPRF = flag.Int("kb-eval-prf", 0,
+		"с --kb-eval: дописать к словесной части вопроса N самых весомых по TF-IDF слов из первых трёх кусков слияния (псевдо-релевантная обратная связь, этап 112, О8); вектор вопроса не меняется: --kb-eval-prf 5")
 	f.kbEvalSnippet = flag.Bool("kb-eval-snippet", false,
 		"с --kb-eval-rerank: подавать выдержки вместо кусков целиком")
 	f.graphEmbedRecount = flag.Bool("graph-embed-recount", false,
@@ -598,7 +649,7 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphResolveMinCos = flag.Float64("graph-resolve-min-cos", 0,
 		"с --graph-resolve: ниже этой близости пара не показывается (0 — 0.90)")
 	f.graphResolveMinCosMut = flag.Float64("graph-resolve-min-cos-mutual", 0,
-		"с --graph-resolve: свой порог для пар со взаимным синонимом (0 — 0.80)")
+		"с --graph-resolve: свой порог для пар со взаимным синонимом (0 — 0.70)")
 	f.graphResolveCross = flag.Bool("graph-resolve-cross", false,
 		"с --graph-resolve: только пары через границу алфавита")
 	f.graphResolveNormKey = flag.Bool("graph-resolve-normkey", false,
@@ -659,6 +710,18 @@ func parseFlagsNoParse() *cliFlags {
 	f.askRep = flag.Int("repeat", 0, "с --ask: повторить каждый вопрос N раз — видно разброс от сэмплирования")
 	f.askMixK = flag.String("mix", "", "что подмешивать: off, graph, books, all (по умолчанию как в конфиге)")
 	f.askShow = flag.Bool("show-mix", false, "с --ask: напечатать подмешанное вместе с ответом")
+	f.askPin = flag.String("mix-pin", "",
+		"с --ask и --mix books: подать модели эти куски ВМЕСТО найденных поиском, через запятую (books/53#144) — замер «потолка поиска»")
+	f.askFull = flag.Bool("mix-full", false,
+		"с --ask: подавать модели куски книг целиком, а не выдержкой вокруг совпадения (320 знаков)")
+	f.askSenseSnip = flag.Bool("mix-sense-snippet", false,
+		"с --ask: выдержку куска собирать из предложений, лучших по реранкеру, а не окном вокруг слов вопроса (замер Ч21)")
+	f.askMixOnly = flag.Bool("mix-only", false,
+		"с --ask и --mix: собрать подмес и НЕ спрашивать модель; с --json — ссылки на поданные куски (mix_refs) для замера выдачи")
+	f.toolPerturb = flag.String("tool-perturb", "",
+		"с --ask и --tools: файл JSON с другими описаниями и именами параметров инструментов — замер «держится ли выбор на формулировке» (этап 112, О19); только для замера")
+	f.askLogprobs = flag.Bool("logprobs", false,
+		"с --ask: попросить у сервера логарифмы вероятностей токенов; с --json — сводка по ответу (logprob_tokens, logprob_mean, logprob_min, logprob_low) для замера уверенности модели")
 	f.askTools = flag.Bool("tools", false, "с --ask: разрешить модели инструменты (действия с подтверждением отклоняются)")
 	f.askTemp = flag.Float64("temperature", -1, "с --ask: температура (по умолчанию 0 — ради повторяемости)")
 	f.askSeed = flag.Int("seed", -1, "с --ask: зерно генератора — тот же ответ на тот же вопрос")
@@ -1097,16 +1160,39 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		if coll == "" {
 			coll = cfg.KB.Default
 		}
-		return true, kmaint.EvalGen(os.Stdout, cfg, coll, *f.kbEvalGen, *f.kbEvalGenN, *f.kbSeed, cfg.Graph.SummaryWorkers)
+		if *f.kbEvalGenDistract != "" {
+			return true, kmaint.EvalGenDistract(os.Stdout, cfg, coll, *f.kbEvalGenDistract, *f.kbEvalGen, cfg.Graph.SummaryWorkers)
+		}
+		return true, kmaint.EvalGen(os.Stdout, cfg, coll, *f.kbEvalGen, *f.kbEvalGenN, *f.kbSeed, cfg.Graph.SummaryWorkers,
+			*f.kbEvalGenMust, *f.kbEvalGenCode)
 	case *f.kbSample != "":
 		return true, kmaint.Sample(os.Stdout, cfg, *f.kbSample, *f.kbEvalGenN, *f.kbSeed)
+	case *f.kbGround != "":
+		if *f.kbGroundRefs == "" {
+			return true, fmt.Errorf("--kb-ground: нужен --kb-ground-refs — файл подмесов (какие куски поданы модели)")
+		}
+		coll := *f.kbEvalColl
+		if coll == "" {
+			coll = cfg.KB.Default
+		}
+		return true, kmaint.Ground(os.Stdout, cfg, coll, *f.kbGround, *f.kbGroundRefs, *f.kbEvalOut)
 	case *f.kbEval != "":
 		coll := *f.kbEvalColl
 		if coll == "" {
 			coll = cfg.KB.Default
 		}
+		if *f.kbEvalGraphMerge != "" {
+			ks, err := gmaint.ParseMergeKs(*f.kbEvalGraphMerge)
+			if err != nil {
+				return true, err
+			}
+			return true, gmaint.MergeEval(os.Stdout, cfg, *f.kbEval, gmaint.MergeEvalOpts{
+				Collection: coll, Ks: ks, Out: *f.kbEvalOut})
+		}
 		return true, kmaint.Eval(os.Stdout, cfg, coll, *f.kbEval, *f.kbEvalK, *f.kbEvalWeight, *f.kbEvalRRFK, *f.kbEvalTable,
-			*f.kbEvalOnly, *f.kbEvalRerank, *f.kbEvalCands, *f.kbEvalSnippet, *f.kbEvalExpand, *f.kbEvalWide, *f.kbEvalDedupe, *f.kbEvalKeepAdj)
+			*f.kbEvalOnly, *f.kbEvalRerank, *f.kbEvalCands, *f.kbEvalSnippet, *f.kbEvalExpand, *f.kbEvalWide, *f.kbEvalDedupe, *f.kbEvalKeepAdj,
+			*f.kbEvalOut, *f.kbEvalBooks, *f.kbEvalPRF, *f.kbEvalTranslate,
+			*f.kbEvalTranslateW, *f.kbEvalPart, *f.kbEvalWindow, *f.kbEvalWindowSelf)
 	case *f.graphFindings != "":
 		return true, gmaint.Findings(os.Stdout, cfg, *f.graphFindings, *f.graphFindingsRating,
 			*f.graphFindingsMembers, *f.graphFindingsRedo, *f.graphFindingsDry)
@@ -1286,6 +1372,20 @@ func run() error {
 		return err
 	}
 
+	// Конфиг проекта (.ollchat/config.toml в каталоге запуска) — только для
+	// сеанса, после доверия человека (этап 112, решение владельца 16.10.2026).
+	projectDir := "."
+	if *f.workDir != "" {
+		projectDir = *f.workDir
+	}
+	nWarn := len(cfg.Warnings)
+	if err := useProjectConfig(cfg, projectDir, os.Stdin, os.Stderr, stdinIsTerminal(), config.TrustFile()); err != nil {
+		return err
+	}
+	for _, w := range cfg.Warnings[nWarn:] {
+		fmt.Fprintf(os.Stderr, "ollchat: предупреждение: %s: %s\n", cfg.ProjectPath, w)
+	}
+
 	// Рабочий каталог: флаг важнее конфига.
 	root := cfg.Sandbox.Root
 	if *f.workDir != "" {
@@ -1303,6 +1403,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Класс «необратимое» (этап 112, Н5 и Т9): спрашивается и в noask.
+	if err := ruleSet.SetIrreversible(cfg.Permissions.Irreversible, sandbox.Root()); err != nil {
+		return err
+	}
 
 	mode := cfg.General.Mode
 	if *f.modeFlag != "" {
@@ -1310,6 +1414,23 @@ func run() error {
 	}
 	guard := permissions.NewGuard(ruleSet, sandbox, mode)
 	if err := guard.SetMode(mode); err != nil {
+		return err
+	}
+	// Копии перед правкой — путь отката write_file и edit_file (Н5):
+	// .ollchat/backups/<дата>/ в каталоге запуска. Правка, копию которой не
+	// сделать, — необратима и спрашивается даже в noask.
+	backups := backup.New(sandbox.RealRoot(), cfg.Agent.BackupKeepDays)
+	if n, err := backups.Prune(); err != nil {
+		fmt.Fprintf(os.Stderr, "копии файлов: не удалось убрать старые: %v\n", err)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "копии файлов: удалено дней старше %d: %d\n", cfg.Agent.BackupKeepDays, n)
+	}
+	guard.WriteIrreversible = backups.Irreversible
+	backupBeforeWrite := func(path string) error {
+		_, err := backups.Save(path)
+		if err != nil && guard.Mode() == permissions.ModeYolo {
+			return nil // yolo: правка без копии разрешена, охранник её не остановил
+		}
 		return err
 	}
 
@@ -1384,6 +1505,7 @@ func run() error {
 		Live:                 live,
 		Library:              libraryOrNil(library),
 		Sandbox:              sandbox,
+		Backup:               backupBeforeWrite,
 		Isolation:            tools.Isolation{Kind: cfg.Sandbox.Isolation, Network: cfg.Sandbox.IsolationNetwork, Hide: cfg.Sandbox.IsolationHide},
 		BashTimeout:          cfg.Agent.BashTimeoutDuration(),
 		MaxOutputKB:          cfg.Agent.MaxOutputKB,
@@ -1415,9 +1537,24 @@ func run() error {
 			cfg.Confluence.TokenCmd, cfg.Confluence.TokenEnv),
 		ConfluenceTimeout: cfg.Confluence.TimeoutDuration(),
 		Embedder:          kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), srv.Headers),
+		Translator:        qtranslate.New(cfg, srv.URL, srv.Headers),
 	})
 	if err != nil {
 		return err
+	}
+	// Возмущение описаний инструментов — только для замера и только с --ask:
+	// в диалоге другое описание ломало бы кеш промпта (этап 112, О19).
+	if *f.toolPerturb != "" {
+		if *f.askQ == "" && !*f.askStdin {
+			return fmt.Errorf("--tool-perturb работает только с --ask")
+		}
+		p, err := tools.LoadPerturbations(*f.toolPerturb)
+		if err != nil {
+			return fmt.Errorf("--tool-perturb: %w", err)
+		}
+		if err := registry.Perturb(p); err != nil {
+			return fmt.Errorf("--tool-perturb: %w", err)
+		}
 	}
 
 	logPattern, err := cfg.Log.NamePattern()
@@ -1468,6 +1605,8 @@ func run() error {
 			TopK: *f.askTopK, MaxPerBook: *f.askPerBook,
 			MinCosine: *f.askMinCos, HasMinCos: *f.askMinCos >= 0,
 			SemanticWeight: *f.askSemW, HasSemWeight: *f.askSemW >= 0,
+			Pin: splitList(*f.askPin), FullChunks: *f.askFull, SenseSnippet: *f.askSenseSnip,
+			MixOnly: *f.askMixOnly, Logprobs: *f.askLogprobs,
 
 			registry: registry, guard: guard,
 		})
@@ -1480,6 +1619,7 @@ func run() error {
 		return runServe(cfg, *f.serveAddr, *f.serveMCP, registry, base, gmaint.CacheFor(cfg, time.Hour))
 	}
 
+	steps.Write(sessionStep(cfg, srv, model, registry))
 	m := ui.New(cfg, guard, registry, logger, steps, store, srv, model)
 	m.SetLive(live)             // тот же экземпляр, что у инструментов
 	m.SetGraphCache(graphCache) // и тот же кэш графов

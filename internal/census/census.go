@@ -51,6 +51,8 @@ var modes = []struct {
 	{"text-dotprefix", "куски, где четверть и больше слов начинается с точки: «.выполнить .действие»"},
 	{"text-dotprefix-fresh", "тот же признак на файле книги с диска, разобранном заново мимо индекса — отвечает «починит ли книгу перечитывание»; файлы доводами после ключей. Восстановлен 30.09.2026 взамен утраченного privatescripts/dotprefixcensus/fresh"},
 	{"vec-norms", "длина квантованных векторов кусков и понятий графа, и насколько на настоящих парах расходятся kb.Cosine и vecstand.CosineRaw — прибор долга Д15"},
+	{"chunk-ends", "доля кусков прозы, обрезанных посреди предложения (конец) и начатых со строчной буквы (начало), по форматам книг — Е4 этапа 112"},
+	{"page-gaps", "страницы PDF, не покрытые ни одним куском: доля по книгам и самые длинные пустоты подряд (вставленный скан, страницы-картинки) — Л5 этапа 112"},
 }
 
 // Run — одна перепись по выбору `-only`. Коллекция приходит ключом ollchat.
@@ -80,7 +82,7 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 	// «ноль значит умолчание, выключает отрицательное» (internal/CLAUDE.md).
 	minN := fs.Int("min", 0, "с misattrib-alias и misattrib-mention: порог упоминаний; 0 — умолчание режима (8 и 20)")
 	gap := fs.Float64("gap", 0, "с misattrib-alias и misattrib-mention: разрыв по смыслу; 0 — умолчание режима (0,10 и 0,08)")
-	top := fs.Int("top", 12, "с -only text и text-longwords: сколько книг показывать")
+	top := fs.Int("top", 12, "с -only text, text-longwords и page-gaps: сколько книг показывать")
 	examples := fs.Int("examples", 6, "с -only text: сколько примеров на род порчи")
 	minLen := fs.Int("minlen", 25, "с -only text-longwords: с какой длины слово считается слипшимся")
 	fs.Usage = func() {
@@ -129,6 +131,10 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 		return textDotPrefixFresh(stdout, cfg, fs.Args())
 	case "vec-norms":
 		return vecNorms(stdout, cfg, collName)
+	case "chunk-ends":
+		return chunkEnds(stdout, cfg, collName, *examples)
+	case "page-gaps":
+		return pageGaps(stdout, cfg, collName, *top)
 	}
 	return fmt.Errorf("неизвестный режим %q; есть: %s", *only, strings.Join(modeNames(), ", "))
 }

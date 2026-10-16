@@ -40,6 +40,10 @@ type mixJob struct {
 	graphOpen  *graph.Graph // открыт и не устарел — открывать нечего
 	chunks     int
 	graphCfg   config.Graph
+	// query — по чему искать, если не по самому вопросу: «предыдущий вопрос +
+	// реплика» для продолжения (kb.followup_concat, этап 112, У9). Модели всё
+	// равно уходит вопрос как есть — он едет в mixReadyMsg отдельно.
+	query string
 }
 
 // needsOpen сообщает, что команде придётся открывать граф — это десятки секунд.
@@ -90,6 +94,8 @@ func (m *Model) mixPlan() (mixJob, bool) {
 			BooksOn:  m.kb.autoOn,
 			GraphOn:  m.gr.autoOn,
 			NoTools:  m.toolsUnsupported(),
+
+			Translator: m.translator(),
 		},
 		set: mixer.Settings{
 			Chain:              m.cfg.Mix.Chain,
@@ -154,9 +160,39 @@ func runMixCmd(gen int, question string, job mixJob, prog chan<- graph.OpenProgr
 			// коллекцией объяснено там, где графом пользуются осознанно.
 		}
 		job.deps.Graph = g
-		msg.mix = mixer.Build(question, job.deps, job.set)
+		query := question
+		if job.query != "" {
+			query = job.query
+		}
+		msg.mix = mixer.Build(query, job.deps, job.set)
 		return msg
 	}
+}
+
+// followupQuery — запрос подмешивания для реплики text (этап 112, У9): при
+// kb.followup_concat и реплике-продолжении — «предыдущий вопрос + реплика»;
+// иначе пусто, и подмешивание ищет по самому вопросу. Предыдущий вопрос —
+// прошлый блок человека в ленте: текущий к этому времени уже добавлен.
+func (m *Model) followupQuery(text string) string {
+	if !m.cfg.KB.FollowupConcat {
+		return ""
+	}
+	prev, current := "", true
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		if m.blocks[i].kind != blockUser {
+			continue
+		}
+		if current {
+			current = false // это сам вопрос text
+			continue
+		}
+		prev = m.blocks[i].text
+		break
+	}
+	if q := mixer.FollowupQuery(prev, text); q != text {
+		return q
+	}
+	return ""
 }
 
 // runMixShowCmd — то же вычисление, что у вопроса, но ответ помечен show:
@@ -233,6 +269,8 @@ func (m *Model) autoMix(question string) mixResult {
 		BooksOn:  m.kb.autoOn,
 		GraphOn:  m.gr.autoOn,
 		NoTools:  m.toolsUnsupported(),
+
+		Translator: m.translator(),
 	}, mixer.Settings{
 		TableBoost:         m.cfg.KB.TableBoost,
 		ExpandLimit:        m.cfg.KB.ExpandLimitOr(),

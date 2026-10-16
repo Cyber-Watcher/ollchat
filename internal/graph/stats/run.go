@@ -147,6 +147,10 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 	ppr := fs.String("ppr", "", "замер персонализированного ранга по набору пар: -ppr docs/eval/graph_relations.toml")
 	hops := fs.Int("hops", 3, "с -chains: предел длины цепочки")
 	chainsList := fs.Bool("chains-list", false, "с -chains: печатать построчно каждую пару — прямая (типы), цепочка, нет")
+	cardChk := fs.String("cardcheck", "", "видно ли понятие в выдержках карточки graph_entity: -cardcheck docs/eval/graph_card_concepts.txt (этап 112, О5)")
+	typeSmp := fs.String("typesample", "", "связи одного типа с выдержкой для разметки точности типа: -typesample противопоставлено (этап 112, О3)")
+	typeSmpN := fs.Int("typesample-n", 100, "с -typesample: сколько связей показать")
+	typeSmpSeed := fs.Int64("typesample-seed", 20261016, "с -typesample: зерно выборки")
 	chainsFolder := fs.String("chains-folder", "", "с -chains: прямой считать только связь, подтверждённую куском из этого каталога (/Раздел): честное сравнение с графом, собранным по одному каталогу")
 	hubMeas := fs.String("hubmeasure", "", "какой мерой считать «хаб» в цепочках: -hubmeasure docs/eval/graph_path_log.toml (этап 105, Б5)")
 	hubMeasLimit := fs.Int("hubmeasure-limit", 0, "с -hubmeasure: порог хаба (0 — из настроек, умолчание 500)")
@@ -188,6 +192,14 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 		hubMeasure(g, *hubMeas, *hops, *hubMeasLimit)
 		return
 	}
+	if *cardChk != "" {
+		cardCheck(g, c, *cardChk)
+		return
+	}
+	if *typeSmp != "" {
+		typeSample(g, c, *typeSmp, *typeSmpN, *typeSmpSeed)
+		return
+	}
 	if *chains != "" {
 		var onlyDocs map[uint32]bool
 		if *chainsFolder != "" {
@@ -196,7 +208,7 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 				onlyDocs[b.ID] = true
 			}
 		}
-		chainStats(g, *chains, *hops, *chainsList, onlyDocs)
+		chainStats(g, *chains, *hops, *chainsList, onlyDocs, c)
 		return
 	}
 	if *doubles {
@@ -1051,6 +1063,20 @@ func doubleStats(g *graph.Graph) {
 	}
 }
 
+// evidenceCos — косинус векторов двух кусков-подтверждений; false, если
+// векторов нет или у одного из кусков вектор не посчитан.
+func evidenceCos(vecs graph.ChunkVectors, a, b graph.ChunkKey) (float64, bool) {
+	if vecs == nil {
+		return 0, false
+	}
+	va, okA := vecs.ChunkVectorByRef(a.Doc, a.Ord)
+	vb, okB := vecs.ChunkVectorByRef(b.Doc, b.Ord)
+	if !okA || !okB || len(va) != len(vb) {
+		return 0, false
+	}
+	return kb.Cosine(va, vb), true
+}
+
 // chainStats — замер цепочек между парами понятий из замерного набора.
 //
 // Отвечает на три вопроса (этап 101, D1): у скольких пар есть прямая связь,
@@ -1059,7 +1085,9 @@ func doubleStats(g *graph.Graph) {
 // с тысячами связей, и такая цепочка формально верна, но объясняет мало.
 //
 // Карта не нужна: понятия в наборе уже названы, вход по вопросу не считается.
-func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs map[uint32]bool) {
+// vecs — векторы кусков коллекции для косинуса подтверждений в -chains-list;
+// nil — без него.
+func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs map[uint32]bool, vecs graph.ChunkVectors) {
 	var set struct {
 		Case []struct {
 			Query     string `toml:"query"`
@@ -1119,6 +1147,8 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 	var midDegs []int
 	midBooksSum, midCount, midWider := 0, 0, 0
 	var widerExamples []string
+	// КПД цепочки (О12): сумма отношений, число пар и пар с той же длиной.
+	effSum, effN, effSame := 0.0, 0, 0
 
 	for _, c := range set.Case {
 		a, okA := g.Entities().Lookup(c.ConceptA)
@@ -1178,13 +1208,30 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 				}
 				line += " " + arrow + " " + st.To
 				if i < len(steps)-1 { // середина, не конец пути
-					line += fmt.Sprintf(" [%d/%d св., %d кн.]",
-						deg(st.To), degUniq(st.To), books(st.To))
+					// Косинус двух подтверждений, сходящихся в середине (этап 112,
+					// О4): омоним вроде «TF» (term frequency и Terraform) держит
+					// цепочку кусками о разном, общее понятие — кусками о близком.
+					sim := ""
+					if c, ok := evidenceCos(vecs, st.Evidence, steps[i+1].Evidence); ok {
+						sim = fmt.Sprintf(", cos %.2f", c)
+					}
+					line += fmt.Sprintf(" [%d/%d св., %d кн.%s]",
+						deg(st.To), degUniq(st.To), books(st.To), sim)
 				}
 			}
 			fmt.Printf("%s | %s\tцепочка %d\t%s\n", c.ConceptA, c.ConceptB, len(steps), line)
 		}
 		lenSum += len(steps)
+		// КПД цепочки (этап 112, О12; «Efficiency = ShortestPathLength /
+		// ActualPathLength»): кратчайший путь без запрета хабов против
+		// найденного рабочим обходом. 1 — запрет путь не удлинил.
+		if s := bfsAvoidingHubs(g, a.ID, b.ID, hops, noHubLimit); s > 0 {
+			effSum += float64(s) / float64(len(steps))
+			effN++
+			if s == len(steps) {
+				effSame++
+			}
+		}
 		worst := 0
 		endMax := max(deg(c.ConceptA), deg(c.ConceptB))
 		for i, st := range steps {
@@ -1286,6 +1333,10 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 		if lostTotal > len(lostToHub) {
 			fmt.Printf("    …и ещё %d\n", lostTotal-len(lostToHub))
 		}
+		if effN > 0 {
+			fmt.Printf("  КПД цепочки (кратчайшая без запрета / найденная): среднее %.3f по %d парам, длина совпала у %d\n",
+				effSum/float64(effN), effN, effSame)
+		}
 	}
 }
 
@@ -1317,7 +1368,10 @@ func bfsAvoidingHubs(g *graph.Graph, from, to uint32, maxHops, hubLimit int) int
 			if n.ID == to {
 				return cur.dist + 1
 			}
-			if len(g.Edges().Neighbors(n.ID)) >= hubLimit {
+			// Без запрета степень не считается вовсе: Neighbors у каждого соседа
+			// хаба — десятки тысяч сборок карт впустую (О12 зовёт такой обход
+			// на каждую найденную цепочку).
+			if hubLimit < noHubLimit && len(g.Edges().Neighbors(n.ID)) >= hubLimit {
 				continue // через хаб не ходим
 			}
 			seen[n.ID] = true

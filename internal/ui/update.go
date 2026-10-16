@@ -487,6 +487,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.esc):
 		if m.streaming {
 			m.stopStreaming()
+			m.restoreSteer()
 			m.addBlock(block{kind: blockNotice, text: "генерация прервана"})
 			return m, nil
 		}
@@ -523,8 +524,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.enter):
 		if m.streaming {
-			m.statusMsg = "дождитесь ответа или нажмите Esc"
-			return m, nil
+			return m, m.queueSteer()
 		}
 		// Пока считается подмешивание, вопрос уже принят и живёт своим ходом:
 		// второй Enter оставил бы первый обмен незакрытым в журнале, а в
@@ -926,8 +926,24 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 
 	case agent.EventTurnDone:
 		m.closeLiveBlocks()
+		// Ц8 (этап 112): итог хода одной строкой — сколько вызовов, что отклонено
+		// и что упало. Счётчик ToolStats агент считал всегда, а показан он не был.
+		if m.cfg.Agent.TurnSummary && ev.Tools != nil && ev.Tools.Calls > 0 {
+			m.addBlock(block{kind: blockNotice, text: turnSummary(*ev.Tools)})
+		}
 		m.finishTurn()
+		if cmd := m.sendFollowUp(); cmd != nil {
+			return tea.Batch(m.refreshCapacityCmd(), cmd)
+		}
 		return m.refreshCapacityCmd()
+
+	case agent.EventSteer:
+		// Реплика из очереди легла в историю (этап 112, Х1): в ленте и в журнале —
+		// как вопрос человека, а следующий текст модели — новым блоком под ней.
+		m.closeLiveBlocks()
+		m.addBlock(block{kind: blockUser, text: ev.Text, at: time.Now(), turn: m.turnID})
+		_ = m.logger.Write(chatlog.KindQuestion, ev.Text)
+		return nil
 
 	case agent.EventError:
 		m.closeLiveBlocks()
@@ -938,6 +954,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 			_ = m.logger.Write(chatlog.KindSystem, "Ошибка: "+ev.Err.Error())
 		}
 		m.finishTurn()
+		m.restoreSteer()
 		return nil
 	}
 	return nil

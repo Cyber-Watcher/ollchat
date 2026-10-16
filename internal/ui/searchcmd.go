@@ -134,7 +134,8 @@ func (m *Model) searchCmdFor(arg, collName string, withGraph bool, mode, where s
 		}
 	}
 
-	deps := find.Deps{Coll: coll, Embedder: m.embedder(), Reranker: rr, Steps: m.steps}
+	deps := find.Deps{Coll: coll, Embedder: m.embedder(), Reranker: rr, Steps: m.steps,
+		Translator: m.translator()}
 	opts := find.Opts{
 		Turn:           m.turnID,
 		Mode:           mode,

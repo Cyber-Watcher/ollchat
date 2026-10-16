@@ -156,6 +156,7 @@ func MountHTTP(mux *http.ServeMux, srv *Server, token string, verbose bool) {
 		if !kbserve.Auth(r, token) {
 			// Без подробностей: чем меньше сказано, тем меньше подсказано.
 			http.Error(w, "нужен ключ доступа", http.StatusUnauthorized)
+			srv.logDenied(r.RemoteAddr)
 			if verbose {
 				fmt.Fprintf(os.Stderr, "× %s без ключа\n", r.RemoteAddr)
 			}

@@ -109,6 +109,11 @@ func checkNamesHidden(t *testing.T, callArgs string) {
 	if !strings.Contains(string(data), `\"clients\":1`) {
 		t.Errorf("в журнале нет числа подсказок: %s", data)
 	}
+	// Вывод такого инструмента может нести те же имена: в записи вызова только
+	// его размер (С2).
+	if strings.Contains(string(data), `"out_head"`) || !strings.Contains(string(data), `"out_bytes"`) {
+		t.Errorf("у инструмента со скрытыми аргументами записано начало вывода или нет размера: %s", data)
+	}
 }
 
 // Запрет на любую цель действия запрещает всё действие (Plan.Extra).

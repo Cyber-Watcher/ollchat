@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"time"
 )
@@ -40,7 +41,43 @@ type Stats struct {
 	LoadDuration       int64
 	EvalDuration       int64
 	DoneReason         string
+
+	// Сводка по логарифмам вероятностей токенов ОТВЕТА (рассуждения не входят),
+	// если запрос шёл с Logprobs; иначе LogprobN == 0 (этап 112, Ч15).
+	LogprobN   int     // сколько токенов ответа с вероятностью
+	LogprobSum float64 // сумма логарифмов: средняя = LogprobSum / LogprobN
+	LogprobMin float64 // самый неуверенный токен ответа
+	LogprobLow int     // токенов с вероятностью ниже 0,5
 }
+
+// MeanLogprob — средний логарифм вероятности токена ответа; 0, если данных нет.
+func (s Stats) MeanLogprob() float64 {
+	if s.LogprobN == 0 {
+		return 0
+	}
+	return s.LogprobSum / float64(s.LogprobN)
+}
+
+// addLogprobs учитывает токены очередного чанка. Токены чанка с рассуждением
+// не считаются: уверенность в ответе — это уверенность в его тексте.
+func (s *Stats) addLogprobs(chunk ChatResponse) {
+	if chunk.Message.Thinking != "" {
+		return
+	}
+	for _, t := range chunk.Logprobs {
+		if s.LogprobN == 0 || t.Logprob < s.LogprobMin {
+			s.LogprobMin = t.Logprob
+		}
+		s.LogprobN++
+		s.LogprobSum += t.Logprob
+		if t.Logprob < logprobLow {
+			s.LogprobLow++
+		}
+	}
+}
+
+// logprobLow — ln 0,5: ниже этого модель выбрала токен, которому давала меньше половины.
+const logprobLow = -0.6931471805599453
 
 // TokensPerSecond возвращает скорость генерации; 0, если данных недостаточно.
 func (s Stats) TokensPerSecond() float64 {
@@ -86,6 +123,21 @@ func Retryable(err error) bool {
 // который имеет смысл повторить. Экспортирована, чтобы агент мог пометить тот же
 // обрыв («поток кончился без завершающего чанка») тем же признаком.
 func MarkRetryable(err error) error { return &RetryableError{Err: err} }
+
+// Backoff — пауза перед повтором номер attempt (0 — после первой неудачи):
+// base·2^attempt плюс случайная добавка 0…0,5 с (этап 112, А2; «AI Agents With
+// Python», 2026, разд. 16). Растущая пауза не добавляет нагрузки занятому
+// серверу; случайная часть разводит во времени повторы многих клиентов разом:
+// на рабочей машине ollchat запускают многие пользователи, и после перезапуска
+// Ollama все они повторяли запрос ровно через 1 и 2 с. Потолок — 30 с.
+func Backoff(attempt int, base time.Duration) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	d := base << min(attempt, 5)
+	d = min(d, 30*time.Second)
+	return d + time.Duration(rand.Int64N(int64(500*time.Millisecond)))
+}
 
 // sendGrace — сколько событие ждёт потребителя, отменившего запрос.
 // Секунды хватает тому, кто дочитывает канал до конца, а ушедший держит
@@ -169,6 +221,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 		body := newStallReader(resp.Body, c.stallTimeout, cancelStall)
 		defer body.Close()
 		dec := json.NewDecoder(body)
+		var lp Stats // сводка по логарифмам вероятностей; остальное — из финального чанка
 		for {
 			var chunk ChatResponse
 			if err := dec.Decode(&chunk); err != nil {
@@ -204,6 +257,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 				return
 			}
 
+			lp.addLogprobs(chunk)
 			if len(chunk.Message.ToolCalls) > 0 {
 				if !send(Event{Kind: EventToolCalls, ToolCalls: chunk.Message.ToolCalls}) {
 					return
@@ -221,15 +275,15 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) <-chan Event {
 			}
 
 			if chunk.Done {
-				send(Event{Kind: EventDone, Stats: Stats{
-					PromptEvalCount:    chunk.PromptEvalCount,
-					PromptEvalDuration: chunk.PromptEvalDuration,
-					EvalCount:          chunk.EvalCount,
-					TotalDuration:      chunk.TotalDuration,
-					LoadDuration:       chunk.LoadDuration,
-					EvalDuration:       chunk.EvalDuration,
-					DoneReason:         chunk.DoneReason,
-				}})
+				st := lp
+				st.PromptEvalCount = chunk.PromptEvalCount
+				st.PromptEvalDuration = chunk.PromptEvalDuration
+				st.EvalCount = chunk.EvalCount
+				st.TotalDuration = chunk.TotalDuration
+				st.LoadDuration = chunk.LoadDuration
+				st.EvalDuration = chunk.EvalDuration
+				st.DoneReason = chunk.DoneReason
+				send(Event{Kind: EventDone, Stats: st})
 				return
 			}
 		}

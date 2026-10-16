@@ -39,6 +39,33 @@ type Settings struct {
 	WatchConfig *bool `toml:"watch_config"`
 	// Limits — верхние пределы числовых параметров; 0 — умолчание.
 	Limits LimitSettings `toml:"limits"`
+	// DisabledTools — выключенные инструменты службы (этап 112, Ц6): аварийный
+	// выключатель без пересборки — правка файла перезапускает службу, клиент
+	// получает новый набор без перезапуска сеанса. «The incident commander …
+	// can suspend a tool identity … through prebuilt controls» («MCP in
+	// Production», `669#318`). Неизвестное имя — ошибка (CheckDisabled): опечатка
+	// иначе молча оставила бы инструмент включённым.
+	DisabledTools []string `toml:"disabled_tools"`
+}
+
+// CheckDisabled сверяет disabled_tools с набором службы: выключить можно только
+// то, что в нём есть. names — все инструменты службы до выключения.
+func (s Settings) CheckDisabled(names []string) error {
+	known := make(map[string]bool, len(names))
+	for _, n := range names {
+		known[n] = true
+	}
+	var bad []string
+	for _, n := range s.DisabledTools {
+		if !known[strings.TrimSpace(n)] {
+			bad = append(bad, fmt.Sprintf("%q", n))
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("disabled_tools: таких инструментов у службы нет: %s (есть: %s)",
+			strings.Join(bad, ", "), strings.Join(names, ", "))
+	}
+	return nil
 }
 
 // LimitSettings — верхние пределы. Поднять выше потолка кода инструмента нельзя:
@@ -134,6 +161,12 @@ func (s Settings) Policy(defaultKB int) (Policy, error) {
 			p.Limits[sp.tool] = map[string]Limit{}
 		}
 		p.Limits[sp.tool][sp.param] = Limit{Min: sp.min, Max: v}
+	}
+	for _, n := range s.DisabledTools {
+		if p.Disabled == nil {
+			p.Disabled = map[string]bool{}
+		}
+		p.Disabled[strings.TrimSpace(n)] = true
 	}
 	return p, nil
 }

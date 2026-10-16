@@ -55,7 +55,8 @@ var commands = []cmdInfo{
 	{Name: "mode", Args: "[режим]", Desc: "режим подтверждений (Shift+Tab — по кругу)", Sub: []cmdInfo{
 		{Name: "safe", Desc: "спрашивать про запись и команды"},
 		{Name: "auto-edit", Desc: "запись без спроса, команды с подтверждением"},
-		{Name: "noask", Desc: "не спрашивать; правила deny всё равно действуют (прежние имена — yolo, no-ask)"},
+		{Name: "noask", Desc: "не спрашивать, кроме необратимого (git push, mv, sed -i, базы…); deny действует"},
+		{Name: "yolo", Desc: "не спрашивать ничего, даже необратимое; deny действует (в круг Shift+Tab не входит)"},
 	}},
 	{Name: "permissions", Desc: "действующие правила разрешений"},
 	{Name: "nodes", Alias: []string{"узлы"},
@@ -121,6 +122,7 @@ var commands = []cmdInfo{
 	{Name: "resume", Args: "[id]", Desc: "восстановить сессию (без id — выбор из списка)"},
 	{Name: "clear", Desc: "очистить историю диалога"},
 	{Name: "compact", Args: "[N]", Desc: "оставить последние N сообщений (по умолчанию 6)"},
+	{Name: "retry", Desc: "убрать последний обмен из истории и задать тот же вопрос заново"},
 	{Name: "config", Desc: "путь к файлу настроек"},
 	{Name: "quit", Alias: []string{"exit", "q"}, Desc: "выход"},
 }

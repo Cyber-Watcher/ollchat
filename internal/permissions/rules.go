@@ -247,6 +247,9 @@ type Set struct {
 	deny  []Rule
 	allow []Rule
 	ask   []Rule
+	// irreversible — класс «необратимое» (irreversible.go): спрашивать даже
+	// под allow и в noask.
+	irreversible []Rule
 }
 
 // Compile разбирает три списка правил. Ошибочное правило — ошибка запуска,

@@ -30,10 +30,11 @@ import (
 const (
 	ModeSafe     = "safe"      // запись и bash — всегда спрашивать
 	ModeAutoEdit = "auto-edit" // запись без спроса, bash — спрашивать
-	ModeNoAsk    = "noask"     // ничего не спрашивать (deny-правила всё равно действуют)
+	ModeNoAsk    = "noask"     // не спрашивать, кроме необратимого (deny-правила действуют)
 
-	// ModeYolo — прежнее имя ModeNoAsk, оставлено ради чужих конфигов.
-	// «yolo» ничего не говорило человеку о том, что подтверждения выключены.
+	// ModeYolo — не спрашивать ничего, даже про необратимое (deny действует).
+	// До 16.10.2026 — прежнее имя noask; с того дня, как noask стал спрашивать
+	// про необратимое, — отдельный режим (слово владельца).
 	ModeYolo = "yolo"
 )
 
@@ -68,6 +69,9 @@ type Config struct {
 
 	// Path — фактический путь, откуда загружен конфиг (не из файла).
 	Path string `toml:"-"`
+	// ProjectPath — конфиг проекта (.ollchat/config.toml в каталоге запуска),
+	// наложенный поверх Path; пусто — не было или ему не доверились (project.go).
+	ProjectPath string `toml:"-"`
 
 	// Warnings — замечания к файлу, которые запуск не останавливают:
 	// неизвестные ключи, см. unknownKeys. Печатаются при запуске, до
@@ -435,6 +439,37 @@ type Agent struct {
 	// CompactModel — какой моделью писать сводку; пусто — той же, что отвечает.
 	// Лёгкая модель быстрее, но на одной карте может вытеснить основную.
 	CompactModel string `toml:"compact_model"`
+	// Autosave — сохранять сеанс самому после каждого хода (этап 112, Х3): обрыв
+	// ssh или выход двойным Ctrl+C не теряют диалог, /resume находит его первым.
+	// Один файл на сеанс в каталоге сессий, переписывается атомарно.
+	Autosave bool `toml:"autosave"`
+	// BackupKeepDays — сколько дней хранить копии файлов, сделанные перед
+	// правкой (`.ollchat/backups/<дата>/` в каталоге запуска, этап 112, Н5):
+	// 0 — умолчание 14, отрицательное — не удалять никогда.
+	BackupKeepDays int `toml:"backup_keep_days"`
+
+	// Защита и пределы хода (этап 112, решения владельца 15.10.2026: «Все это должно
+	// включаться и выключаться в настройках ollchat»).
+	//
+	// JournalFailClosed (Н6) — не исполнять запись файлов, bash и сетевые
+	// инструменты, если журнал шагов перестал писаться.
+	JournalFailClosed bool `toml:"journal_fail_closed"`
+	// UntrustedGate (Т7, О15) — когда в разговор вошёл чужой текст (веб, книги,
+	// прочитанный документ), исходящие http_fetch и web_search идут только через
+	// вопрос человеку, даже в режиме noask.
+	UntrustedGate bool `toml:"untrusted_gate"`
+	// PrivateEgressCheck (Н16) — отказ, если в аргументах исходящего инструмента
+	// частный адрес (10.*, 192.168.*, 172.16–31.*) или имя хоста из ~/.ssh/config.
+	PrivateEgressCheck bool `toml:"private_egress_check"`
+	// MaxWritesNoask (Ч3) — после стольких правок файлов за ход в режиме noask
+	// следующая спрашивается у человека. 0 — умолчание 25, отрицательное — без предела.
+	MaxWritesNoask int `toml:"max_writes_noask"`
+	// TurnSummary (Ц8) — строка итога хода в ленте: вызовов, отклонено, с ошибкой.
+	TurnSummary bool `toml:"turn_summary"`
+	// MaxTurnTokens (Т11) — потолок входных токенов за ход (сумма по обменам с
+	// моделью); превысил — ход останавливается с отчётом. 0 — умолчание 4 000 000,
+	// отрицательное — без предела.
+	MaxTurnTokens int `toml:"max_turn_tokens"`
 
 	bashTimeout time.Duration
 }
@@ -447,6 +482,23 @@ type Permissions struct {
 	Allow []string `toml:"allow"`
 	Ask   []string `toml:"ask"`
 	Deny  []string `toml:"deny"`
+	// Irreversible — класс «необратимое» (этап 112, Н5 и Т9): спрашивается
+	// в safe, auto-edit и noask даже под allow; без вопроса — только в yolo.
+	// Сверх списка код сам ловит то, чего префиксом не записать: `sed -i`,
+	// `perl -i`, `find -delete`, подкоманды git мимо общих ключей, `>` в
+	// существующий файл (internal/permissions/irreversible.go).
+	Irreversible []string `toml:"irreversible"`
+}
+
+// DefaultIrreversible — класс «необратимое» по умолчанию (решение владельца
+// 16.10.2026): откат дольше 10 минут или невозможен.
+var DefaultIrreversible = []string{
+	"Bash(git push:*)", "Bash(git reset --hard:*)", "Bash(git clean:*)", "Bash(git restore:*)",
+	"Bash(git checkout --:*)", "Bash(git branch -D:*)", "Bash(git stash drop:*)",
+	"Bash(git stash clear:*)", "Bash(git rebase:*)",
+	"Bash(mv:*)", "Bash(truncate:*)", "Bash(shred:*)",
+	"Bash(psql:*)", "Bash(mysql:*)", "Bash(sqlite3:*)", "Bash(mongosh:*)", "Bash(redis-cli:*)",
+	"Bash(docker:*)", "Bash(podman:*)", "Bash(kubectl:*)", "Bash(terraform:*)", "Bash(ansible-playbook:*)",
 }
 
 // Sandbox — границы файловой песочницы.
@@ -552,6 +604,26 @@ type KB struct {
 	AbstainScore   *float64 `toml:"abstain_score"`
 	AnswerStyle    string   `toml:"answer_style"` // как модель должна отвечать по книгам
 	EmbedKeepAlive string   `toml:"embed_keep_alive"`
+
+	// Translate — переводить русский вопрос на английский для СЛОВЕСНОЙ ветки
+	// поиска по книгам (этап 112, шаг 2). Вектор считается по вопросу как есть.
+	// Замер 13.10.2026, kb_golden, k = 8, с реранкером: слияние 0,317 → 0,361
+	// (145 → 165 из 457, парно 1 против 21); на kb_answers2 без изменений.
+	// Цена: вызов модели на вопрос — 704–830 мс тёплой (медиана 765 мс из 27),
+	// 7,8 с при загрузке; glm-4.7-flash:q8_0 занимает на карте 30,3 ГиБ.
+	// По умолчанию выключено.
+	Translate bool `toml:"translate"`
+	// TranslateModel — чем переводить; пусто — graph.summary_model. Сервер,
+	// окно и keep_alive — из [graph], как у извлечения.
+	TranslateModel string `toml:"translate_model"`
+	// FollowupConcat — искать для подмешивания по «предыдущий вопрос + реплика»,
+	// если реплика похожа на продолжение: не больше пяти слов или зачин «а», «и»,
+	// «то есть», «что насчёт» (этап 112, У9, слово владельца 16.10.2026: ключ,
+	// по умолчанию выключен). Замер на 50 случаях (40 продолжений, 10 смен темы,
+	// слияние, k = 8, без реранкера): находит 14 против 7 у голой реплики, парно
+	// +8 −1, p = 0,039; смен темы теряет 1 из 10. Реранкер получает ту же склейку —
+	// это не замерялось.
+	FollowupConcat bool `toml:"followup_concat"`
 
 	// Общая библиотека организации.
 	//
@@ -1375,6 +1447,14 @@ func Default() *Config {
 			MaxRetries:    2,
 			CompactAt:     0.75,
 			CompactKeep:   6,
+			Autosave:      true,
+			// Этап 112, решения владельца 15.10.2026: защита и пределы хода включены.
+			JournalFailClosed:  true,
+			UntrustedGate:      true,
+			PrivateEgressCheck: true,
+			MaxWritesNoask:     25,
+			TurnSummary:        true,
+			MaxTurnTokens:      4000000,
 			// Тот же список, что в образце конфига (template.go): поиск слит
 			// в один search по замеру 25.09.2026, а умолчание оставалось
 			// с kb_search, и конфиг без tools получал не тот набор, что
@@ -1392,7 +1472,8 @@ func Default() *Config {
 			// созданная командой --init-config. Сверяет TestTemplateMatchesDefaults.
 			Allow: []string{"Read(./**)", "Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)",
 				"Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(ls:*)"},
-			Ask: []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
+			Ask:          []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
+			Irreversible: append([]string(nil), DefaultIrreversible...),
 			Deny: []string{
 				"Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
 				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
@@ -1922,17 +2003,21 @@ func (c *Config) finalize() error {
 		c.graphBase, c.graphBaseSet = c.Graph, true
 	}
 	// Старые написания приводятся к нынешнему имени молча: конфиг человека
-	// не должен ломаться из-за того, что мы переименовали режим.
+	// не должен ломаться из-за того, что мы переименовали режим. «yolo» с
+	// 16.10.2026 — отдельный режим (не спрашивать ничего), а не имя noask.
 	switch c.General.Mode {
-	case ModeYolo, "no-ask", "dont-ask", "no_ask":
+	case "no-ask", "dont-ask", "no_ask":
 		c.General.Mode = ModeNoAsk
 	}
 	switch c.General.Mode {
-	case ModeSafe, ModeAutoEdit, ModeNoAsk:
+	case ModeSafe, ModeAutoEdit, ModeNoAsk, ModeYolo:
 	case "":
 		c.General.Mode = ModeSafe
 	default:
-		return fmt.Errorf("general.mode: недопустимое значение %q (ожидается safe, auto-edit или noask)", c.General.Mode)
+		return fmt.Errorf("general.mode: недопустимое значение %q (ожидается safe, auto-edit, noask или yolo)", c.General.Mode)
+	}
+	if c.Agent.BackupKeepDays == 0 {
+		c.Agent.BackupKeepDays = 14
 	}
 
 	// Имя графа становится частью пути на диске, поэтому проверяется здесь,
@@ -2040,6 +2125,12 @@ func (c *Config) finalize() error {
 	// осознанное «без ограничения», и затирать его нельзя.
 	if c.Agent.MaxIterations == 0 {
 		c.Agent.MaxIterations = 25
+	}
+	if c.Agent.MaxWritesNoask == 0 {
+		c.Agent.MaxWritesNoask = 25
+	}
+	if c.Agent.MaxTurnTokens == 0 {
+		c.Agent.MaxTurnTokens = 4000000
 	}
 	if c.Agent.CompactAt < 0 || c.Agent.CompactAt >= 1 {
 		return fmt.Errorf("agent.compact_at = %v: доля окна от 0 до 1 (0 — не сжимать)", c.Agent.CompactAt)

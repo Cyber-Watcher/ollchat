@@ -199,6 +199,35 @@ func TestSearchDropsNearDuplicates(t *testing.T) {
 	}
 }
 
+// TestSearchKeepsEditionConflict — тот же абзац в двух книгах с РАЗНЫМ значением
+// не повтор, а противоречие изданий: в выдаче остаются оба (этап 112, О13).
+// Тот же абзац с тем же значением — по-прежнему повтор.
+func TestSearchKeepsEditionConflict(t *testing.T) {
+	para := func(port string) string {
+		return "Узлы системы Клён обмениваются журналом изменений через порт " + port +
+			" — это порт репликации по умолчанию. " + filler(6)
+	}
+	store, s := buildTestIndex(t, [][]string{{para("7411")}, {para("9443")}, {para("7411")}})
+	hits, err := s.Search("порт репликации Клён", DefaultSearchOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := texts(t, store, hits)
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "7411") || !strings.Contains(joined, "9443") {
+		t.Fatalf("противоречие изданий спрятано, в выдаче %d кусков:\n%s", len(got), joined)
+	}
+	if n := strings.Count(joined, "порт 7411"); n != 1 {
+		t.Fatalf("одинаковый абзац двух книг выдан %d раз, ждали 1", n)
+	}
+	if !valuesDiffer("версия Go 1.21 и порт 80", "версия Go 1.22 и порт 80") {
+		t.Fatal("разные версии не замечены")
+	}
+	if valuesDiffer("издание 2019 года, порт 80", "издание 2025 года, порт 80") {
+		t.Fatal("одни годы приняты за разные значения")
+	}
+}
+
 // TestSearchExactSubstringWins — точное вхождение перевешивает совпадение
 // по основам: так лечится переусердствовавший стеммер.
 func TestSearchExactSubstringWins(t *testing.T) {

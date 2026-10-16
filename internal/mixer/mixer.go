@@ -10,6 +10,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 )
 
 // Подмешивание знаний к вопросу: обычный RAG и граф понятий.
@@ -125,6 +126,23 @@ type Settings struct {
 
 	// Collection — имя коллекции, оно печатается в карте понятий.
 	Collection string
+
+	// Pin — куски по ссылкам («books/53#144»), которые подать модели ВМЕСТО
+	// найденных поиском. Прибор «потолка поиска» (этап 112, О7): ответ по верному
+	// куску показывает, как отвечала бы система при безупречном поиске, и разница
+	// с обычным ответом — цена поиска. С Pin нет ни привратника, ни карты, ни
+	// поиска: всё, что могло бы не пропустить кусок, и есть то, что меряется.
+	Pin []string
+
+	// FullChunks — подавать куски целиком, а не выдержкой вокруг совпавших слов
+	// (kb.Snippet: 320 знаков при куске около тысячи). Отделяет потерю от
+	// обрезки куска от потери от поиска (этап 112, О7).
+	FullChunks bool
+
+	// SenseSnippet — выдержку собирать из предложений, лучших по реранкеру,
+	// а не окном вокруг слов вопроса (этап 112, Ч21). Только для замера:
+	// умолчание false — как всегда.
+	SenseSnippet bool
 }
 
 // Deps — что нужно для сборки подмеса.
@@ -132,6 +150,8 @@ type Deps struct {
 	Coll     kb.Source
 	Graph    *graph.Graph // nil — графа нет, работает прежний порядок
 	Embedder kb.Embedder
+	// Translator — перевод вопроса для словесной ветки (kb.translate); nil — без.
+	Translator find.Translator
 	// Reranker — вторая ступень отбора; nil — её нет.
 	//
 	// Подмешивание получает её с 01.09.2026. До этого реранкер работал только
@@ -144,6 +164,25 @@ type Deps struct {
 	BooksOn bool // подмешивать выдержки (mix.books / kb auto)
 	GraphOn bool // подмешивать карту понятий (mix.graph / graph auto)
 	NoTools bool // модель не умеет инструментов
+
+	// Steps, Turn — журнал шагов и номер хода: одна запись `search` на вопрос
+	// с оценкой реранкера (этап 112, Ч17, отчёт о пробелах библиотеки). nil — не
+	// писать. До 16.10.2026 подмешивание журнала не знало вовсе, и отчёт видел
+	// только поиски службы MCP по `projectdocs`: поиски по книгам идут почти все
+	// отсюда. Пишет только вопрос человека в интерфейсе: `/mix show` задвоил бы
+	// вопрос, а прогоны `--ask` залили бы отчёт вопросами наборов.
+	Steps *steplog.Writer
+	Turn  string
+
+	probe *searchProbe // первый поиск по книгам за Build — для записи в журнал
+}
+
+// searchProbe — сигналы первого поиска по книгам за один Build. Поисков за
+// вопрос бывает два (проба привратника и сами выдержки) по тому же вопросу и
+// с тем же реранкером; в журнал идёт первый, чтобы вопрос не считался дважды.
+type searchProbe struct {
+	done bool
+	sig  find.Signals
 }
 
 // Result — что подмешано к вопросу.
@@ -157,6 +196,12 @@ type Result struct {
 	NoTools   bool // выдержки добавлены потому, что модель не умеет инструментов
 	Tokens    int  // оценка цены в токенах
 
+	// Refs — ссылки на поданные куски («books/53#144») в порядке подачи.
+	// По ним замер видит, дошёл ли до модели нужный кусок и каким по счёту:
+	// «не нашёлся» и «нашёлся, но утонул среди прочих» лечатся разным
+	// (этап 112, О7 и О9).
+	Refs []string
+
 	// From, To — годы самой старой и самой новой из приведённых книг,
 	// Note — оговорка о давности, когда она нужна. Знание из книги датировано,
 	// а в ответе выглядит вечным: год ставится рядом со ссылкой, а оговорка —
@@ -169,7 +214,7 @@ type Result struct {
 func (r Result) Empty() bool { return strings.TrimSpace(r.Text) == "" }
 
 // autoMix собирает то, что уйдёт модели вместе с вопросом.
-func Build(question string, d Deps, s Settings) Result {
+func Build(question string, d Deps, s Settings) (mixed Result) {
 	if strings.TrimSpace(question) == "" || d.Coll == nil {
 		return Result{}
 	}
@@ -177,7 +222,15 @@ func Build(question string, d Deps, s Settings) Result {
 	// эмбеддер и не реранкер: иначе привратник мерил бы выдачу порогом
 	// реранкера, которого нет (см. kb.RerankerOrNil).
 	d.Embedder, d.Reranker = kb.EmbedderOrNil(d.Embedder), kb.RerankerOrNil(d.Reranker)
+	if d.Steps != nil {
+		started := time.Now()
+		d.probe = &searchProbe{}
+		defer func() { logSearch(question, d, s, mixed, time.Since(started)) }()
+	}
 	coll := d.Coll
+	if len(s.Pin) > 0 {
+		return pinned(coll, question, s, d.Reranker)
+	}
 
 	// Модель без инструментов ничего не дозапросит, поэтому ей нужна не только
 	// карта понятий, но и сами выдержки — иначе ссылаться будет не на что.
@@ -362,7 +415,7 @@ func Build(question string, d Deps, s Settings) Result {
 		if !q.Empty() {
 			b.WriteString("\n")
 			b.WriteString(q.Text)
-			out.Chunks = q.Chunks
+			out.Chunks, out.Refs = q.Chunks, q.Refs
 			out.NoTools = !d.BooksOn
 			out.From, out.To, out.Note = q.From, q.To, q.Note
 		}
@@ -440,31 +493,103 @@ func books(coll kb.Source, search, question string, topK int, d Deps, s Settings
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	hits, _, err := find.Books(ctx, find.Deps{Source: coll, Embedder: d.Embedder, Reranker: d.Reranker}, search, question, o)
+	hits, _, err := find.Books(ctx, find.Deps{Source: coll, Embedder: d.Embedder, Reranker: d.Reranker,
+		Translator: d.Translator}, search, question, o)
+	if d.probe != nil && !d.probe.done && err == nil {
+		d.probe.done, d.probe.sig = true, find.SignalsOf(hits)
+	}
 	if err != nil || len(hits) == 0 {
 		return Result{}, find.Signals{}
 	}
-	sig := find.SignalsOf(hits)
+	senseSnippets(hits, question, s, d.Reranker)
+	return render(hits, s), find.SignalsOf(hits)
+}
 
+// logSearch пишет одну запись `search` за вопрос — те же поля, что у
+// find.Search, их читает `stepstat.py --gaps`. Оценка первого места — только
+// если поиск по книгам был и что-то нашёл: пустая выдача пишется `hits` 0 без
+// `top1`, а не нулём, который выше порога и выглядел бы «в книгах есть».
+// `mixed` — подмешано ли что-нибудь: false при выдаче ниже порога значит, что
+// привратник сказал «в книгах этого нет».
+func logSearch(question string, d Deps, s Settings, mixed Result, took time.Duration) {
+	p := d.probe
+	extra := map[string]any{"mode": "mix", "collection": s.Collection,
+		"reranked": p.done && d.Reranker != nil, "hits": p.sig.Hits,
+		"excerpts": mixed.Chunks, "entities": mixed.Entities, "ids": mixed.Refs,
+		"mixed": !mixed.Empty()}
+	if p.done && p.sig.Hits > 0 {
+		extra["top1"], extra["top1_gap"] = p.sig.Top1, p.sig.Top1Gap
+	}
+	d.Steps.Write(steplog.Step{Turn: d.Turn, Kind: steplog.KindSearch, Args: question,
+		MS: took.Milliseconds(), Extra: extra})
+}
+
+// pinned подаёт модели заданные куски вместо найденных (Settings.Pin).
+//
+// Выдержка режется так же, как у найденного поиском (kb.Snippet по вопросу),
+// если не просили кусков целиком: иначе «потолок» мерил бы заодно и длину
+// цитаты, и разница с обычным ответом смешала бы две причины. Ненайденная
+// ссылка пропускается молча — прибор видит это по Result.Chunks.
+func pinned(coll kb.Source, question string, s Settings, rr kb.Reranker) Result {
+	var hits []kb.Result
+	for _, id := range s.Pin {
+		got, err := coll.Around(id, 0)
+		if err != nil {
+			continue
+		}
+		for _, h := range got {
+			h.Snippet = kb.Snippet(h.Text, question, 0)
+			hits = append(hits, h)
+		}
+	}
+	senseSnippets(hits, question, s, rr)
+	return render(hits, s)
+}
+
+// senseSnippets пересобирает выдержки по смыслу (Settings.SenseSnippet, этап 112,
+// Ч21): предложения куска, лучшие по реранкеру, в пределах той же длины. Без
+// реранкера и при его сбое остаётся выдержка по словам.
+func senseSnippets(hits []kb.Result, question string, s Settings, rr kb.Reranker) {
+	if !s.SenseSnippet || s.FullChunks || rr == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for i := range hits {
+		hits[i].Snippet = kb.SnippetBySense(ctx, hits[i].Text, question, 0, rr, hits[i].Snippet)
+	}
+}
+
+// render — блок выдержек в том виде, в каком его читает модель.
+func render(hits []kb.Result, s Settings) Result {
+	if len(hits) == 0 {
+		return Result{}
+	}
 	// Порядок частей: сперва сами выдержки, требование ссылаться — последним,
 	// вплотную к вопросу. Замер 24.08.2026 на deepseek-r1:70b: с требованием
 	// в начале блока модель отвечала по памяти и ни разу не сослалась на книгу.
 	var b strings.Builder
+	refs := make([]string, 0, len(hits))
 	// Граница чужого текста стоит перед выдержками, требование ссылаться —
 	// после них (замер 24.08.2026). Порядок: граница, выдержки, требование.
 	b.WriteString(kb.QuotedDataNote + "\n\n")
 	b.WriteString("Выдержки из книг пользователя, относящиеся к вопросу:\n\n")
 	for i, h := range hits {
+		refs = append(refs, h.ID)
 		year := ""
 		if h.Year > 0 {
 			year = fmt.Sprintf(" · %d г.", h.Year)
 		}
+		text := h.Snippet
+		if s.FullChunks {
+			text = h.Text
+		}
 		fmt.Fprintf(&b, "[%d] %s%s · %s %d\n%s\n\n",
-			i+1, h.Book, year, h.Unit, h.UnitFrom, strings.TrimSpace(h.Snippet))
+			i+1, h.Book, year, h.Unit, h.UnitFrom, strings.TrimSpace(text))
 	}
 	b.WriteString("Это опора для ответа, а не сам ответ. " +
 		kb.AnswerStyle(s.AnswerStyle) + "\n")
-	out := Result{Text: b.String(), Chunks: len(hits), Tokens: ctxmeter.Estimate(b.String())}
+	out := Result{Text: b.String(), Chunks: len(hits), Tokens: ctxmeter.Estimate(b.String()), Refs: refs}
 	out.From, out.To, out.Note = kb.YearSpan(hits, time.Now())
-	return out, sig
+	return out
 }

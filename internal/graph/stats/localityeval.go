@@ -227,6 +227,74 @@ func localityEval(cfg *config.Config, g *graph.Graph, c *kb.Collection,
 	fmt.Println("  Формула годится, только если чужих стало меньше, А ПАРЫ X↔Y")
 	fmt.Println("  сохранились полностью: улучшать один сценарий за счёт другого")
 	fmt.Println("  нельзя (условие владельца 15.09.2026).")
+
+	typeEntropyOfOutput(cfg, deps, questions)
+}
+
+// typeEntropyOfOutput — часть 3 (этап 112, О12): энтропия типов связей В ВЫДАЧЕ
+// на вопрос («Advanced RAG bridging LLMs and Knowledge Graphs», 2026, стр. 407).
+// Выдача штатная — те же понятия, связи на понятие и ранжирование, что у
+// `--graph-find`, а не пул пересортировки частей 1 и 2. Низкая энтропия —
+// ответ видит один-два типа («использует», «связано»), высокая — разные.
+func typeEntropyOfOutput(cfg *config.Config, deps find.Deps, questions []string) {
+	rank := graph.NeighborRank{SenseWeight: cfg.Graph.NeighborSenseWeight, Pool: cfg.Graph.NeighborPool}
+	opts := find.Opts{Entities: cfg.Mix.Entities, Neighbors: cfg.Mix.Neighbors, Rank: rank}
+	all := map[string]int{}
+	var sum float64
+	asked, empty := 0, 0
+	for _, q := range questions {
+		res, err := find.Search(context.Background(), deps, q, opts)
+		if err != nil {
+			continue
+		}
+		asked++
+		if len(res.Relations) == 0 {
+			empty++
+			continue
+		}
+		types := map[string]int{}
+		for _, r := range res.Relations {
+			types[r.Type]++
+			all[r.Type]++
+		}
+		sum += typeEntropy(types)
+	}
+	top := math.Log2(float64(graph.RelRelated)) // все типы поровну
+	fmt.Printf("\nЭнтропия типов связей в штатной выдаче (О12): вопросов %d, без связей %d\n", asked, empty)
+	if n := asked - empty; n > 0 {
+		fmt.Printf("  средняя на вопрос %.3f бита из %.3f возможных (%.3f)\n", sum/float64(n), top, sum/float64(n)/top)
+		total := 0
+		for _, v := range all {
+			total += v
+		}
+		h := typeEntropy(all)
+		fmt.Printf("  по всем %d связям выдачи вместе %.3f бита (%.3f); доли:", total, h, h/top)
+		names := make([]string, 0, len(all))
+		for k := range all {
+			names = append(names, k)
+		}
+		sort.Slice(names, func(i, j int) bool { return all[names[i]] > all[names[j]] })
+		for _, k := range names {
+			fmt.Printf(" %s %.3f", k, float64(all[k])/float64(total))
+		}
+		fmt.Println()
+	}
+}
+
+// typeEntropy — энтропия Шеннона распределения в битах.
+func typeEntropy(counts map[string]int) float64 {
+	total := 0
+	for _, v := range counts {
+		total += v
+	}
+	var h float64
+	for _, v := range counts {
+		if v > 0 {
+			p := float64(v) / float64(total)
+			h -= p * math.Log2(p)
+		}
+	}
+	return h
 }
 
 // alienRelation — чужая ли связь для области mine.

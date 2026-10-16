@@ -18,6 +18,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/nodeprobe"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
@@ -273,8 +274,13 @@ func commandHandlers() []cmdHandler {
 		}},
 		{names: []string{"clear"}, run: (*Model).clearCmd},
 		{names: []string{"compact"}, run: (*Model).compactCmd},
+		{names: []string{"retry"}, run: (*Model).retryCmd},
 		{names: []string{"config"}, run: func(m *Model, _ string) tea.Cmd {
-			m.addBlock(block{kind: blockNotice, text: "файл настроек: " + m.cfg.Path})
+			text := "файл настроек: " + m.cfg.Path
+			if m.cfg.ProjectPath != "" {
+				text += "\nконфиг проекта поверх него: " + m.cfg.ProjectPath
+			}
+			m.addBlock(block{kind: blockNotice, text: text})
 			return nil
 		}},
 	}
@@ -362,6 +368,9 @@ func (m *Model) saveCmd(_ string) tea.Cmd {
 // clearCmd — /clear: очистить историю и ленту.
 func (m *Model) clearCmd(_ string) tea.Cmd {
 	m.conv.Clear()
+	// Очищенный диалог остаётся на диске своим файлом, следующий заводит новый
+	// (этап 112, Х3); откатывать /retry больше нечего (Х4).
+	m.autosaveID, m.lastExchange = "", -1
 	m.blocks = nil
 	m.rendered = nil
 	m.meter.Reset()
@@ -384,11 +393,41 @@ func (m *Model) compactCmd(arg string) tea.Cmd {
 		}
 	}
 	dropped := m.conv.Compact(keep)
+	if dropped > 0 {
+		m.lastExchange = -1 // номера сообщений сдвинулись — /retry откатил бы не то
+	}
 	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
 	m.meter.Exact = false
 	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
 		"история сокращена: отброшено сообщений %d, осталось %d", dropped, m.conv.Len())})
 	return nil
+}
+
+// retryCmd — /retry: убрать из истории последний обмен целиком (подмес, вопрос,
+// вызовы инструментов, ответ) и задать тот же вопрос заново (этап 112, Х4).
+// Сводка покинутой ветки и дерево сообщений, как у Pi, не делаются: пункт велит
+// сперва простой откат. В ленте прежний ответ остаётся — модель его больше не видит.
+func (m *Model) retryCmd(_ string) tea.Cmd {
+	switch {
+	case m.streaming || m.mixing || m.compacting:
+		m.addBlock(block{kind: blockError, text: "/retry: идёт ход — дождитесь конца или прервите (Esc)"})
+		return nil
+	case m.lastExchange < 0 || m.lastExchange >= m.conv.Len() || m.lastQuestion == "":
+		m.addBlock(block{kind: blockError, text: "/retry: повторять нечего — в этом сеансе вопроса ещё не было или история с тех пор переписана (/compact, /clear, /resume)"})
+		return nil
+	case m.lastQuestionImgs:
+		m.addBlock(block{kind: blockError, text: "/retry: в вопросе были картинки — их уже нет среди вложений; задайте вопрос заново"})
+		return nil
+	}
+	dropped := m.conv.TruncateTo(m.lastExchange)
+	question := m.lastQuestion
+	m.lastExchange, m.lastQuestion = -1, ""
+	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+	m.meter.Exact = false
+	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
+		"/retry: последний обмен убран из истории (сообщений %d), вопрос отправлен заново", dropped)})
+	_ = m.logger.Write(chatlog.KindSystem, fmt.Sprintf("/retry: убрано сообщений %d, вопрос повторён", dropped))
+	return m.send(question)
 }
 
 func (m *Model) psCmd() tea.Cmd {
@@ -657,6 +696,7 @@ func (m *Model) toolsCmd(arg string) tea.Cmd {
 		}
 		v := strings.ToLower(fields[1])
 		if v == "off" || v == "выкл" || v == "нет" {
+			m.logIterations(-1)
 			m.cfg.Agent.MaxIterations = -1
 			m.addBlock(block{kind: blockNotice, text: "предел вызовов инструментов снят на этот сеанс. " +
 				"Прервать затянувшийся ход — Esc"})
@@ -667,6 +707,7 @@ func (m *Model) toolsCmd(arg string) tea.Cmd {
 			m.addBlock(block{kind: blockError, text: "нужно число больше нуля или off: /tools iterations 50"})
 			return nil
 		}
+		m.logIterations(n)
 		m.cfg.Agent.MaxIterations = n
 		m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
 			"предел вызовов инструментов на этот сеанс: %d", n)})
@@ -674,6 +715,16 @@ func (m *Model) toolsCmd(arg string) tea.Cmd {
 	}
 	m.addBlock(block{kind: blockError, text: "не понял: /tools [iterations <число|off>]"})
 	return nil
+}
+
+// logIterations пишет смену потолка шагов агента в журнал шагов (вид setting):
+// до 14.10.2026 `/tools iterations off` менял потолок только в памяти сеанса,
+// и по журналам рабочей машины ход на 279 обращений к модели при конфиге 60
+// объяснить было нечем.
+func (m *Model) logIterations(to int) {
+	m.steps.Write(steplog.Step{Turn: m.turnID, Kind: steplog.KindSetting,
+		Extra: map[string]any{"key": "agent.max_iterations",
+			"from": m.cfg.Agent.MaxIterations, "to": to, "by": "/tools iterations"}})
 }
 
 func (m *Model) thinkCmd(arg string) tea.Cmd {

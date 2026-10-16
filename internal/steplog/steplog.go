@@ -22,6 +22,7 @@
 package steplog
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Виды шагов.
@@ -40,6 +42,44 @@ const (
 	KindSearch  = "search"  // один поиск по графу и книгам
 	KindMix     = "mix"     // подмешивание к вопросу
 	KindCompact = "compact" // сжатие истории сводкой
+	KindRetry   = "retry"   // неудавшаяся попытка обмена с моделью (этап 112, М5)
+	KindTurn    = "turn"    // конец хода и его причина в Outcome (этап 112, Ф2)
+	// KindSetting — смена настройки на сеанс командой интерфейса: в Extra ключ,
+	// было и стало (14.10.2026: потолок `/tools iterations off` нигде не писался,
+	// и ход на 279 обращений к модели при конфиге 60 нечем было объяснить).
+	KindSetting = "setting"
+	// KindInit — рукопожатие клиента со службой MCP: какую версию протокола он
+	// просил, какую служба отдала, кто он (этап 112, Ц1, 15.10.2026: до этого
+	// клиенты службы и их версии не были видны нигде).
+	KindInit = "init"
+	// KindSession — начало сеанса: чем работали — сборка, отпечатки системного
+	// промпта, правил разрешений и набора инструментов, модель (этап 112, Е6, Ц2,
+	// 15.10.2026: до этого записи двух сеансов с разными промптами или правилами
+	// были неотличимы).
+	KindSession = "session"
+	// KindAuth — отказ входа службы MCP без ключа (этап 112, С2, 16.10.2026: до
+	// этого он шёл лишь в stderr под -v). Не вызов инструмента: тело запроса без
+	// ключа не разбирается, и в переписи вызовов этой записи места нет.
+	KindAuth = "auth"
+)
+
+// Причины конца хода (KindTurn, поле Outcome).
+//
+// Без них ход, упёршийся в потолок шагов, отличался от прочих только числом
+// шагов, а оборванный пределом вывода — ничем: потолок 25 нечем было сверить
+// с тем, как ходы кончаются на деле (этап 112, Ф2, Х2).
+const (
+	TurnAnswer    = "answer"    // модель ответила без вызова инструментов
+	TurnLimit     = "limit"     // упёрся в agent.max_iterations
+	TurnLength    = "length"    // ответ оборван пределом вывода (num_predict)
+	TurnCancelled = "cancelled" // ход снят (Esc, закрытие)
+	TurnError     = "error"     // сбой сервера или обмена
+)
+
+// Исходы неудавшейся попытки обмена (KindRetry, поле Outcome).
+const (
+	RetryAgain  = "again"   // будет повтор
+	RetryGaveUp = "gave_up" // повторов больше не будет: исчерпаны или нельзя
 )
 
 // Исходы вызова инструмента.
@@ -95,6 +135,11 @@ func New(dir string, pattern *chatlog.Pattern, start time.Time, src string, enab
 	if !enabled || pattern == nil || dir == "" {
 		return nil
 	}
+	// «~» разворачивается здесь, а не только в config.Load: конфиг без Load
+	// (config.Default в тестах) приносит «~/.local/share/ollchat/logs» как есть,
+	// и журнал ложился в каталог «~» ВНУТРИ текущего каталога — 15.10.2026 так
+	// 61 файл журнала из тестов cmd/ollchat оказался в cmd/ollchat/~ и в индексе git.
+	dir = fsx.ExpandHome(dir)
 	return &Writer{dir: dir, pattern: pattern, start: start, src: src}
 }
 
@@ -184,6 +229,36 @@ func (w *Writer) Close() error {
 	err := w.f.Close()
 	w.f = nil
 	return err
+}
+
+// ctxKey — ключ журнала и хода в контексте вызова инструмента.
+type ctxKey struct{}
+
+type ctxVal struct {
+	w    *Writer
+	turn string
+}
+
+// NewContext кладёт в контекст журнал шагов и номер хода: так их получает
+// код глубоко под инструментом (поиск пишет свою запись `search`), не
+// протаскивая журнал через настройки каждого инструмента. До 16.10.2026
+// журнал туда не доходил вовсе: find.Deps.Steps не задавал ни агент, ни
+// служба MCP, и записей `search` (с оценкой top1 для отчёта о пробелах
+// библиотеки, этап 112, Ч17) в журналах не было ни одной.
+func NewContext(ctx context.Context, w *Writer, turn string) context.Context {
+	if w == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKey{}, ctxVal{w: w, turn: turn})
+}
+
+// FromContext — журнал и номер хода из контекста; nil — их там нет.
+func FromContext(ctx context.Context) (*Writer, string) {
+	if ctx == nil {
+		return nil, ""
+	}
+	v, _ := ctx.Value(ctxKey{}).(ctxVal)
+	return v.w, v.turn
 }
 
 // Parse разбирает одну строку журнала обратно в шаг.

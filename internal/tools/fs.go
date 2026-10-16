@@ -329,7 +329,7 @@ func (t *writeFileTool) Plan(args map[string]any) (*Plan, error) {
 			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 				return "", err
 			}
-			if err := writeFile(t.opts.Sandbox, abs, []byte(content)); err != nil {
+			if err := writeFile(t.opts, abs, []byte(content)); err != nil {
 				return "", err
 			}
 			if exists {
@@ -420,7 +420,7 @@ func (t *editFileTool) Plan(args map[string]any) (*Plan, error) {
 		Title:   fmt.Sprintf("%s(%s) +%d -%d", NameEditFile, rel, added, removed),
 		Preview: UnifiedDiff(content, updated, 3),
 		Run: func(ctx context.Context) (string, error) {
-			if err := writeFile(t.opts.Sandbox, abs, []byte(updated)); err != nil {
+			if err := writeFile(t.opts, abs, []byte(updated)); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("Файл %s изменён (добавлено строк: %d, удалено: %d).", rel, added, removed), nil
@@ -441,7 +441,8 @@ func (t *editFileTool) Plan(args map[string]any) (*Plan, error) {
 //
 // Новый файл пишется как раньше: прежнего содержимого у него нет, а права
 // по umask соблюдает только обычное создание.
-func writeFile(sb *permissions.Sandbox, abs string, data []byte) error {
+func writeFile(opts Options, abs string, data []byte) error {
+	sb := opts.Sandbox
 	dst := abs
 	// Ссылку внутри песочницы (sandbox.follow_symlinks) пишем насквозь, как
 	// писала os.WriteFile: переименование поверх заменило бы саму ссылку
@@ -453,6 +454,13 @@ func writeFile(sb *permissions.Sandbox, abs string, data []byte) error {
 			return err
 		}
 		dst = real
+	}
+	// Копия до правки — путь отката (этап 112, Н5). Без копии файл не трогаем:
+	// охранник назвал правку обратимой, рассчитывая на неё.
+	if opts.Backup != nil {
+		if err := opts.Backup(dst); err != nil {
+			return fmt.Errorf("копия перед правкой не сделана, файл не изменён: %w", err)
+		}
 	}
 	info, err := os.Stat(dst)
 	switch {

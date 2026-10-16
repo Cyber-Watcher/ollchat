@@ -118,6 +118,8 @@ type Opts struct {
 	Reranker kb.Reranker
 	// RerankOpts — числа второй ступени.
 	RerankOpts kb.RerankOpts
+	// Translator — перевод вопроса для словесной ветки (kb.translate); nil — без.
+	Translator find.Translator
 
 	// Graph — как отвечать на вопросы к графу. Пусто — граф не раздаётся,
 	// и клиент получит внятный отказ вместо молчания.
@@ -281,7 +283,8 @@ func Mount(mux *http.ServeMux, o Opts) {
 		}
 		defer leave()
 		// Одно ядро с /search и kb_search (этап 91, R2.8).
-		hits, note, err := find.Books(r.Context(), find.Deps{Coll: coll, Embedder: o.Emb, Reranker: o.Reranker},
+		hits, note, err := find.Books(r.Context(), find.Deps{Coll: coll, Embedder: o.Emb, Reranker: o.Reranker,
+			Translator: o.Translator},
 			req.Query, req.Query, searchOpts(req, name, o))
 		if err != nil {
 			apiError(w, http.StatusInternalServerError, err)

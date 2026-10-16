@@ -104,6 +104,35 @@ func (c *Conversation) Compact(keep int) int {
 	return cut
 }
 
+// TruncateTo оставляет первые n сообщений и возвращает, сколько отброшено
+// (этап 112, Х4, /retry: откат последнего обмена целиком — вопрос, подмес,
+// вызовы инструментов и их ответы, — чтобы в истории не осталось «сирот»
+// assistant{tool_calls} без ответов). n вне истории ничего не меняет.
+func (c *Conversation) TruncateTo(n int) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n < 0 || n >= len(c.messages) {
+		return 0
+	}
+	dropped := len(c.messages) - n
+	c.messages = append([]ollama.Message(nil), c.messages[:n]...)
+	return dropped
+}
+
+// HasAnswer — есть ли в истории хоть один ответ модели. Автосохранение
+// (этап 112, Х3) пишет файл только после первого ответа, как Pi: пустой
+// сеанс или один вопрос без ответа файла не заводят.
+func (c *Conversation) HasAnswer() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.messages {
+		if m.Role == ollama.RoleAssistant {
+			return true
+		}
+	}
+	return false
+}
+
 // EstimatedChars возвращает суммарную длину истории в байтах —
 // основа для оценки заполнения контекста до первого ответа сервера.
 func (c *Conversation) EstimatedChars() int {
@@ -146,13 +175,26 @@ func (s *Store) Dir() string { return s.dir }
 // Запись атомарная: сохранение, оборванное посреди файла, раньше оставляло
 // обрезанный JSON, который List молча пропускал, — диалог пропадал без следа.
 func (s *Store) Save(c *Conversation, server, model string) (string, error) {
+	_, path, err := s.SaveAs("", c, server, model)
+	return path, err
+}
+
+// SaveAs переписывает сессию id целиком; пустой id — новая сессия. Возвращает
+// идентификатор и путь. Так пишет автосохранение (этап 112, Х3): один файл на
+// сеанс, переписанный атомарно после каждого хода. Дозаписываемый журнал, как
+// у Pi, пришлось бы чинить после обрыва (обрезать рваный хвост); у файла,
+// подменяемого переименованием, рваного хвоста не бывает — на диске всегда
+// либо прежний целый файл, либо новый целый.
+func (s *Store) SaveAs(id string, c *Conversation, server, model string) (string, string, error) {
 	if err := privateDir(s.dir); err != nil {
-		return "", err
+		return "", "", err
 	}
 	now := time.Now()
-	id, err := s.newID(now)
-	if err != nil {
-		return "", err
+	if id == "" {
+		var err error
+		if id, err = s.newID(now); err != nil {
+			return "", "", err
+		}
 	}
 	rec := Saved{
 		ID:       id,
@@ -164,13 +206,13 @@ func (s *Store) Save(c *Conversation, server, model string) (string, error) {
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	path := filepath.Join(s.dir, id+".json")
 	if err := fsx.WriteFileAtomic(path, data, 0o600); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return path, nil
+	return id, path, nil
 }
 
 // newID — идентификатор нового сохранения: время до секунды, как раньше,

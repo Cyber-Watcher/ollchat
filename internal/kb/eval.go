@@ -157,6 +157,12 @@ type EvalReport struct {
 	// нужный кусок в первые K. По ним подбирается порог воздержания
 	// (этап 91, R2.11): ниже какого разрыва честнее сказать «в книгах нет».
 	Gaps []GapPoint
+
+	// Rows — то же по каждому вопросу целиком, в порядке набора: место
+	// эталона и что именно стояло в выдаче с оценками. Таблицы выше — итог,
+	// а по строкам видно, КАКИЕ вопросы молчали бы и что поиск отдал модели
+	// (этап 112, О6, О10, О11, Л3).
+	Rows []EvalRow
 }
 
 // GapPoint — один вопрос в замере воздержания.
@@ -164,6 +170,40 @@ type GapPoint struct {
 	Gap  float64 // (score₁ − score₂) / score₁; 0, если кусков меньше двух
 	Top1 float64 // оценка первого места как есть: у реранкера шкала сопоставима между запросами
 	Hit  bool    // нужный кусок был в выдаче
+}
+
+// EvalRow — один вопрос замера целиком: место эталона (0 — мимо), место
+// по мере «та же страница», признаки выдачи и сама выдача с оценками.
+type EvalRow struct {
+	Query    string    `json:"query"`
+	Note     string    `json:"note,omitempty"`
+	Rank     int       `json:"rank"`
+	RankNear int       `json:"rank_near"`
+	Top1     float64   `json:"top1"`
+	Gap      float64   `json:"gap"`
+	IDs      []string  `json:"ids"`
+	Scores   []float64 `json:"scores"`
+	// GoldClass — класс эталонного куска по флагам нарезки: «код», «таблица»,
+	// «проза»; пусто — эталона нет в коллекции (этап 112, Ф6: hit rate по классам).
+	GoldClass string `json:"gold_class,omitempty"`
+}
+
+// goldClass — класс эталонного куска вопроса; пусто, если куска в коллекции нет.
+func (c *Collection) goldClass(cs EvalCase) string {
+	doc, ord, ok := splitChunkID(cs.ChunkID)
+	if !ok {
+		return ""
+	}
+	info, ok := c.ChunkByRef(uint32(doc), uint32(ord))
+	switch {
+	case !ok:
+		return ""
+	case info.Code:
+		return "код"
+	case info.Table:
+		return "таблица"
+	}
+	return "проза"
 }
 
 // AbstainRow — что даёт порог воздержания на наборе.
@@ -434,6 +474,14 @@ func (c *Collection) Eval(ctx context.Context, cases []EvalCase, mode EvalMode,
 			gp.Top1 = res[0].Score
 		}
 		rep.Gaps = append(rep.Gaps, gp)
+		row := EvalRow{Query: cs.Query, Note: cs.Note, Rank: rank, RankNear: rankNear,
+			Top1: gp.Top1, Gap: gp.Gap, IDs: make([]string, 0, len(res)), Scores: make([]float64, 0, len(res)),
+			GoldClass: c.goldClass(cs)}
+		for _, r := range res {
+			row.IDs = append(row.IDs, r.ID)
+			row.Scores = append(row.Scores, r.Score)
+		}
+		rep.Rows = append(rep.Rows, row)
 		if rank == 0 {
 			rep.Missed = append(rep.Missed, cs.Query)
 			// Промах прибора или промах поиска: была ли в выдаче та же книга
