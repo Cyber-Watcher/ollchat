@@ -33,12 +33,7 @@ func useProjectConfig(cfg *config.Config, dir string, in io.Reader, out io.Write
 			return nil
 		}
 		fmt.Fprintf(out, "\nВ каталоге запуска есть конфиг проекта %s:\n\n", path)
-		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-		for i, l := range lines {
-			if i == 60 {
-				fmt.Fprintf(out, "  … ещё строк: %d\n", len(lines)-60)
-				break
-			}
+		for _, l := range previewLines(strings.Split(strings.TrimRight(string(data), "\n"), "\n")) {
 			fmt.Fprintf(out, "  %s\n", l)
 		}
 		fmt.Fprint(out, "\nОн переопределяет общий конфиг и может менять режим подтверждений, разрешения и сервер.\n"+
@@ -59,6 +54,74 @@ func useProjectConfig(cfg *config.Config, dir string, in io.Reader, out io.Write
 	}
 	fmt.Fprintf(out, "конфиг проекта: %s\n", path)
 	return nil
+}
+
+// previewHead — сколько первых строк конфига проекта показывать целиком.
+const previewHead = 60
+
+// previewLines — что показать человеку перед вопросом о доверии (аудит
+// 16.10.2026, находка 4). Два правила:
+//   - управляющие символы (ESC и прочие) печатаются видимо (`\x1b`): строка
+//     комментария с ESC-последовательностью чистила экран и прятала показанное;
+//   - после previewHead строк всё равно показываются строки с заголовками
+//     разделов и ключами, которые меняют права, режим и сервер: доверие
+//     даётся на отпечаток ВСЕГО файла, и `mode = "yolo"` на 61-й строке не
+//     должен прятаться за «… ещё строк: N».
+func previewLines(lines []string) []string {
+	out := make([]string, 0, len(lines)+2)
+	hidden := 0
+	for i, l := range lines {
+		switch {
+		case i < previewHead || previewKey(l):
+			if hidden > 0 {
+				out = append(out, fmt.Sprintf("  … пропущено строк: %d", hidden))
+				hidden = 0
+			}
+			out = append(out, visible(l))
+		default:
+			hidden++
+		}
+	}
+	if hidden > 0 {
+		out = append(out, fmt.Sprintf("  … пропущено строк: %d", hidden))
+	}
+	return out
+}
+
+// previewKey — строка, которую нельзя прятать: заголовок раздела или ключ,
+// меняющий права, режим, песочницу или сервер.
+func previewKey(l string) bool {
+	t := strings.TrimSpace(l)
+	if strings.HasPrefix(t, "[") {
+		return true
+	}
+	key, _, ok := strings.Cut(t, "=")
+	if !ok {
+		return false
+	}
+	switch strings.TrimSpace(key) {
+	case "mode", "allow", "ask", "deny", "irreversible", "tools", "url", "root", "allow_outside",
+		"follow_symlinks", "isolation", "default", "autosave", "untrusted_gate", "private_egress_check",
+		"journal_fail_closed", "max_writes_noask", "dir", "token", "headers":
+		return true
+	}
+	return false
+}
+
+// visible делает управляющие символы видимыми: `\x1b`, `\r`, `\x07`.
+func visible(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteString("    ")
+		case r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0:
+			fmt.Fprintf(&b, "\\x%02x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // stdinIsTerminal — ввод с терминала, то есть человек может ответить на вопрос.
