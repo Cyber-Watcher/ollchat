@@ -598,7 +598,7 @@ func NameAt(text string, names []string) int {
 			continue
 		}
 		for i := 0; i+len(w) <= len(low); i++ {
-			if !runesEqual(low[i:i+len(w)], w) {
+			if low[i] != w[0] || !runesEqual(low[i:i+len(w)], w) {
 				continue
 			}
 			if runeWordEdge(low, i, i+len(w)) {

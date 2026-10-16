@@ -71,13 +71,12 @@ func protectedDir(req Request, sb *Sandbox) string {
 	}
 	root := sb.RealRoot()
 	refuse := func(p string) string {
-		if p == "" || strings.HasPrefix(p, "/dev/") || strings.HasPrefix(p, "~/") {
+		if p == "" || strings.HasPrefix(p, "/dev/") {
 			return ""
 		}
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(root, p)
-		}
-		p = filepath.Clean(p)
+		// `~/проект/.git/…` — тот же каталог через дом (второй круг 16.10:
+		// ревью нашло, что `~/` пропускался мимо защиты).
+		p = filepath.Clean(resolveTarget(p, root))
 		for _, d := range protectedDirs {
 			dir := filepath.Join(root, d.name)
 			if p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) {
@@ -86,9 +85,12 @@ func protectedDir(req Request, sb *Sandbox) string {
 		}
 		return ""
 	}
+	// Имя каталога — отдельная часть пути (`/.git/`, `/.git` в конце, `.git/` в
+	// начале), а не хвост чужого имени: `proj.git` зеркала — не наш каталог.
 	mentions := func(raw string) string {
 		for _, d := range protectedDirs {
-			if strings.Contains(raw, d.name+"/") || strings.HasSuffix(raw, d.name) {
+			if raw == d.name || strings.HasPrefix(raw, d.name+"/") ||
+				strings.Contains(raw, "/"+d.name+"/") || strings.HasSuffix(raw, "/"+d.name) {
 				return fmt.Sprintf("каталог %s — %s: цель с подстановкой «%s» его называет, модели писать туда нельзя", d.name, d.why, raw)
 			}
 		}
@@ -382,19 +384,44 @@ func writeTargets(text string) (over, touch []string, opaque string) {
 			touch = []string{"."}
 		}
 	case "python", "python2", "python3", "pypy", "pypy3":
-		if hasShort(args, 'c') {
+		if interpreterOpt(args, "c", "") {
 			opaque = prog + " -c"
 		}
 	case "ruby", "node", "nodejs", "deno", "bun", "lua", "luajit":
-		if hasShort(args, 'e') || contains(args, "--eval") || contains(args, "-p") {
+		if interpreterOpt(args, "ep", "--eval") {
 			opaque = prog + " -e"
 		}
 	case "php":
-		if hasShort(args, 'r') {
+		if interpreterOpt(args, "r", "") {
 			opaque = "php -r"
 		}
 	}
 	return over, touch, opaque
+}
+
+// interpreterOpt — ключ кода в строке стоит среди ключей САМОГО интерпретатора,
+// то есть до первого позиционного довода (имени скрипта), `-m` или `--`.
+// `python3 foo.py -c config.yaml` — ключ скрипта, а не интерпретатора
+// (второй круг 16.10: ревью нашло ложные срабатывания).
+func interpreterOpt(args []string, shorts, long string) bool {
+	for _, a := range args {
+		switch {
+		case a == "--" || a == "-m" || a == "-":
+			return false
+		case long != "" && a == long:
+			return true
+		case len(a) > 1 && a[0] == '-' && a[1] != '-':
+			for j := 1; j < len(a); j++ {
+				if strings.IndexByte(shorts, a[j]) >= 0 {
+					return true
+				}
+			}
+		case strings.HasPrefix(a, "--"):
+		default:
+			return false // имя скрипта: дальше ключи его, а не интерпретатора
+		}
+	}
+	return false
 }
 
 // positionals — доводы команды без ключей: всё после «--» и слова не с «-».

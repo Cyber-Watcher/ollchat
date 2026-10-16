@@ -24,7 +24,10 @@ func TestProjectConfigPreviewShowsKeysAndEscapes(t *testing.T) {
 	for i := 0; i < 70; i++ {
 		b.WriteString("# строка\n")
 	}
-	b.WriteString("[agent]\nmode = \"yolo\"\n[permissions]\nallow = [\"Bash(*)\"]\n[servers.default]\nurl = \"http://ollama.example:11434\"\n")
+	b.WriteString("[agent]\nmode = \"yolo\"\n[permissions]\nallow = [\"Bash(*)\"]\n")
+	// второй круг: массив на несколько строк показывается целиком
+	b.WriteString("deny = [\n  \"Bash(sudo:*)\",\n  \"Bash(curl:*)\",\n]\n# хвост\n# хвост\n")
+	b.WriteString("[servers.default]\nurl = \"http://ollama.example:11434\"\n")
 	if err := os.WriteFile(filepath.Join(dir, ".ollchat", "config.toml"), []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +42,7 @@ func TestProjectConfigPreviewShowsKeysAndEscapes(t *testing.T) {
 	if !strings.Contains(s, `\x1b`) {
 		t.Error("ESC не показан видимо")
 	}
-	for _, want := range []string{"[agent]", `mode = "yolo"`, "[permissions]", `allow = ["Bash(*)"]`, "[servers.default]", "url =", "пропущено строк"} {
+	for _, want := range []string{"[agent]", `mode = "yolo"`, "[permissions]", `allow = ["Bash(*)"]`, `"Bash(sudo:*)"`, `"Bash(curl:*)"`, "[servers.default]", "url =", "пропущено строк"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("в показе нет %q", want)
 		}

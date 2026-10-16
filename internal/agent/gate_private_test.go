@@ -20,6 +20,9 @@ func TestPrivateTargetCoversAllPrivateClasses(t *testing.T) {
 		`{"url":"http://127.0.0.1@evil.example/"}`, `{"url":"http://user@100.100.0.7/"}`,
 		`{"query":"пароль admin 127.0.0.5"}`, `{"query":"fd00::1 внутренний"}`,
 		`{"query":"fe80::1 link"}`, `{"query":"адрес ::1 петля"}`,
+		// второй круг: IPv4 в IPv6 и скобочный хост
+		`{"url":"http://[::ffff:7f00:1]/latest/meta-data"}`, `{"url":"http://[::ffff:a00:1]:8080/"}`,
+		`{"url":"http://[fe80::1%25eth0]/"}`,
 	} {
 		if privateTarget(c) == "" {
 			t.Errorf("не считается частным: %s", c)
@@ -29,6 +32,9 @@ func TestPrivateTargetCoversAllPrivateClasses(t *testing.T) {
 		`{"url":"https://go.dev/doc/"}`, `{"query":"go 1.26 release notes"}`, `{"url":"http://198.51.100.10/"}`,
 		`{"url":"http://8.8.8.8/"}`, `{"query":"версия 10.2"}`, `{"url":"http://example.com/1270.0.1"}`,
 		`{"url":"http://100.128.0.1/"}`, `{"query":"порт 1270"}`,
+		// второй круг: не адреса, а версии и срезы
+		`{"query":"Chrome 127.0.6533.72 release notes"}`, `{"query":"python slice a[::1] explained"}`,
+		`{"query":"go 1.26.9 release"}`,
 	} {
 		if got := privateTarget(c); got != "" {
 			t.Errorf("ложное срабатывание на %s: %s", c, got)

@@ -154,10 +154,57 @@ func TestInlineInterpreterCodeIsIrreversible(t *testing.T) {
 		"python3 app.py":               false,
 		"python3 -m http.server":       false,
 		"node app.js":                  false,
+		// второй круг: ключи самого скрипта после его имени — не код в строке
+		"python3 -u -c 'print(1)'":                     true,
+		"node --eval 'console.log(1)'":                 true,
+		"python3 privatescripts/foo.py -c config.yaml": false,
+		"python3 -m pip install -c constraints.txt":    false,
+		"node server.js -p 8080":                       false,
+		"ruby build.rb -e production":                  false,
 	} {
 		got := decide(g, cmd)
 		if got.Irreversible != want {
 			t.Errorf("%q: необратимо %v, ждали %v (%s)", cmd, got.Irreversible, want, got.Reason)
+		}
+	}
+}
+
+// Второй круг (ревью ветки): `~/проект/.git/…` — тот же каталог через дом;
+// `proj.git` зеркала — не наш `.git`; `$PWD/.git/config` — наш.
+func TestProtectedDirsViaHomeAndMirrors(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(root, GitDirName, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := NewSandbox(root, false, false, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := Compile([]string{"Bash(*)"}, nil, nil, sb.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := NewGuard(set, sb, ModeYolo)
+	for _, cmd := range []string{
+		"echo 'touch /tmp/pwn' > ~/proj/.git/hooks/pre-commit",
+		"cp x ~/proj/.ollchat/config.toml",
+		"echo x > \"$PWD/.git/config\"",
+		"echo x >> \"$HOME/proj/.ollchat/config.toml\"",
+	} {
+		if got := decide(g, cmd); got.Decision != DecisionDeny {
+			t.Errorf("%q — %v (%s), ожидался отказ", cmd, got.Decision, got.Reason)
+		}
+	}
+	for _, cmd := range []string{
+		"git clone --mirror x \"$OUT/proj.git\"",
+		"tar cf - . > \"$BACKUPS/proj.git/dump.tar\"",
+		"echo x > \"$OUT/ollchat.git\"",
+		"echo x > ~/other/.git/config",
+	} {
+		if got := decide(g, cmd); got.Decision == DecisionDeny {
+			t.Errorf("%q запрещено зря: %s", cmd, got.Reason)
 		}
 	}
 }

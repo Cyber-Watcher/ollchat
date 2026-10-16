@@ -70,9 +70,11 @@ const previewHead = 60
 func previewLines(lines []string) []string {
 	out := make([]string, 0, len(lines)+2)
 	hidden := 0
+	open := false // внутри многострочного массива ключа: `allow = [` … `]`
 	for i, l := range lines {
+		key := previewKey(l)
 		switch {
-		case i < previewHead || previewKey(l):
+		case i < previewHead || key || open:
 			if hidden > 0 {
 				out = append(out, fmt.Sprintf("  … пропущено строк: %d", hidden))
 				hidden = 0
@@ -80,6 +82,14 @@ func previewLines(lines []string) []string {
 			out = append(out, visible(l))
 		default:
 			hidden++
+		}
+		// Массив правил на несколько строк показывается целиком: `allow = [`
+		// без `]` открывает его, строка с `]` закрывает (второй круг 16.10).
+		switch {
+		case key && strings.Count(l, "[") > strings.Count(l, "]"):
+			open = true
+		case open && strings.Contains(l, "]"):
+			open = false
 		}
 	}
 	if hidden > 0 {
