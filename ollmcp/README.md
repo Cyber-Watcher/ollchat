@@ -102,7 +102,7 @@ WantedBy=default.target
 Только тулчейном проекта:
 
 ```bash
-export PATH=$HOME/sdk/go1.26.5/bin:$PATH
+export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 go build -o ollmcp ./ollmcp
 go test ./ollmcp/
 ```

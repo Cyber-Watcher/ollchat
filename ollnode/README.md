@@ -38,7 +38,7 @@
 Собирается тем же тулчейном, что и остальной проект:
 
 ```bash
-export PATH=$HOME/sdk/go1.26.5/bin:$PATH
+export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 go build -o ollnode ./ollnode
 scp ollnode сервер:~/bin/
 ```
