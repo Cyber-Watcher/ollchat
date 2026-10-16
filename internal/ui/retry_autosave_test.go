@@ -72,7 +72,7 @@ func TestAutosaveAfterEachTurn(t *testing.T) {
 	for i, q := range []string{"раз", "два", "три"} {
 		m.startExchange(q, nil, mixResult{})
 		m.conv.Append(ollama.Message{Role: ollama.RoleAssistant, Content: "ответ " + q})
-		m.finishTurn()
+		runCmd(t, m, m.finishTurn())
 		list, err := m.store.List()
 		if err != nil || len(list) != 1 {
 			t.Fatalf("ход %d: сессий на диске %d (%v), ждали 1", i+1, len(list), err)
@@ -85,7 +85,7 @@ func TestAutosaveAfterEachTurn(t *testing.T) {
 	m.clearCmd("")
 	m.startExchange("после очистки", nil, mixResult{})
 	m.conv.Append(ollama.Message{Role: ollama.RoleAssistant, Content: "ответ"})
-	m.finishTurn()
+	runCmd(t, m, m.finishTurn())
 	if list, _ := m.store.List(); len(list) != 2 {
 		t.Errorf("после /clear сессий %d, ждали 2: прежний диалог должен остаться своим файлом", len(list))
 	}
@@ -94,7 +94,9 @@ func TestAutosaveAfterEachTurn(t *testing.T) {
 	off.cfg.Agent.Autosave = false
 	off.startExchange("вопрос", nil, mixResult{})
 	off.conv.Append(ollama.Message{Role: ollama.RoleAssistant, Content: "ответ"})
-	off.finishTurn()
+	if cmd := off.finishTurn(); cmd != nil {
+		runCmd(t, off, cmd)
+	}
 	if list, _ := off.store.List(); len(list) != 0 {
 		t.Errorf("agent.autosave = false, а сессий на диске %d", len(list))
 	}

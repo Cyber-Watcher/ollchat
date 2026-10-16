@@ -187,6 +187,8 @@ type Model struct {
 	// autosaveID — файл сессии, который автосохранение (этап 112, Х3,
 	// agent.autosave) переписывает после каждого хода; пусто — ещё не заведён.
 	autosaveID string
+	// autosaveSeq — номер снимка автосохранения: фоновые записи идут по порядку.
+	autosaveSeq uint64
 	// lastExchange — с какого сообщения истории начался последний обмен (подмес
 	// и вопрос), и сам вопрос: по ним /retry (этап 112, Х4) откатывает обмен
 	// целиком. -1 — откатывать нечего или история с тех пор переписана.
@@ -1060,7 +1062,13 @@ func (m *Model) stopStreaming() {
 	}
 
 	if m.streaming {
-		m.finishTurn()
+		// Ход прерван человеком: записать сессию здесь же, а не командой —
+		// прерывание редкое, а вернуть команду из stopStreaming некому.
+		if cmd := m.finishTurn(); cmd != nil {
+			if msg, ok := cmd().(autosaveDoneMsg); ok && msg.err != nil {
+				m.statusMsg = "автосохранение: " + msg.err.Error()
+			}
+		}
 	}
 	m.flushHeldAttach()
 }
@@ -1071,7 +1079,7 @@ func turnSummary(s agent.ToolStats) string {
 }
 
 // finishTurn завершает обмен: пишет ответ в журнал и сбрасывает состояние.
-func (m *Model) finishTurn() {
+func (m *Model) finishTurn() tea.Cmd {
 	m.streaming = false
 	m.events = nil
 	if m.cancel != nil {
@@ -1111,7 +1119,7 @@ func (m *Model) finishTurn() {
 	// Придержанные заметки об архиве и о состоянии графа — теперь: в середину
 	// ответа влезать нельзя, а забывать о беде — тем более.
 	m.flushHeldNotes()
-	m.autosave()
+	return m.autosave()
 }
 
 // steerQueue — очередь реплик посреди хода; заводится один раз на сеанс, до
@@ -1178,17 +1186,31 @@ func (m *Model) restoreSteer() {
 // /resume находит его первым в списке. Файл один на сеанс и переписывается
 // целиком атомарно (session.Store.SaveAs). Диалог без ответа модели файла
 // не заводит — как у Pi, файл появляется после первого ответа.
-func (m *Model) autosave() {
+//
+// Снимок снимается здесь, а сериализация и запись с fsync идут командой вне
+// цикла событий: синхронная запись занимала 5 → 81 мс на ход при 50 → 1000
+// обменов и росла с длиной сеанса (аудит 16.10.2026, находка 13). Порядок
+// записей держит номер снимка: отставший снимок не затрёт свежий.
+func (m *Model) autosave() tea.Cmd {
 	if !m.cfg.Agent.Autosave || m.store == nil || !m.conv.HasAnswer() {
-		return
+		return nil
 	}
-	id, _, err := m.store.SaveAs(m.autosaveID, m.conv, m.server.Name, m.modelName)
-	if err != nil {
-		m.statusMsg = "автосохранение: " + err.Error()
-		return
+	if m.autosaveID == "" {
+		id, err := m.store.NewID()
+		if err != nil {
+			m.statusMsg = "автосохранение: " + err.Error()
+			return nil
+		}
+		m.autosaveID = id
 	}
-	m.autosaveID = id
+	m.autosaveSeq++
+	rec := session.Snapshot(m.autosaveID, m.conv, m.server.Name, m.modelName)
+	seq, store := m.autosaveSeq, m.store
+	return func() tea.Msg { return autosaveDoneMsg{err: store.WriteSnapshot(rec, seq)} }
 }
+
+// autosaveDoneMsg — фоновая запись сессии закончилась; err — что не так.
+type autosaveDoneMsg struct{ err error }
 
 // stampTurn помечает блоки ответа завершившегося хода временем и моделью.
 //

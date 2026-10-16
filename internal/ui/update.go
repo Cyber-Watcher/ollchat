@@ -66,11 +66,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.gen.run {
 			return m, nil
 		}
+		var save tea.Cmd
 		if m.streaming {
-			m.finishTurn()
+			save = m.finishTurn()
 		}
 		m.flushHeldNotes()
-		return m, nil
+		return m, save
 
 	case reviewReadyMsg:
 		m.onReviewReady(msg)
@@ -185,6 +186,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case compactDoneMsg:
 		return m.onCompactDone(msg)
+
+	case autosaveDoneMsg:
+		if msg.err != nil {
+			m.statusMsg = "автосохранение: " + msg.err.Error()
+		}
+		return m, nil
 
 	case sessionLoadedMsg:
 		// Восстановление заменяет и историю, и ленту. Посреди хода агент
@@ -771,6 +778,15 @@ func (m *Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	if m.confirmTyping() {
 		return m, m.armConfirm()
 	}
+	// Enter при набранном, но не отправленном тексте окну не отвечает: с
+	// очередью реплик (Enter посреди хода = реплика модели) человек жмёт Enter,
+	// чтобы ОТПРАВИТЬ набранное, и через 600 мс раздумий это становилось «да»
+	// на необратимое (аудит 16.10.2026, находка 10). «Да» при тексте в поле —
+	// только буквой.
+	if key == "enter" && strings.TrimSpace(m.ta.Value()) != "" {
+		m.statusMsg = "в поле ввода есть текст: Enter окну не отвечает — «да» клавишей y/д, «нет» — n/т или Esc"
+		return m, nil
+	}
 	// Русские буквы — те, что находятся на тех же клавишах: пользователь может
 	// не переключать раскладку. Плюс «д»/«н» как первые буквы да/нет.
 	answer := agent.AnswerNo
@@ -931,11 +947,11 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 		if m.cfg.Agent.TurnSummary && ev.Tools != nil && ev.Tools.Calls > 0 {
 			m.addBlock(block{kind: blockNotice, text: turnSummary(*ev.Tools)})
 		}
-		m.finishTurn()
+		save := m.finishTurn()
 		if cmd := m.sendFollowUp(); cmd != nil {
-			return tea.Batch(m.refreshCapacityCmd(), cmd)
+			return tea.Batch(m.refreshCapacityCmd(), cmd, save)
 		}
-		return m.refreshCapacityCmd()
+		return tea.Batch(m.refreshCapacityCmd(), save)
 
 	case agent.EventSteer:
 		// Реплика из очереди легла в историю (этап 112, Х1): в ленте и в журнале —
@@ -953,9 +969,9 @@ func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 			m.addBlock(block{kind: blockError, text: ev.Err.Error()})
 			_ = m.logger.Write(chatlog.KindSystem, "Ошибка: "+ev.Err.Error())
 		}
-		m.finishTurn()
+		save := m.finishTurn()
 		m.restoreSteer()
-		return nil
+		return save
 	}
 	return nil
 }
