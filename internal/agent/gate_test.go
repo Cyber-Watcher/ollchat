@@ -119,7 +119,7 @@ func TestGateUntrustedAsksAfterForeign(t *testing.T) {
 	if asked, _, _ := drive(r, conv, AnswerNo); len(asked) != 1 {
 		t.Fatalf("чужой текст прошлого хода не учтён: вопросы %q", asked)
 	}
-	if tainted([]ollama.Message{{Role: ollama.RoleTool, ToolName: tools.NameReadFile, Content: "Пользователь отклонил выполнение"}}) {
+	if tainted([]ollama.Message{{Role: ollama.RoleTool, ToolName: tools.NameReadFile, Content: "Пользователь отклонил выполнение этого действия."}}) {
 		t.Error("отклонённый вызов посчитан чужим текстом")
 	}
 }

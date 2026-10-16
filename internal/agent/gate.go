@@ -3,9 +3,11 @@ package agent
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -46,8 +48,12 @@ func tainted(msgs []ollama.Message) bool {
 
 // refusal — результат вызова, который не исполнялся (отказ правил, человека
 // или отключённые инструменты): чужого текста в нём нет.
+//
+// Сверяются ТОЧНЫЕ строки отказов из agent.go, а не их первые слова: страница
+// или файл, начатые «Пользователь …» / «Действие …», снимали метку чужого
+// текста, и untrusted_gate молчал (аудит 16.10.2026, находка 7).
 func refusal(s string) bool {
-	for _, p := range []string{"Пользователь ", "Действие ", "Инструменты отключены", "Инструмент недоступен"} {
+	for _, p := range refusalPrefixes {
 		if strings.HasPrefix(s, p) {
 			return true
 		}
@@ -55,7 +61,72 @@ func refusal(s string) bool {
 	return false
 }
 
-var privateIP = regexp.MustCompile(`\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b`)
+// refusalPrefixes — начала результатов, которые пишет сам агент, когда вызов
+// не исполнялся. Новый текст отказа в agent.go — сюда же.
+var refusalPrefixes = []string{
+	"Пользователь прервал выполнение.",
+	"Пользователь отклонил выполнение этого действия.",
+	"Действие запрещено настройками:",
+	"Действие не выполнено:",
+	"Инструменты отключены",
+	"Инструмент недоступен",
+}
+
+// privateIP — частные адреса в тексте запроса: RFC 1918, петля, link-local
+// (метаданные облака), CGNAT 100.64/10, «любой адрес», IPv6 петля, ULA и
+// link-local, localhost. До 16.10.2026 — только три диапазона RFC 1918
+// (аудит, находка 6).
+var privateIP = regexp.MustCompile(`(?i)(\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}` +
+	`|127\.\d{1,3}(\.\d{1,3}){0,2}|169\.254\.\d{1,3}\.\d{1,3}|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost)\b` +
+	`|\[::1\]|(^|[^0-9a-f:])::1(?:[^0-9a-f:]|$)|\bf[cd][0-9a-f]{2}:[0-9a-f:]+|\bfe80:[0-9a-f:]+)`)
+
+// urlHost — хосты из адресов в тексте: их проверяют и в числовых формах
+// (`2130706433`, `0x7f000001`, `127.1`), которые регулярное выражение не видит.
+var urlHost = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://(?:[^/\s@"'<>]*@)?([^/\s:"'<>?#]+|\[[^\]]+\])`)
+
+// numericHostPrivate — хост в числовой записи, которую принимает inet_aton
+// (`2130706433`, `0x7f000001`, `127.1`, `0177.0.0.1`): частный ли адрес.
+func numericHostPrivate(host string) bool {
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsUnspecified() || cgnat(ip)
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return false
+	}
+	var vals []uint64
+	for _, p := range parts {
+		v, err := strconv.ParseUint(p, 0, 32) // 0x…, 0… и десятичные, как inet_aton
+		if err != nil {
+			return false
+		}
+		vals = append(vals, v)
+	}
+	// inet_aton: последняя часть занимает оставшиеся байты.
+	var n uint64
+	for i, v := range vals {
+		if i == len(vals)-1 {
+			n = n<<(8*uint(4-i)) | v
+		} else {
+			if v > 255 {
+				return false
+			}
+			n = n<<8 | v
+		}
+	}
+	if n > 0xffffffff {
+		return false
+	}
+	ip := net.IPv4(byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || cgnat(ip)
+}
+
+func cgnat(ip net.IP) bool {
+	v4 := ip.To4()
+	return v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
+}
 
 // sshConfigPath — шов для тестов: настоящий ~/.ssh/config в тест не берётся.
 var sshConfigPath = func() string {
@@ -104,16 +175,38 @@ func sshHosts() []string {
 // разносить.
 func privateTarget(args string) string {
 	if m := privateIP.FindString(args); m != "" {
-		return "частный адрес " + m
+		return "частный адрес " + strings.TrimSpace(m)
+	}
+	for _, m := range urlHost.FindAllStringSubmatch(args, -1) {
+		if numericHostPrivate(m[1]) {
+			return "частный адрес " + m[1]
+		}
 	}
 	low := strings.ToLower(args)
 	for _, h := range sshHosts() {
-		re := regexp.MustCompile(`(^|[^a-z0-9.-])` + regexp.QuoteMeta(h) + `($|[^a-z0-9-])`)
-		if re.MatchString(low) {
+		if sshHostRe(h).MatchString(low) {
 			return "имя хоста из ~/.ssh/config"
 		}
 	}
 	return ""
+}
+
+var (
+	sshReMu sync.Mutex
+	sshRe   = map[string]*regexp.Regexp{}
+)
+
+// sshHostRe — выражение для имени хоста, собранное один раз на имя, а не на
+// каждый вызов (до 16.10.2026 компилировалось в цикле при каждом запросе).
+func sshHostRe(h string) *regexp.Regexp {
+	sshReMu.Lock()
+	defer sshReMu.Unlock()
+	re, ok := sshRe[h]
+	if !ok {
+		re = regexp.MustCompile(`(^|[^a-z0-9.-])` + regexp.QuoteMeta(h) + `($|[^a-z0-9-])`)
+		sshRe[h] = re
+	}
+	return re
 }
 
 // gate ужесточает решение Guard проверками agent.* (этап 112: Н6, Н16, Т7/О15, Ч3).
