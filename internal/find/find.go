@@ -26,6 +26,7 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 )
 
 // Deps — что нужно поиску. Всё передаётся явно: пакет ничего не открывает
@@ -464,8 +465,11 @@ func Books(ctx context.Context, d Deps, search, question string, o Opts) ([]kb.R
 	// как есть. Не ответила модель — ищем без перевода и говорим об этом.
 	if d.Translator != nil {
 		if en, err := d.Translator.Translate(ctx, question); err != nil {
+			// В note идёт причина без текста ошибки: `err.Error()` клиента
+			// HTTP несёт адрес сервера модели, а note видят модель и клиент
+			// MCP (аудит 16.10.2026, находка 9; закон 3).
 			if why == "" {
-				why = "перевод вопроса не получен (" + err.Error() + ") — искал без него"
+				why = "перевод вопроса не получен (" + qtranslate.Reason(err) + ") — искал без него"
 			}
 		} else if en != "" {
 			o.WordsExtra = strings.TrimSpace(o.WordsExtra + " " + en)

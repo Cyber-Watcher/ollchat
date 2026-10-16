@@ -15,6 +15,8 @@ package qtranslate
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,36 @@ type Translator struct {
 	mu    sync.Mutex
 	cache map[string]string
 	order []string
+	// failUntil — до этого времени переводчик не зовёт модель после отказа
+	// сервера: один отказ соединения стоил 6,0 с на каждый поиск (повторы
+	// клиента; проба аудита 16.10.2026), и лежащий сервер перевода тормозил
+	// бы каждый вопрос, пока его не поднимут.
+	failUntil time.Time
+	now       func() time.Time
+}
+
+// Cooldown — сколько не звать модель после отказа сервера перевода.
+const Cooldown = time.Minute
+
+// ErrCooldown — перевод пропущен: сервер недавно отказал.
+var ErrCooldown = errors.New("сервер перевода недавно не ответил, перевод пропущен до следующей минуты")
+
+// Reason — причина отказа перевода для человека и для note выдачи: без
+// адресов и текста ошибки клиента HTTP (там стоит адрес сервера модели,
+// а note уходит модели и клиенту MCP — закон 3).
+func Reason(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrCooldown):
+		return "сервер перевода недавно не ответил, пауза минуту"
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("модель не ответила за %s", Timeout)
+	case errors.Is(err, context.Canceled):
+		return "запрос отменён"
+	default:
+		return "сервер перевода недоступен"
+	}
 }
 
 // New — переводчик по настройкам или nil, если kb.translate выключен или
@@ -83,10 +115,18 @@ func (t *Translator) Translate(ctx context.Context, question string) (string, er
 	if t == nil || t.ex == nil || !HasCyrillic(question) {
 		return "", nil
 	}
+	now := time.Now
+	if t.now != nil {
+		now = t.now
+	}
 	t.mu.Lock()
 	if en, ok := t.cache[question]; ok {
 		t.mu.Unlock()
 		return en, nil
+	}
+	if now().Before(t.failUntil) {
+		t.mu.Unlock()
+		return "", ErrCooldown
 	}
 	t.mu.Unlock()
 
@@ -94,6 +134,12 @@ func (t *Translator) Translate(ctx context.Context, question string) (string, er
 	defer cancel()
 	raw, err := t.ex.Extract(ctx, Prompt, question)
 	if err != nil {
+		// Отмена своим контекстом — не отказ сервера: паузу не ставим.
+		if !errors.Is(err, context.Canceled) {
+			t.mu.Lock()
+			t.failUntil = now().Add(Cooldown)
+			t.mu.Unlock()
+		}
 		return "", err
 	}
 	en := Clean(raw)
