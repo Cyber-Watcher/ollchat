@@ -1475,7 +1475,10 @@ func Default() *Config {
 			Ask:          []string{"Write(./**)", "Bash(*)", "Fetch(*)"},
 			Irreversible: append([]string(nil), DefaultIrreversible...),
 			Deny: []string{
-				"Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
+				// Копии перед правкой (.ollchat/backups) — зеркало файлов: без
+				// этого запрета правка ./.env клала копию, которую Read(./**)
+				// разрешал (аудит 16.10.2026, находка 11). Соседи .env тоже закрыты.
+				"Read(./.env)", "Read(./.env.*)", "Read(./.ollchat/backups/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
 				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
 				"Bash(mount:*)", "Bash(umount:*)",
 				"Bash(sudo:*)", "Bash(su:*)", "Bash(useradd:*)", "Bash(userdel:*)", "Bash(passwd:*)", "Bash(visudo:*)",

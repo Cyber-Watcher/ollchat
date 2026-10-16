@@ -298,7 +298,9 @@ irreversible = [
 ]
 deny = [
   # чувствительные файлы
-  "Read(./.env)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
+  # .ollchat/backups — копии файлов перед правкой: зеркало, на которое запрет чтения
+  # исходника иначе не распространялся бы
+  "Read(./.env)", "Read(./.env.*)", "Read(./.ollchat/backups/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
   # удаление и работа с дисками
   "Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
   "Bash(mount:*)", "Bash(umount:*)",
