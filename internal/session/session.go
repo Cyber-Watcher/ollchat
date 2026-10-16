@@ -161,10 +161,17 @@ type Saved struct {
 }
 
 // Store — каталог с сохранёнными сессиями.
-type Store struct{ dir string }
+type Store struct {
+	dir string
+
+	// mu и lastSeq — порядок фоновых записей (WriteSnapshot): снимок с меньшим
+	// номером, пришедший позже, не затирает более новый.
+	mu      sync.Mutex
+	lastSeq map[string]uint64
+}
 
 // NewStore создаёт хранилище сессий в указанном каталоге.
-func NewStore(dir string) *Store { return &Store{dir: dir} }
+func NewStore(dir string) *Store { return &Store{dir: dir, lastSeq: map[string]uint64{}} }
 
 // Dir возвращает каталог хранилища.
 func (s *Store) Dir() string { return s.dir }
@@ -195,6 +202,8 @@ func (s *Store) SaveAs(id string, c *Conversation, server, model string) (string
 		if id, err = s.newID(now); err != nil {
 			return "", "", err
 		}
+	} else if !ValidID(id) {
+		return "", "", fmt.Errorf("идентификатор сессии %q недопустим: только латиница, цифры, «_» и «-»", id)
 	}
 	rec := Saved{
 		ID:       id,
@@ -213,6 +222,46 @@ func (s *Store) SaveAs(id string, c *Conversation, server, model string) (string
 		return "", "", err
 	}
 	return id, path, nil
+}
+
+// NewID — идентификатор для новой сессии, которую будут писать снимками
+// (WriteSnapshot): автосохранению нужен id до первой фоновой записи.
+func (s *Store) NewID() (string, error) {
+	if err := privateDir(s.dir); err != nil {
+		return "", err
+	}
+	return s.newID(time.Now())
+}
+
+// Snapshot — запись сессии, снятая в цикле событий для записи вне его: копия
+// сообщений дешева, а сериализация и запись с fsync — нет (аудит 16.10.2026,
+// находка 13: при 1000 обменах одно синхронное сохранение занимало 81 мс цикла
+// событий и росло с длиной сеанса).
+func Snapshot(id string, c *Conversation, server, model string) Saved {
+	return Saved{ID: id, SavedAt: time.Now(), Server: server, Model: model, System: c.System(), Messages: c.Messages()}
+}
+
+// WriteSnapshot пишет снимок с порядковым номером seq (растёт у вызывающего).
+// Снимок старее уже записанного для того же id пропускается: фоновые записи
+// могут обогнать друг друга, а на диске должен остаться самый свежий.
+func (s *Store) WriteSnapshot(rec Saved, seq uint64) error {
+	if !ValidID(rec.ID) {
+		return fmt.Errorf("идентификатор сессии %q недопустим: только латиница, цифры, «_» и «-»", rec.ID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if seq < s.lastSeq[rec.ID] {
+		return nil
+	}
+	s.lastSeq[rec.ID] = seq
+	if err := privateDir(s.dir); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsx.WriteFileAtomic(filepath.Join(s.dir, rec.ID+".json"), data, 0o600)
 }
 
 // newID — идентификатор нового сохранения: время до секунды, как раньше,
@@ -291,11 +340,34 @@ func (s *Store) load(path string) (*Saved, error) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, fmt.Errorf("разбор сессии %s: %w", path, err)
 	}
+	// Идентификатор — имя файла, а не поле внутри него: подложенный или
+	// скопированный с другой машины файл с `"id":"../x"` или с чужим id
+	// выводил автосохранение за каталог либо затирал чужую сессию
+	// (аудит 16.10.2026, находка 5; каталог сессий будет ходить между
+	// машинами, как и этот проект).
+	rec.ID = strings.TrimSuffix(filepath.Base(path), ".json")
 	return &rec, nil
+}
+
+// ValidID — идентификатор сессии пригоден как имя файла: только латиница,
+// цифры, «_» и «-». Всё прочее (`..`, разделители, пробелы) — отказ.
+func ValidID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // Load восстанавливает сессию по идентификатору. Пустой id — самая свежая сессия.
 func (s *Store) Load(id string) (*Saved, error) {
+	if id != "" && !ValidID(id) {
+		return nil, fmt.Errorf("идентификатор сессии %q недопустим: только латиница, цифры, «_» и «-»", id)
+	}
 	if id == "" {
 		list, err := s.List()
 		if err != nil {
