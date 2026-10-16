@@ -574,7 +574,7 @@ func EvidenceWindow(text, src, dst string, runes int) string {
 func EntitySnippet(text string, names []string, runes int) string {
 	if at := NameAt(text, names); at >= 0 {
 		r := []rune(text)
-		from := max(len([]rune(text[:at]))-runes/3, 0)
+		from := max(at-runes/3, 0)
 		if from > 0 {
 			return "…" + cut(string(r[from:]), runes)
 		}
@@ -582,18 +582,26 @@ func EntitySnippet(text string, names []string, runes int) string {
 	return cut(text, runes)
 }
 
-// NameAt — байтовое место первого вхождения первого из имён, стоящего в тексте
-// отдельным словом (без учёта регистра): «Go» внутри «good» не считается.
-// -1 — ни одного.
+// NameAt — место (в РУНАХ, не в байтах) первого вхождения первого из имён,
+// стоящего в тексте отдельным словом (без учёта регистра): «Go» внутри «good»
+// не считается. -1 — ни одного.
+//
+// Сравнение идёт по рунам, приведённым к строчным поштучно: `strings.ToLower`
+// меняет длину строки в байтах («Ⱥ» → «ⱥ» длиннее, «İ» → «i» короче), и
+// байтовый сдвиг из строчной копии, приложенный к исходному тексту, выходил за
+// его конец — карточка понятия падала (аудит 16.10.2026, находка 8).
 func NameAt(text string, names []string) int {
-	low := strings.ToLower(text)
+	low := lowerRunes(text)
 	for _, n := range names {
-		w := strings.ToLower(strings.TrimSpace(n))
-		if w == "" {
+		w := lowerRunes(strings.TrimSpace(n))
+		if len(w) == 0 {
 			continue
 		}
-		for _, i := range allIndexes(low, w) {
-			if wordEdge(low, i, i+len(w)) {
+		for i := 0; i+len(w) <= len(low); i++ {
+			if !runesEqual(low[i:i+len(w)], w) {
+				continue
+			}
+			if runeWordEdge(low, i, i+len(w)) {
 				return i
 			}
 		}
@@ -601,20 +609,33 @@ func NameAt(text string, names []string) int {
 	return -1
 }
 
-// wordEdge — слово low[i:j] не продолжает соседнее: слева и справа не буква
-// и не цифра.
-func wordEdge(low string, i, j int) bool {
-	if i > 0 {
-		r, _ := utf8.DecodeLastRuneInString(low[:i])
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+// lowerRunes — руны текста, каждая приведена к строчной: длина равна длине
+// исходного текста в рунах.
+func lowerRunes(s string) []rune {
+	r := []rune(s)
+	for i, c := range r {
+		r[i] = unicode.ToLower(c)
+	}
+	return r
+}
+
+func runesEqual(a, b []rune) bool {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
-	if j < len(low) {
-		r, _ := utf8.DecodeRuneInString(low[j:])
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return false
-		}
+	return true
+}
+
+// runeWordEdge — слово low[i:j] не продолжает соседнее: слева и справа не буква
+// и не цифра.
+func runeWordEdge(low []rune, i, j int) bool {
+	if i > 0 && (unicode.IsLetter(low[i-1]) || unicode.IsDigit(low[i-1])) {
+		return false
+	}
+	if j < len(low) && (unicode.IsLetter(low[j]) || unicode.IsDigit(low[j])) {
+		return false
 	}
 	return true
 }
