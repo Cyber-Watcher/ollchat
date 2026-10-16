@@ -159,7 +159,7 @@ func (g *Guard) Check(req Request) Result {
 		return Result{Decision: DecisionDeny, Rule: r,
 			Reason: fmt.Sprintf("запрещено правилом %s", r.Source)}
 	}
-	if why := ownDir(req, g.sandbox); why != "" {
+	if why := protectedDir(req, g.sandbox); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
 	// Цель, заданная настройкой, а не моделью: спрашивать не о чем.
@@ -233,7 +233,7 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 		return Result{Decision: DecisionDeny, Rule: verdict.rule,
 			Reason: fmt.Sprintf("запрещено правилом %s (часть команды: %s)", verdict.rule.Source, verdict.part)}
 	}
-	if why := ownDir(req, g.sandbox); why != "" {
+	if why := protectedDir(req, g.sandbox); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
 	// Имя программы станет известно только при запуске (`$X -rf ~`,

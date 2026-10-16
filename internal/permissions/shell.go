@@ -122,8 +122,14 @@ type commandScan struct {
 	named string
 	// truncates — цели перенаправлений `>` и `>|`, которые обнулят файл перед
 	// записью (этап 112, Т9: перезапись существующего файла необратима; `>>`
-	// дописывает и сюда не идёт). Цель с подстановкой не записывается.
+	// дописывает и идёт в appends). Цель с подстановкой — в dynWrites.
 	truncates []string
+	// appends — цели `>>`: файл не обнуляется, но запись в него есть
+	// (защита каталогов ollchat и git, аудит 16.10.2026).
+	appends []string
+	// dynWrites — цели записи с подстановкой (`> "$PWD/x"`): путь неизвестен,
+	// известен только текст.
+	dynWrites []string
 }
 
 // scanCommands находит все команды, которые запустит строка cmd.
@@ -1331,8 +1337,15 @@ func (l *shellLexer) endWord() {
 		l.heredoc = 0
 	case l.redirect:
 		l.redirect = false
-		if (l.redirOp == ">" || l.redirOp == ">|") && !w.dynamic && l.scan != nil {
-			l.scan.truncates = append(l.scan.truncates, text)
+		if l.scan != nil && (l.redirOp == ">" || l.redirOp == ">|" || l.redirOp == ">>") {
+			switch {
+			case w.dynamic:
+				l.scan.dynWrites = append(l.scan.dynWrites, text)
+			case l.redirOp == ">>":
+				l.scan.appends = append(l.scan.appends, text)
+			default:
+				l.scan.truncates = append(l.scan.truncates, text)
+			}
 		}
 	case !w.quoted && (text == "{" || text == "}"):
 		// Группа команд: { rm -rf x; } — скобка отделяет команды, как «;».
