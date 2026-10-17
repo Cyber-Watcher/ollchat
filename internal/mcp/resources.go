@@ -49,6 +49,14 @@ func chunkID(uri string) (string, bool) {
 	if i <= 0 || i == len(rest)-1 || !strings.Contains(rest[:i], "/") {
 		return "", false
 	}
+	// Пустой сегмент головы — не адрес куска: `kb:////0` давал id `/#0`,
+	// `kb:///a/1` — `/a#1` (пустая коллекция уходила в kb_read вместо отказа
+	// «нет такого ресурса»; найдено фаззингом 17.10.2026, FuzzChunkID).
+	for _, seg := range strings.Split(rest[:i], "/") {
+		if seg == "" {
+			return "", false
+		}
+	}
 	return rest[:i] + "#" + rest[i+1:], true
 }
 
