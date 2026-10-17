@@ -563,6 +563,13 @@ func grepSearch(ctx context.Context, root string, re *searchRE, glob string, lim
 		if matches >= limit {
 			return fs.SkipAll
 		}
+		// Охранник видит только каталог-цель; .env и .env.* внутри него —
+		// тайны, которых модели читать нельзя ни в каком режиме (этап 119,
+		// решение владельца 17.10.2026). Ссылку судим и по файлу, куда она
+		// ведёт: os.Open ниже идёт по ней насквозь.
+		if permissions.IsEnvName(d.Name()) || (d.Type()&fs.ModeSymlink != 0 && permissions.EnvFile(p)) {
+			return nil
+		}
 		if glob != "" {
 			ok, _ := filepath.Match(glob, d.Name())
 			if !ok {

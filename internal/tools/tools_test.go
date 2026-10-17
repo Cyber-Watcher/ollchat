@@ -168,6 +168,51 @@ func TestGrep(t *testing.T) {
 	}
 }
 
+// grep по каталогу не читает .env и .env.* внутри него (этап 119, решение
+// владельца 17.10.2026): охранник видит только каталог-цель, файлы обхода
+// отсекает сам инструмент — в том числе через ссылку с безобидным именем.
+func TestGrepSkipsEnvFiles(t *testing.T) {
+	r, root := newTestRegistry(t)
+	files := map[string]string{
+		"sub/.env":         "TOKEN=выдуманный1\n",
+		"a/b/.env.local":   "TOKEN=выдуманный2\n",
+		".env.example":     "TOKEN=выдуманный3\n",
+		"sub/.env.example": "TOKEN=выдуманный4\n",
+		"env.txt":          "TOKEN=обычный1\n",
+		"my.env":           "TOKEN=обычный2\n",
+		".environment":     "TOKEN=обычный3\n",
+		"dotenv.go":        "// TOKEN=обычный4\n",
+	}
+	for p, body := range files {
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join("sub", ".env"), filepath.Join(root, "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := r.Plan(NameGrep, map[string]any{"pattern": "TOKEN"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	out, err := plan.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "выдуманный") {
+		t.Errorf("grep прочитал файл .env:\n%s", out)
+	}
+	for _, p := range []string{"env.txt", "my.env", ".environment", "dotenv.go"} {
+		if !strings.Contains(out, p+":1") {
+			t.Errorf("обычный файл %s пропущен:\n%s", p, out)
+		}
+	}
+}
+
 func TestBashPlanTargetIsCommand(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	plan, err := r.Plan(NameBash, map[string]any{"command": "echo привет"})

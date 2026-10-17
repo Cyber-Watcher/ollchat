@@ -162,6 +162,9 @@ func (g *Guard) Check(req Request) Result {
 	if why := protectedDir(req, g.sandbox, nil); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
+	if why := envFile(req); why != "" {
+		return Result{Decision: DecisionDeny, Reason: why}
+	}
 	// Цель, заданная настройкой, а не моделью: спрашивать не о чем.
 	// Проверка идёт после deny — запрет остаётся сильнее всего.
 	if req.Fixed {

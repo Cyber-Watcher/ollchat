@@ -140,6 +140,48 @@ func protectedDir(req Request, sb *Sandbox, scan *commandScan) string {
 	return ""
 }
 
+// IsEnvName — имя файла с тайнами окружения: ровно `.env` или `.env.<что
+// угодно>` (`.env.local`, `.env.prod`, `.env.example` и копия `.env.150405`
+// в .ollchat/backups). `.envrc`, `.environment`, `env.txt`, `my.env` — не они.
+// name — последний элемент пути, а не путь.
+func IsEnvName(name string) bool {
+	return name == ".env" || strings.HasPrefix(name, ".env.")
+}
+
+// EnvFile — путь p называет файл .env: по своему последнему элементу или по
+// последнему элементу файла, куда ведёт ссылка (`notes.txt → sub/.env`).
+// Ссылка, которой нет на диске, судится по своему имени.
+func EnvFile(p string) bool {
+	if IsEnvName(filepath.Base(p)) {
+		return true
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil && IsEnvName(filepath.Base(real)) {
+		return true
+	}
+	return false
+}
+
+// envFile — запрет модели читать `.env` и `.env.*` в ЛЮБОМ каталоге (этап
+// 119, решение владельца 17.10.2026: в коде, без исключений, включая
+// `.env.example`). Правила шаблона `Read(./.env)` и `Read(./.env.*)` закрывали
+// только корень песочницы, а `Read(./**)` разрешал `sub/.env`. Запрет в коде,
+// а не в списке deny, по той же причине, что protectedDir: у людей свои
+// списки deny. Действует во всех режимах, даже в yolo, как защищённые
+// каталоги: yolo снимает вопросы, а не запреты, и тайна, ушедшая в модель,
+// назад не возвращается.
+//
+// Проверяются цели KindRead — read_file, grep, list_dir, view_image, чтение
+// исходника scan_redact, /add. Файлы .env внутри каталога, по которому идёт
+// grep, отсекает сам grep (tools.grepSearch, по IsEnvName/EnvFile). Чтение
+// через bash (`cat sub/.env`) этим не закрыто: разбор строки целей чтения не
+// собирает.
+func envFile(req Request) string {
+	if req.Kind != KindRead || !EnvFile(req.Target) {
+		return ""
+	}
+	return fmt.Sprintf("файл %s — переменные окружения с тайнами (.env, .env.*): модели читать его нельзя ни в каком режиме", filepath.Base(req.Target))
+}
+
 // SetIrreversible задаёт список правил класса «необратимое».
 func (s *Set) SetIrreversible(list []string, root string) error {
 	rules, err := compileList(list, root, "permissions.irreversible")

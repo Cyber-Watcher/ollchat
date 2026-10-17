@@ -1489,6 +1489,11 @@ func Default() *Config {
 				// Копии перед правкой (.ollchat/backups) — зеркало файлов: без
 				// этого запрета правка ./.env клала копию, которую Read(./**)
 				// разрешал (аудит 16.10.2026, находка 11). Соседи .env тоже закрыты.
+				// Правила Read(./.env) и Read(./.env.*) закрывают только корень
+				// песочницы; .env и .env.* в ЛЮБОМ каталоге (sub/.env,
+				// a/b/.env.local) с этапа 119 закрыты кодом во всех режимах —
+				// permissions.envFile, grep по каталогу их пропускает. Здесь
+				// правила оставлены: безвредны и видны в /permissions.
 				"Read(./.env)", "Read(./.env.*)", "Read(./.ollchat/backups/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Write(~/.ssh/**)",
 				"Bash(rm:*)", "Bash(rmdir:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(mkfs.ext4:*)", "Bash(fdisk:*)", "Bash(parted:*)",
 				"Bash(mount:*)", "Bash(umount:*)",
