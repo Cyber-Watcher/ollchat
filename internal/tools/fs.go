@@ -558,6 +558,10 @@ func grepSearch(ctx context.Context, root string, re *searchRE, glob string, lim
 					return fs.SkipDir
 				}
 			}
+			// Каталог с именем .env — те же тайны, что файл .env (этап 119).
+			if p != root && permissions.IsEnvName(d.Name()) {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if matches >= limit {
@@ -565,9 +569,10 @@ func grepSearch(ctx context.Context, root string, re *searchRE, glob string, lim
 		}
 		// Охранник видит только каталог-цель; .env и .env.* внутри него —
 		// тайны, которых модели читать нельзя ни в каком режиме (этап 119,
-		// решение владельца 17.10.2026). Ссылку судим и по файлу, куда она
-		// ведёт: os.Open ниже идёт по ней насквозь.
-		if permissions.IsEnvName(d.Name()) || (d.Type()&fs.ModeSymlink != 0 && permissions.EnvFile(p)) {
+		// решение владельца 17.10.2026). Ссылку судим и по месту, куда она
+		// ведёт (файл .env или что-то в каталоге .env): os.Open ниже идёт по
+		// ней насквозь.
+		if permissions.IsEnvName(d.Name()) || (d.Type()&fs.ModeSymlink != 0 && permissions.EnvPath(p, opts.Sandbox.RealRoot())) {
 			return nil
 		}
 		if glob != "" {

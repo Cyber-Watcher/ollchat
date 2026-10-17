@@ -148,38 +148,145 @@ func IsEnvName(name string) bool {
 	return name == ".env" || strings.HasPrefix(name, ".env.")
 }
 
-// EnvFile — путь p называет файл .env: по своему последнему элементу или по
-// последнему элементу файла, куда ведёт ссылка (`notes.txt → sub/.env`).
-// Ссылка, которой нет на диске, судится по своему имени.
-func EnvFile(p string) bool {
-	if IsEnvName(filepath.Base(p)) {
+// envIn — среди элементов пути p есть имя .env или .env.*. Внутри корня root
+// судятся только элементы ниже него: проект, лежащий в `~/.env.d/proj`, не
+// закрывает сам себя. root == "" — судятся все элементы.
+func envIn(p, root string) bool {
+	p = filepath.Clean(p)
+	if root != "" {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			p = rel
+		}
+	}
+	for _, el := range strings.Split(p, string(filepath.Separator)) {
+		if IsEnvName(el) {
+			return true
+		}
+	}
+	return false
+}
+
+// EnvPath — путь p ведёт к тайнам окружения: сам файл `.env`/`.env.*`, что
+// угодно внутри КАТАЛОГА с таким именем (`.env/prod`) или ссылка на одно из
+// них (`notes.txt → sub/.env`, `cfg → .env/`). Относительный путь и `~/`
+// считаются от корня root, элементы пути судятся ниже него (envIn).
+//
+// Ссылка, которой нет на диске (`x → .env`, а `.env` ещё не создан), судится
+// по тексту ссылки: запись через неё создала бы сам `.env`.
+func EnvPath(p, root string) bool {
+	abs := resolveTarget(p, root)
+	if envIn(abs, root) {
 		return true
 	}
-	if real, err := filepath.EvalSymlinks(p); err == nil && IsEnvName(filepath.Base(real)) {
+	realRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = r
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return envIn(real, realRoot)
+	}
+	if link, err := os.Readlink(abs); err == nil {
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(abs), link)
+		}
+		return envIn(link, root) || envIn(link, realRoot)
+	}
+	return false
+}
+
+// envFile — запрет модели читать и писать `.env` и `.env.*` в ЛЮБОМ каталоге
+// и что угодно в каталоге с таким именем (этап 119, решение владельца
+// 17.10.2026: в коде, без исключений, включая `.env.example`). Правила шаблона
+// `Read(./.env)` и `Read(./.env.*)` закрывали только корень песочницы, а
+// `Read(./**)` разрешал `sub/.env`. Запрет в коде, а не в списке deny, по той
+// же причине, что protectedDir: у людей свои списки deny. Действует во всех
+// режимах, даже в yolo, как защищённые каталоги: yolo снимает вопросы, а не
+// запреты, и тайна, ушедшая в модель, назад не возвращается. Запись закрыта
+// тоже: `edit_file .env` показал бы модели старый текст в ответе об ошибке
+// сверки, а запись поверх — подмена тайн, которой человек не заметит.
+//
+// Цели KindRead — read_file, grep, list_dir, view_image, чтение исходника
+// scan_redact, /add; KindWrite — write_file, edit_file. Файлы .env внутри
+// каталога, по которому идёт grep, отсекает сам grep (tools.grepSearch, по
+// IsEnvName/EnvPath). Строку bash судит envBash.
+func envFile(req Request, root string) string {
+	if req.Kind != KindRead && req.Kind != KindWrite || !EnvPath(req.Target, root) {
+		return ""
+	}
+	verb := "читать"
+	if req.Kind == KindWrite {
+		verb = "писать"
+	}
+	return fmt.Sprintf("%s — переменные окружения с тайнами (.env, .env.*, каталог .env): модели %s его нельзя ни в каком режиме", req.Target, verb)
+}
+
+// envBash — запрет строки bash, которая называет `.env`: в любом слове любой
+// команды строки, в теле `sh -c` и eval, в цели перенаправления (`< .env`,
+// `> .env`), в аргументе ключа (`--env-file=.env`, `if=.env`) и в коде
+// интерпретатора (`python3 -c "open('.env')"`). Слово делится на части по
+// знакам, которых в пути не бывает (пробел, кавычки, скобки, `=`, `,`, `:`,
+// `;`), и каждая часть судится как путь (EnvPath). Шаблон имён (`.e*`,
+// `*/.env*`) раскрывается по диску, как его раскроет оболочка: `*` не берёт
+// имя с точкой в начале, если точки нет в самом шаблоне.
+//
+// Чего разбор строки не видит: программы, читающие каталог целиком (`grep -r
+// KEY .`, `cat *` при dotglob, `tar c .`, `find -exec cat`), имя, собранное
+// при запуске (`cat $(printf .en)v`), и скрипт, записанный раньше. От них
+// защищает только изоляция (sandbox.isolation).
+func envBash(scan *commandScan, root string) string {
+	for _, w := range scan.words {
+		for _, part := range strings.FieldsFunc(w.text, notPathRune) {
+			if EnvPath(part, root) {
+				return fmt.Sprintf("строка называет %s — переменные окружения с тайнами (.env, .env.*, каталог .env): модели читать и писать их нельзя ни в каком режиме", part)
+			}
+			if w.dynamic && strings.ContainsAny(part, "*?[") {
+				if m := envGlob(part, root); m != "" {
+					return fmt.Sprintf("шаблон %s раскроется в %s — переменные окружения с тайнами: модели читать и писать их нельзя ни в каком режиме", part, m)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// notPathRune — знак, которого в пути из командной строки не бывает.
+func notPathRune(r rune) bool {
+	switch r {
+	case ' ', '\t', '\n', '"', '\'', '`', '(', ')', '=', ',', ':', ';', '<', '>', '|', '&', '{', '}', '$':
 		return true
 	}
 	return false
 }
 
-// envFile — запрет модели читать `.env` и `.env.*` в ЛЮБОМ каталоге (этап
-// 119, решение владельца 17.10.2026: в коде, без исключений, включая
-// `.env.example`). Правила шаблона `Read(./.env)` и `Read(./.env.*)` закрывали
-// только корень песочницы, а `Read(./**)` разрешал `sub/.env`. Запрет в коде,
-// а не в списке deny, по той же причине, что protectedDir: у людей свои
-// списки deny. Действует во всех режимах, даже в yolo, как защищённые
-// каталоги: yolo снимает вопросы, а не запреты, и тайна, ушедшая в модель,
-// назад не возвращается.
-//
-// Проверяются цели KindRead — read_file, grep, list_dir, view_image, чтение
-// исходника scan_redact, /add. Файлы .env внутри каталога, по которому идёт
-// grep, отсекает сам grep (tools.grepSearch, по IsEnvName/EnvFile). Чтение
-// через bash (`cat sub/.env`) этим не закрыто: разбор строки целей чтения не
-// собирает.
-func envFile(req Request) string {
-	if req.Kind != KindRead || !EnvFile(req.Target) {
+// envGlob раскрывает шаблон имён по диску и возвращает первое совпадение,
+// ведущее к .env; "" — таких нет. Совпадение засчитывается, как его засчитает
+// оболочка без dotglob: элемент с точкой в начале — только если шаблон этого
+// элемента тоже начинается с точки.
+func envGlob(pattern, root string) string {
+	abs := resolveTarget(pattern, root)
+	matches, err := filepath.Glob(abs)
+	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("файл %s — переменные окружения с тайнами (.env, .env.*): модели читать его нельзя ни в каком режиме", filepath.Base(req.Target))
+	pat := strings.Split(filepath.Clean(abs), string(filepath.Separator))
+	for _, m := range matches {
+		els := strings.Split(filepath.Clean(m), string(filepath.Separator))
+		if len(els) != len(pat) {
+			continue
+		}
+		hidden := false
+		for i := range els {
+			if strings.HasPrefix(els[i], ".") && !strings.HasPrefix(pat[i], ".") {
+				hidden = true
+				break
+			}
+		}
+		if !hidden && EnvPath(m, root) {
+			return m
+		}
+	}
+	return ""
 }
 
 // SetIrreversible задаёт список правил класса «необратимое».

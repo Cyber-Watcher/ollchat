@@ -162,7 +162,7 @@ func (g *Guard) Check(req Request) Result {
 	if why := protectedDir(req, g.sandbox, nil); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
-	if why := envFile(req); why != "" {
+	if why := envFile(req, g.envRoot()); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
 	// Цель, заданная настройкой, а не моделью: спрашивать не о чем.
@@ -193,6 +193,16 @@ func (g *Guard) Check(req Request) Result {
 	}
 	return Result{Decision: applyMode(decision, req.Kind, mode), Rule: rule,
 		Reason: reasonForMode(req.Kind, mode)}
+}
+
+// envRoot — корень, от которого судятся пути к .env (envFile, envBash):
+// настоящий корень песочницы; без песочницы "" — относительный путь
+// судится от каталога процесса, элементы пути — все.
+func (g *Guard) envRoot() string {
+	if g.sandbox != nil {
+		return g.sandbox.RealRoot()
+	}
+	return ""
 }
 
 // allowedPipeline проверяет, разрешена ли правилами КАЖДАЯ часть составной
@@ -240,6 +250,13 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 	// и irreversible (ревью, замечание 7). Под `Bash(*)` разбора нет, но туда
 	// и не доходит: запрет вернулся выше.
 	if why := protectedDir(req, g.sandbox, verdict.scan); why != "" {
+		return Result{Decision: DecisionDeny, Reason: why}
+	}
+	scan := verdict.scan
+	if scan == nil {
+		scan = scanCommands(req.Target)
+	}
+	if why := envBash(scan, g.envRoot()); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
 	// Имя программы станет известно только при запуске (`$X -rf ~`,

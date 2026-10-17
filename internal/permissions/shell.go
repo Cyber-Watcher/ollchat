@@ -130,6 +130,10 @@ type commandScan struct {
 	// dynWrites — цели записи с подстановкой (`> "$PWD/x"`): путь неизвестен,
 	// известен только текст.
 	dynWrites []string
+	// words — все слова строки после снятия кавычек, во всех вложенных
+	// разборах и с целями перенаправлений любого направления; без
+	// разделителей встроенных документов. По ним envBash ищет имя .env.
+	words []shellWord
 }
 
 // scanCommands находит все команды, которые запустит строка cmd.
@@ -156,6 +160,7 @@ func scanCommands(cmd string) *commandScan {
 	for i, a := range args {
 		words[i] = shellWord{text: a}
 	}
+	s.words = append(s.words, words...)
 	s.command(words, 0)
 	return s
 }
@@ -1331,6 +1336,9 @@ func (l *shellLexer) endWord() {
 		w.dynamic = true
 	}
 	l.resetWord()
+	if l.scan != nil && l.heredoc == 0 {
+		l.scan.words = append(l.scan.words, w)
+	}
 	switch {
 	case l.heredoc != 0:
 		l.pending = append(l.pending, hereDoc{delim: text, quoted: w.quoted, strip: l.heredoc == 2})

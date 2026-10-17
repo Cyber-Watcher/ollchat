@@ -178,6 +178,9 @@ func TestGrepSkipsEnvFiles(t *testing.T) {
 		"a/b/.env.local":   "TOKEN=выдуманный2\n",
 		".env.example":     "TOKEN=выдуманный3\n",
 		"sub/.env.example": "TOKEN=выдуманный4\n",
+		".env/prod.conf":   "TOKEN=выдуманный5\n", // каталог с именем .env
+		"x/.env.d/a.conf":  "TOKEN=выдуманный6\n",
+		"target/inner.txt": "TOKEN=обычный5\n",
 		"env.txt":          "TOKEN=обычный1\n",
 		"my.env":           "TOKEN=обычный2\n",
 		".environment":     "TOKEN=обычный3\n",
@@ -195,6 +198,10 @@ func TestGrepSkipsEnvFiles(t *testing.T) {
 	if err := os.Symlink(filepath.Join("sub", ".env"), filepath.Join(root, "notes.txt")); err != nil {
 		t.Fatal(err)
 	}
+	// Ссылка на файл внутри каталога .env: имя у неё безобидное.
+	if err := os.Symlink(filepath.Join(".env", "prod.conf"), filepath.Join(root, "prod-link.txt")); err != nil {
+		t.Fatal(err)
+	}
 	plan, err := r.Plan(NameGrep, map[string]any{"pattern": "TOKEN"})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
@@ -206,7 +213,7 @@ func TestGrepSkipsEnvFiles(t *testing.T) {
 	if strings.Contains(out, "выдуманный") {
 		t.Errorf("grep прочитал файл .env:\n%s", out)
 	}
-	for _, p := range []string{"env.txt", "my.env", ".environment", "dotenv.go"} {
+	for _, p := range []string{"env.txt", "my.env", ".environment", "dotenv.go", "target/inner.txt"} {
 		if !strings.Contains(out, p+":1") {
 			t.Errorf("обычный файл %s пропущен:\n%s", p, out)
 		}
