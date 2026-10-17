@@ -159,7 +159,7 @@ func (g *Guard) Check(req Request) Result {
 		return Result{Decision: DecisionDeny, Rule: r,
 			Reason: fmt.Sprintf("запрещено правилом %s", r.Source)}
 	}
-	if why := protectedDir(req, g.sandbox); why != "" {
+	if why := protectedDir(req, g.sandbox, nil); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
 	// Цель, заданная настройкой, а не моделью: спрашивать не о чем.
@@ -168,7 +168,7 @@ func (g *Guard) Check(req Request) Result {
 		return Result{Decision: DecisionAllow,
 			Reason: "цель задана настройками, а не моделью"}
 	}
-	if res, ok := g.irreversible(req, mode); ok {
+	if res, ok := g.irreversible(req, mode, nil); ok {
 		return res
 	}
 	// Инструмент, разрешённый целиком, не спрашивает про каждую цель отдельно.
@@ -233,7 +233,10 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 		return Result{Decision: DecisionDeny, Rule: verdict.rule,
 			Reason: fmt.Sprintf("запрещено правилом %s (часть команды: %s)", verdict.rule.Source, verdict.part)}
 	}
-	if why := protectedDir(req, g.sandbox); why != "" {
+	// Строка разобрана один раз — в bashDeny; тот же разбор идёт в protectedDir
+	// и irreversible (ревью, замечание 7). Под `Bash(*)` разбора нет, но туда
+	// и не доходит: запрет вернулся выше.
+	if why := protectedDir(req, g.sandbox, verdict.scan); why != "" {
 		return Result{Decision: DecisionDeny, Reason: why}
 	}
 	// Имя программы станет известно только при запуске (`$X -rf ~`,
@@ -254,7 +257,7 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 			"ключ «%s» запускает другую программу: она сверена с запретами, "+
 				"но требуется подтверждение в любом режиме, кроме yolo", verdict.named)}
 	}
-	if res, ok := g.irreversible(req, mode); ok {
+	if res, ok := g.irreversible(req, mode, verdict.scan); ok {
 		return res
 	}
 
@@ -323,12 +326,13 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 // irreversible — решение для действия класса «необратимое» (Н5, Т9): вопрос
 // в любом режиме, кроме yolo, мимо правил allow и сеансовых разрешений.
 // ok == false — действие обратимо, решают обычные правила.
-func (g *Guard) irreversible(req Request, mode string) (Result, bool) {
+// scan — готовый разбор строки bash из checkBash; nil — разобрать заново.
+func (g *Guard) irreversible(req Request, mode string, scan *commandScan) (Result, bool) {
 	root := ""
 	if g.sandbox != nil {
 		root = g.sandbox.RealRoot()
 	}
-	why := g.set.IrreversibleBy(req.Kind, req.Target, root)
+	why := g.set.irreversibleBy(req.Kind, req.Target, root, scan)
 	if why == "" && req.Kind == KindWrite && g.WriteIrreversible != nil {
 		why = g.WriteIrreversible(req.Target)
 	}

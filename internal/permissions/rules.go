@@ -330,6 +330,10 @@ type bashVerdict struct {
 	// named — ключ, которым программа запускает другую (`go -toolexec`):
 	// названная программа сверена с запретами, а решает человек.
 	named string
+	// scan — разбор строки, которым шла сверка: checkBash отдаёт его дальше
+	// protectedDir и IrreversibleBy, чтобы строка лексилась один раз (ревью,
+	// замечание 7). nil — сверка кончилась на `Bash(*)`, не разбирая строку.
+	scan *commandScan
 }
 
 // bashDeny сверяет с запретами каждую команду, которую запустит строка:
@@ -352,17 +356,18 @@ func (s *Set) bashDeny(target string) bashVerdict {
 		// Сверять не с чем: имя, вычисляемое при запуске, тоже ничего не обходит.
 		// Но ключ, которым программа запускает другую, решает человек и без
 		// запретов (слово владельца 08.10.2026).
-		return bashVerdict{named: scanCommands(target).named}
+		scan := scanCommands(target)
+		return bashVerdict{named: scan.named, scan: scan}
 	}
 	scan := scanCommands(target)
 	for _, c := range scan.found {
 		for i := range s.deny {
 			if s.deny[i].Kind == KindBash && s.deny[i].matchCommand(c.text) {
-				return bashVerdict{rule: &s.deny[i], part: c.text}
+				return bashVerdict{rule: &s.deny[i], part: c.text, scan: scan}
 			}
 		}
 	}
-	return bashVerdict{unknown: scan.unknown, named: scan.named}
+	return bashVerdict{unknown: scan.unknown, named: scan.named, scan: scan}
 }
 
 // Rules возвращает все правила по категориям — для команды /permissions.

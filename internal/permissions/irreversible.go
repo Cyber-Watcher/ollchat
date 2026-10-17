@@ -65,7 +65,10 @@ var protectedDirs = []struct{ name, why string }{
 // ловился только `>`, а `>>`, `cp`, `tee`, `python` проходили даже в yolo).
 // От программы, пишущей туда по своему разумению без имени каталога в строке,
 // защищает только изоляция (sandbox.isolation).
-func protectedDir(req Request, sb *Sandbox) string {
+//
+// scan — готовый разбор req.Target из checkBash; nil — разобрать здесь.
+// Для действий, кроме bash, не читается.
+func protectedDir(req Request, sb *Sandbox, scan *commandScan) string {
 	if sb == nil {
 		return ""
 	}
@@ -100,7 +103,9 @@ func protectedDir(req Request, sb *Sandbox) string {
 	case KindWrite:
 		return refuse(req.Target)
 	case KindBash:
-		scan := scanCommands(req.Target)
+		if scan == nil {
+			scan = scanCommands(req.Target)
+		}
 		for _, t := range scan.truncates {
 			if why := refuse(t); why != "" {
 				return why + " (> " + t + ")"
@@ -151,6 +156,13 @@ func (s *Set) Irreversible() []Rule { return s.irreversible }
 // IrreversibleBy объясняет, чем действие необратимо; пусто — обратимо.
 // root — корень песочницы: от него считаются относительные цели.
 func (s *Set) IrreversibleBy(kind Kind, target, root string) string {
+	return s.irreversibleBy(kind, target, root, nil)
+}
+
+// irreversibleBy — IrreversibleBy с готовым разбором строки bash из checkBash
+// (ревью, замечание 7: строка лексилась заново). scan == nil — разобрать здесь;
+// для действий, кроме bash, scan не читается.
+func (s *Set) irreversibleBy(kind Kind, target, root string, scan *commandScan) string {
 	if kind != KindBash {
 		for i := range s.irreversible {
 			if s.irreversible[i].Match(kind, target) {
@@ -159,7 +171,9 @@ func (s *Set) IrreversibleBy(kind Kind, target, root string) string {
 		}
 		return ""
 	}
-	scan := scanCommands(target)
+	if scan == nil {
+		scan = scanCommands(target)
+	}
 	for _, c := range scan.found {
 		for i := range s.irreversible {
 			if s.irreversible[i].Kind == KindBash && s.irreversible[i].matchCommand(c.text) {
