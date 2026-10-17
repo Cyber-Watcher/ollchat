@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"os"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/buildinfo"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
@@ -34,6 +37,15 @@ func sessionStep(cfg *config.Config, srv *config.Server, model string, reg *tool
 		extra["tools_n"] = len(reg.Names())
 	}
 	return steplog.Step{Kind: steplog.KindSession, Model: model, Extra: extra}
+}
+
+// pruneSteps удаляет журналы шагов старше log.steps_keep_days (аудит
+// 16.10.2026, находка 16). Сбой чистки — предупреждение, а не отказ работать:
+// журнал этого запуска от неё не зависит.
+func pruneSteps(steps *steplog.Writer, cfg *config.Config) {
+	if _, err := steps.Prune(cfg.Log.StepsKeepDays, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "предупреждение: "+err.Error())
+	}
 }
 
 // fingerprint — первые 12 шестнадцатеричных знаков SHA-256: хватает отличить

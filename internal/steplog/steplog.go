@@ -153,6 +153,58 @@ func (w *Writer) Path() string {
 	return w.path
 }
 
+// Prune удаляет журналы шагов, не менявшиеся дольше keepDays дней (ключ
+// log.steps_keep_days; 0 и меньше — ничего не удалять): файлы каталога
+// журналов, подходящие под шаблон имени (chatlog.Pattern.Glob). Свой текущий
+// файл не трогается. Возвращает, сколько удалено; ошибка — первая из
+// неудавшихся, остальные файлы чистятся дальше.
+//
+// Зачем: журнал шагов пишется без срока (аудит 16.10.2026, находка 16) —
+// за пять недель на рабочей машине набралось больше 3 600 файлов. Срок
+// считается по времени изменения, а не по дате в имени: служба, запущенная
+// неделю назад и пишущая до сих пор, свой файл не потеряет. Служба, молчавшая
+// дольше срока с открытым файлом, продолжит писать в удалённый — цена
+// чистки без общего замка; её журнал заново появится при перезапуске.
+func (w *Writer) Prune(keepDays int, now time.Time) (int, error) {
+	if w == nil || keepDays <= 0 {
+		return 0, nil
+	}
+	glob := w.pattern.Glob()
+	if glob == "" {
+		return 0, nil
+	}
+	if !filepath.IsAbs(glob) {
+		glob = filepath.Join(w.dir, glob)
+	}
+	paths, err := filepath.Glob(glob)
+	if err != nil {
+		return 0, fmt.Errorf("образец журналов шагов %s: %w", glob, err)
+	}
+	w.mu.Lock()
+	current := w.path
+	w.mu.Unlock()
+	cutoff := now.Add(-time.Duration(keepDays) * 24 * time.Hour)
+	removed := 0
+	var first error
+	for _, p := range paths {
+		if p == current {
+			continue
+		}
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() || !fi.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			if first == nil {
+				first = fmt.Errorf("удаление старого журнала шагов: %w", err)
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, first
+}
+
 // LastError — последняя ошибка записи; nil, если всё в порядке.
 func (w *Writer) LastError() error {
 	if w == nil {

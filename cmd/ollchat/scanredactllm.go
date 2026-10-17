@@ -90,6 +90,7 @@ func runScanRedactLLM(cfg *config.Config, srv *config.Server, model string, sand
 	}
 	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollchat-scan-redact-llm", cfg.Log.Enabled)
 	defer steps.Close()
+	pruneSteps(steps, cfg)
 
 	conv := session.New(srv.SystemPrompt)
 	conv.SetToday(cfg.General.Today)
@@ -104,6 +105,7 @@ func runScanRedactLLM(cfg *config.Config, srv *config.Server, model string, sand
 		MaxIterations:  cfg.Agent.MaxIterations,
 		MaxRetries:     cfg.Agent.MaxRetries,
 		Steps:          steps,
+		OutHead:        cfg.Log.StepsOutHead,
 		Turn:           "scan-redact-llm",
 		Tools:          registry,
 		Guard:          guard,

@@ -165,6 +165,7 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 			return nil, nil, nil, fmt.Errorf("log.steps_file_pattern: %w", err)
 		}
 		steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollchat-serve", cfg.Log.Enabled)
+		pruneSteps(steps, cfg)
 		settings := ""
 		if cfg.Path != "" {
 			settings = mcp.SettingsPath(cfg.Path)

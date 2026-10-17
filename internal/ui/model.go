@@ -965,6 +965,7 @@ func (m *Model) startExchange(text string, images []pendingImage, mix mixResult)
 		PrivateEgressCheck: m.cfg.Agent.PrivateEgressCheck,
 		MaxWritesNoask:     m.cfg.Agent.MaxWritesNoask,
 		MaxTurnTokens:      m.cfg.Agent.MaxTurnTokens,
+		OutHead:            m.cfg.Log.StepsOutHead,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

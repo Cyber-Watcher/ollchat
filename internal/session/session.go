@@ -26,6 +26,12 @@ type Conversation struct {
 	// today — подставлять ли сегодняшнюю дату в системное сообщение.
 	// Устройство и доводы — в today.go.
 	today bool
+	// foreign — в разговор входил чужой текст (вывод инструмента-источника).
+	// Признак липкий: сжатие (/compact) заменяет ответы инструментов сводкой,
+	// но пересказ чужой инструкции остаётся в ней, и пересчёт из истории
+	// снимал метку, а с ней untrusted_gate (аудит 16.10.2026, находка 14).
+	// Сбрасывает его только Clear.
+	foreign bool
 }
 
 // New создаёт диалог с указанным системным промптом.
@@ -87,11 +93,28 @@ func (c *Conversation) Len() int {
 	return len(c.messages)
 }
 
-// Clear очищает историю, сохраняя системный промпт.
+// Clear очищает историю, сохраняя системный промпт, и снимает признак
+// чужого текста: после /clear в разговоре его больше нет.
 func (c *Conversation) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.messages = nil
+	c.foreign = false
+}
+
+// MarkForeign отмечает, что в разговор вошёл чужой текст. Снимает отметку
+// только Clear: ни Compact, ни CompactWith, ни TruncateTo её не трогают.
+func (c *Conversation) MarkForeign() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.foreign = true
+}
+
+// Foreign — входил ли в разговор чужой текст с последнего Clear.
+func (c *Conversation) Foreign() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.foreign
 }
 
 // Compact оставляет последние keep сообщений, отбрасывая более старые.
@@ -158,6 +181,10 @@ type Saved struct {
 	Model    string           `json:"model"`
 	System   string           `json:"system"`
 	Messages []ollama.Message `json:"messages"`
+	// Foreign — признак чужого текста (Conversation.Foreign): сжатая сессия,
+	// восстановленная из файла, иначе теряла бы его вместе с ответами
+	// инструментов. Старые файлы без поля читаются как false.
+	Foreign bool `json:"foreign,omitempty"`
 }
 
 // Store — каталог с сохранёнными сессиями.
@@ -212,6 +239,7 @@ func (s *Store) SaveAs(id string, c *Conversation, server, model string) (string
 		Model:    model,
 		System:   c.System(),
 		Messages: c.Messages(),
+		Foreign:  c.Foreign(),
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
@@ -238,7 +266,8 @@ func (s *Store) NewID() (string, error) {
 // находка 13: при 1000 обменах одно синхронное сохранение занимало 81 мс цикла
 // событий и росло с длиной сеанса).
 func Snapshot(id string, c *Conversation, server, model string) Saved {
-	return Saved{ID: id, SavedAt: time.Now(), Server: server, Model: model, System: c.System(), Messages: c.Messages()}
+	return Saved{ID: id, SavedAt: time.Now(), Server: server, Model: model, System: c.System(),
+		Messages: c.Messages(), Foreign: c.Foreign()}
 }
 
 // WriteSnapshot пишет снимок с порядковым номером seq (растёт у вызывающего).
@@ -387,4 +416,5 @@ func (c *Conversation) Restore(rec *Saved) {
 	defer c.mu.Unlock()
 	c.system = rec.System
 	c.messages = append([]ollama.Message(nil), rec.Messages...)
+	c.foreign = rec.Foreign
 }

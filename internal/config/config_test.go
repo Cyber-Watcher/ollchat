@@ -191,6 +191,29 @@ chat_timeout = "не число"
 
 // По умолчанию журнал получает свой файл на каждый запуск: на одной машине
 // одновременно работает несколько экземпляров ollchat.
+// Находка 16: ноль у steps_out_head и steps_keep_days — умолчания 200 и 7,
+// отрицательное значение остаётся как есть («не писать», «не удалять»).
+func TestStepsOutHeadAndKeepDaysDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		body       string
+		head, keep int
+	}{
+		{"", 200, 7},
+		{"[log]\nsteps_out_head = 0\nsteps_keep_days = 0\n", 200, 7},
+		{"[log]\nsteps_out_head = -1\nsteps_keep_days = -1\n", -1, -1},
+		{"[log]\nsteps_out_head = 80\nsteps_keep_days = 30\n", 80, 30},
+	} {
+		cfg, err := writeConfig(t, tc.body)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.body, err)
+		}
+		if cfg.Log.StepsOutHead != tc.head || cfg.Log.StepsKeepDays != tc.keep {
+			t.Errorf("%q: steps_out_head %d, steps_keep_days %d — ждали %d и %d",
+				tc.body, cfg.Log.StepsOutHead, cfg.Log.StepsKeepDays, tc.head, tc.keep)
+		}
+	}
+}
+
 func TestLogFilePatternDefault(t *testing.T) {
 	cfg, err := writeConfig(t, "")
 	if err != nil {

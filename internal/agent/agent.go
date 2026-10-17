@@ -208,6 +208,10 @@ type Runner struct {
 	PrivateEgressCheck bool
 	MaxWritesNoask     int
 	MaxTurnTokens      int
+	// OutHead — сколько рун вывода инструмента писать в журнал шагов (ключ
+	// log.steps_out_head): 0 — умолчание toolOutHead, отрицательное — не
+	// писать. Пишется не у всех инструментов — см. outHeadTools.
+	OutHead int
 
 	// Steer — очередь реплик, набранных посреди хода (этап 112, Х1); nil — нет.
 	Steer *SteerQueue
@@ -296,9 +300,14 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 	byTool := map[string]int{}
 	var lastTool, lastResult string
 	// Состояние проверок хода (этап 112): правки считаются заново, а чужой текст,
-	// вошедший раньше, остаётся в разговоре — значит, и в силе.
+	// вошедший раньше, остаётся в разговоре — значит, и в силе. Пересчёт из
+	// истории не видит того, что /compact уже заменил сводкой, поэтому в силе
+	// и липкая метка разговора (аудит 16.10.2026, находка 14).
 	r.writes = 0
-	r.tainted = tainted(conv.Messages())
+	r.tainted = conv.Foreign() || tainted(conv.Messages())
+	if r.tainted {
+		conv.MarkForeign()
+	}
 	tokensIn := 0
 
 	// Дата в системном сообщении берётся один раз на ход: иначе цепочка
@@ -490,8 +499,8 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			// журналу шагов нельзя было сказать, на чём сломался разбор результата
 			// (Ч10). Начало — не целиком: журнал шагов читают сводки по всем дням.
 			extra := map[string]any{"out_bytes": len(result)}
-			if !info.hidden {
-				extra["out_head"] = textx.Shorten(result, toolOutHead)
+			if head, ok := r.outHead(call.Function.Name, info.outcome, result); ok && !info.hidden {
+				extra["out_head"] = head
 			}
 			if info.confirm != "" {
 				extra["confirm"], extra["confirm_ms"] = info.confirm, info.confirmMs
@@ -514,6 +523,11 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 				ToolCallID: call.ID,
 				Content:    result,
 			})
+			// Метка чужого текста — в сам разговор, липкой: /compact заменит
+			// это сообщение сводкой, а метка останется (находка 14).
+			if r.tainted {
+				conv.MarkForeign()
+			}
 			// Картинку строкой не вернёшь: в ответе инструмента её быть не может.
 			// Поэтому она идёт следующим сообщением, где для неё есть поле images.
 			if len(images) > 0 {
@@ -782,8 +796,34 @@ func answerName(a Answer) string {
 	return "?"
 }
 
-// toolOutHead — сколько рун вывода инструмента пишется в запись вызова (С2).
+// toolOutHead — сколько рун вывода инструмента пишется в запись вызова (С2),
+// когда Runner.OutHead не задан (ноль).
 const toolOutHead = 200
+
+// outHeadTools — инструменты, чей УСПЕШНЫЙ вывод написан нашим кодом, а не
+// взят из чужого содержимого: сводка правки и список имён каталога. Только у
+// них начало вывода идёт в журнал шагов (аудит 16.10.2026, находка 16, выбор
+// владельца 17.10 — «В»): у read_file, grep, bash, http_fetch, поиска по книгам
+// и прочих в вывод попадает содержимое файлов, страниц и книг, и журнал без
+// срока хранения копил бы его начало. Список задан перечислением: новый
+// инструмент по умолчанию в журнал своего вывода не пишет.
+var outHeadTools = map[string]bool{
+	tools.NameWriteFile: true, tools.NameEditFile: true, tools.NameListDir: true,
+}
+
+// outHead — начало вывода для записи вызова в журнал шагов; ok == false —
+// не писать. Отказ и ошибка пишутся у любого инструмента: их текст составил
+// наш код (правила, человек, обёртка ошибки), чужого содержимого в нём нет.
+func (r *Runner) outHead(name string, outcome callOutcome, result string) (string, bool) {
+	n := r.OutHead
+	if n == 0 {
+		n = toolOutHead
+	}
+	if n < 0 || (outcome == callOK && !outHeadTools[name]) {
+		return "", false
+	}
+	return textx.Shorten(result, n), true
+}
 
 func rejected(status, note string) callInfo {
 	return callInfo{outcome: callRejected, status: status, note: note}

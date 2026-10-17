@@ -92,6 +92,10 @@ func run(cfgPath, mcpConf, addr string, list, verbose bool) error {
 	}
 	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollmcp", cfg.Log.Enabled)
 	defer steps.Close()
+	// Старые журналы шагов — по сроку log.steps_keep_days (находка 16).
+	if _, err := steps.Prune(cfg.Log.StepsKeepDays, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "предупреждение: "+err.Error())
+	}
 
 	// Настройки службы: пределы, потолок ответа, срок вызова (этап 109).
 	if mcpConf == "" {

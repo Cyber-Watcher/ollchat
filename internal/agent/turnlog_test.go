@@ -186,13 +186,15 @@ func TestToolStepRecordsDecision(t *testing.T) {
 	}
 }
 
-// Что ушло модели — в записи вызова (этап 112, С2): размер и начало, и у успеха,
-// и у запрета; до 16.10.2026 выход был только в журнале чата.
+// Что ушло модели — в записи вызова (этап 112, С2): размер всегда, начало — у
+// запрета и ошибки. Успешный bash до 17.10.2026 тоже писал начало («Код
+// возврата: 0» и вывод команды); по выбору владельца (находка 16, «В») вывод
+// команды — чужое содержимое (`cat .env`), и у успеха пишется только размер.
 func TestToolStepRecordsOutput(t *testing.T) {
 	for _, tc := range []struct {
 		cmd, allow, head string
 	}{
-		{"echo x", "Bash(echo:*)", "Код возврата: 0"},
+		{"echo x", "Bash(echo:*)", ""},
 		{"rm x", "", "Действие запрещено настройками"},
 	} {
 		f := &fakeChat{turns: [][]ollama.Event{bashCall(tc.cmd), answer("готово")}}
@@ -217,13 +219,55 @@ func TestToolStepRecordsOutput(t *testing.T) {
 			t.Fatalf("%s: записей вызова %d, ожидалась одна", tc.cmd, len(tools))
 		}
 		x := tools[0].Extra
-		head, _ := x["out_head"].(string)
+		head, has := x["out_head"].(string)
 		size, _ := x["out_bytes"].(float64) // числа приходят из JSON
+		if tc.head == "" {
+			if has || size == 0 {
+				t.Errorf("%s: успешный bash — начало %q, размер %v; ждали только размер", tc.cmd, head, size)
+			}
+			continue
+		}
 		if !strings.HasPrefix(head, tc.head) || size < float64(len(tc.head)) {
 			t.Errorf("%s: начало %q, размер %v; ждали начало %q", tc.cmd, head, size, tc.head)
 		}
-		if tc.allow != "" && size != float64(len(head)) {
-			t.Errorf("%s: короткий вывод записан не целиком: размер %v, начало %d байт", tc.cmd, size, len(head))
+	}
+}
+
+// Находка 16 (аудит 16.10.2026): начало вывода успешного вызова пишется только
+// у инструментов, чей вывод составил наш код; у read_file — только размер, хотя
+// бы файл и прочитался. Runner.OutHead < 0 не пишет начала никогда, > 0 режет
+// до стольких рун.
+func TestToolStepOutHeadPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		tool    string
+		outHead int
+		head    string // "" — начала быть не должно
+	}{
+		{tools.NameReadFile, 0, ""},
+		{tools.NameListDir, 0, "вывод list_dir"},
+		{tools.NameListDir, 5, "выво…"}, // textx.Shorten: 5 рун вместе с «…»
+		{tools.NameListDir, -1, ""},
+	} {
+		r, _ := gateRunner(t, &fakeChat{turns: [][]ollama.Event{
+			callWith(tc.tool, map[string]any{"path": "a.txt"}, 10), answer("ок")}}, permissions.ModeNoAsk)
+		r.OutHead = tc.outHead
+		steps, _, err := journaled(t, r, AnswerYes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := ofKind(steps, steplog.KindTool)
+		if len(calls) != 1 || calls[0].Outcome != steplog.OutcomeOK {
+			t.Fatalf("%s: записей вызова %d — ждали один успешный", tc.tool, len(calls))
+		}
+		head, has := calls[0].Extra["out_head"].(string)
+		if size, _ := calls[0].Extra["out_bytes"].(float64); size == 0 {
+			t.Errorf("%s (%d): нет размера вывода", tc.tool, tc.outHead)
+		}
+		if tc.head == "" && has {
+			t.Errorf("%s (%d): начало %q — ждали только размер", tc.tool, tc.outHead, head)
+		}
+		if tc.head != "" && head != tc.head {
+			t.Errorf("%s (%d): начало %q — ждали %q", tc.tool, tc.outHead, head, tc.head)
 		}
 	}
 }

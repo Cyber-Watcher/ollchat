@@ -270,6 +270,7 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 	stepsPattern, _ := cfg.Log.StepsPattern()
 	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollchat-ask", cfg.Log.Enabled)
 	defer steps.Close()
+	pruneSteps(steps, cfg)
 	var sreg *tools.Registry
 	if o.Tools {
 		sreg = o.registry
@@ -295,6 +296,7 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 		PrivateEgressCheck: cfg.Agent.PrivateEgressCheck,
 		MaxWritesNoask:     cfg.Agent.MaxWritesNoask,
 		MaxTurnTokens:      cfg.Agent.MaxTurnTokens,
+		OutHead:            cfg.Log.StepsOutHead,
 	}
 	if o.Tools && o.registry != nil {
 		runner.Tools = o.registry

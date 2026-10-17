@@ -119,6 +119,38 @@ func (p *Pattern) String() string {
 	return p.src
 }
 
+// Glob — образец filepath.Match для всех имён, которые даёт шаблон: каждая
+// директива — цифры её ширины, литеральная часть — как есть (знаки образца
+// в ней экранируются). Пусто — образца нет: у устаревшего шаблона (раскладка
+// Go) и у пути из FixedName, названного человеком, — их файлы не чистятся.
+func (p *Pattern) Glob() string {
+	if p == nil || p.layout != "" {
+		return ""
+	}
+	hasVerb := false
+	var b strings.Builder
+	for _, part := range p.parts {
+		if part.verb == 0 {
+			for _, r := range part.lit {
+				if strings.ContainsRune(`*?[\`, r) {
+					b.WriteByte('\\')
+				}
+				b.WriteRune(r)
+			}
+			continue
+		}
+		hasVerb = true
+		b.WriteString("[0-9][0-9]")
+		if part.verb == 'Y' {
+			b.WriteString("[0-9][0-9]")
+		}
+	}
+	if !hasVerb {
+		return ""
+	}
+	return b.String()
+}
+
 // Name строит имя файла для указанного времени.
 func (p *Pattern) Name(t time.Time) string {
 	if p == nil {

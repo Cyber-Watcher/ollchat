@@ -1569,6 +1569,7 @@ func run() error {
 	}
 	steps := steplog.New(cfg.Log.Dir, stepsPattern, time.Now(), "ollchat", cfg.Log.Enabled)
 	defer steps.Close()
+	pruneSteps(steps, cfg)
 	if err := logger.WriteSessionHeader(srv.Name, srv.URL, model); err != nil {
 		fmt.Fprintln(os.Stderr, "предупреждение: не удалось писать журнал: "+err.Error())
 	}

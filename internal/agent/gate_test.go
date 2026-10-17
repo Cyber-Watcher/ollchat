@@ -124,6 +124,67 @@ func TestGateUntrustedAsksAfterForeign(t *testing.T) {
 	}
 }
 
+// Аудит 16.10.2026, находка 14: метка чужого текста переживает /compact и
+// сохранение с восстановлением сессии; снимает её только /clear. До правки
+// метка пересчитывалась из истории, и после сжатия web_search шёл без вопроса.
+func TestGateUntrustedSurvivesCompact(t *testing.T) {
+	ask := func(conv *session.Conversation) []string {
+		t.Helper()
+		r, _ := gateRunner(t, &fakeChat{turns: [][]ollama.Event{
+			callWith(tools.NameWebSearch, map[string]any{"query": "x"}, 10), answer("ок")}}, permissions.ModeNoAsk)
+		r.UntrustedGate = true
+		asked, _, err := drive(r, conv, AnswerNo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return asked
+	}
+	// Первый ход читает файл — чужой текст входит в разговор.
+	conv := newConv()
+	r, _ := gateRunner(t, &fakeChat{turns: [][]ollama.Event{
+		callWith(tools.NameReadFile, map[string]any{"path": "a.txt"}, 10), answer("прочитал")}}, permissions.ModeNoAsk)
+	r.UntrustedGate = true
+	if _, _, err := drive(r, conv, AnswerNo); err != nil {
+		t.Fatal(err)
+	}
+	if !conv.Foreign() {
+		t.Fatal("после read_file разговор не помечен чужим текстом")
+	}
+	// /compact: всё, кроме последнего сообщения, уходит в сводку — ответа
+	// инструмента в истории больше нет.
+	if n := conv.CompactWith(1, "читали файл a.txt"); n == 0 {
+		t.Fatal("сжатие ничего не сжало — тест не проверяет того, что заявлено")
+	}
+	if tainted(conv.Messages()) {
+		t.Fatal("после сжатия ответ инструмента остался в истории — тест не проверяет того, что заявлено")
+	}
+	conv.Append(ollama.Message{Role: ollama.RoleUser, Content: "поищи"})
+	if asked := ask(conv); len(asked) != 1 || asked[0] != tools.NameWebSearch {
+		t.Fatalf("после /compact: вопросы %q — ждали вопрос про web_search", asked)
+	}
+	// Сохранение и восстановление сжатой сессии: метка едет в файле.
+	store := session.NewStore(t.TempDir())
+	_, path, err := store.SaveAs("", conv, "srv", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := store.Load(strings.TrimSuffix(filepath.Base(path), ".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := session.New("")
+	restored.Restore(rec)
+	if !restored.Foreign() {
+		t.Fatal("метка чужого текста потерялась при сохранении и восстановлении")
+	}
+	// /clear снимает метку: разговор пуст, чужого текста в нём нет.
+	conv.Clear()
+	conv.Append(ollama.Message{Role: ollama.RoleUser, Content: "поищи"})
+	if asked := ask(conv); len(asked) != 0 {
+		t.Fatalf("после /clear: вопросы %q — ждали 0", asked)
+	}
+}
+
 // Н16: частный адрес или имя хоста из ~/.ssh/config в исходящем вызове — отказ.
 // Адреса частных сетей ниже ВЫДУМАНЫ (разрешение владельца 15.10.2026, строки
 // в .claude/skills/never-clobber-files/privacy-allow.tsv), имена хостов — тоже.
