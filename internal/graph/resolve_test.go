@@ -267,9 +267,9 @@ func TestMutualAliasHasLowerThreshold(t *testing.T) {
 // сойтись в один ключ, а разные вещи — разойтись.
 func TestResolveKeyGroupsGrammaticalVariants(t *testing.T) {
 	same := [][2]string{
-		{"graph optimization", "graph optimizations"}, // число
-		{"custom routes", "custom route"},             // число
-		{"200 status code", "status code 200"},        // порядок слов
+		{"graph optimization", "graph optimizations"},          // число
+		{"custom routes", "custom route"},                      // число
+		{"200 status code", "status code 200"},                 // порядок слов
 		{"верификация и валидация", "Валидация и верификация"}, // регистр и порядок
 		{"model access control", "model access controls"},
 		{"KV-кэш", "kv кэш"}, // разделитель, регистр

@@ -12,8 +12,9 @@
 
 ## Сборка и выкладка
 
+`go` из `PATH`, версия — из `go.mod`:
+
 ```bash
-export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 go build -o olleval/olleval ./olleval
 go test ./olleval/
 scp olleval/olleval сервер:~/bin/

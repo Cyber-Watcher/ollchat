@@ -16,7 +16,6 @@ import (
 // в строке прогресса (цель пишет файл на каждый вход, десятки тысяч в секунду
 // не ждать; ниже сотни на ядро — смотреть, что тормозит):
 //
-//	export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 //	GOMEMLIMIT=512MiB go test ./internal/kb/maint/ -run '^$' -fuzz '^FuzzLoadTranslations$' -fuzztime 60s
 //
 // Без -fuzz прогоняются только затравки — обычный быстрый тест. Найденный вход

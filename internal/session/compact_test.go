@@ -94,6 +94,73 @@ func TestSummarizeFailures(t *testing.T) {
 	}
 }
 
+// Сводка, не короче сжатой истории, окна не освобождает: она отвергается,
+// и вызывающая сторона обрезает историю без сводки (этап 112, Ш2).
+func TestSummarizeNotShorterRejected(t *testing.T) {
+	short := []ollama.Message{{Role: ollama.RoleUser, Content: "порт?"}}
+	long := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: "Человек спросил про порт сервера, ответа ещё не было, обсуждение только началось."},
+		{Kind: ollama.EventDone},
+	}}
+	if _, _, err := Summarize(context.Background(), long, "m", short, "", nil); err == nil || !strings.Contains(err.Error(), "не короче") {
+		t.Fatalf("сводка длиннее сжатого принята: %v", err)
+	}
+	// Ровно та же длина — тоже ничего не освобождает.
+	same := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: transcript(short)},
+		{Kind: ollama.EventDone},
+	}}
+	if _, _, err := Summarize(context.Background(), same, "m", short, "", nil); err == nil {
+		t.Fatal("сводка той же длины, что сжатое, принята")
+	}
+	// Короче хотя бы на знак — принимается (расшифровка кончается на «?»,
+	// срез по байту рун не режет).
+	body := transcript(short)
+	shorter := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: body[:len(body)-1]},
+		{Kind: ollama.EventDone},
+	}}
+	if _, _, err := Summarize(context.Background(), shorter, "m", short, "", nil); err != nil {
+		t.Fatalf("сводка короче сжатого отвергнута: %v", err)
+	}
+}
+
+// Второе сжатие пересказывает прежнюю сводку вместе с новыми сообщениями:
+// она лежит первым сообщением, а Older берёт срез с начала. Тест фиксирует
+// это поведение — менять его только после замера потерь двумя проходами
+// (compactprobe, этап 112, Ш2).
+func TestSecondCompactionResummarizesPriorSummary(t *testing.T) {
+	c := New("")
+	for _, m := range history() {
+		c.Append(m)
+	}
+	if c.CompactWith(2, "сводка-один: файл config.toml") == 0 {
+		t.Fatal("первое сжатие ничего не сжало")
+	}
+	c.Append(ollama.Message{Role: ollama.RoleUser, Content: "а модель?"})
+	c.Append(ollama.Message{Role: ollama.RoleAssistant, Content: "qwen"})
+	older := c.Older(2)
+	if len(older) == 0 || !strings.Contains(older[0].Content, "сводка-один") {
+		t.Fatalf("прежняя сводка не ушла во второе сжатие: %+v", older)
+	}
+	cl := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: "сводка-два"},
+		{Kind: ollama.EventDone},
+	}}
+	if _, _, err := Summarize(context.Background(), cl, "m", older, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	body := cl.seen.Messages[1].Content
+	if !strings.Contains(body, "Человек: Сводка предыдущей части") || !strings.Contains(body, "сводка-один") {
+		t.Fatalf("в расшифровке второго прохода нет прежней сводки:\n%s", body)
+	}
+	c.CompactWith(2, "сводка-два")
+	msgs := c.Messages()
+	if strings.Contains(msgs[0].Content, "сводка-один") || !strings.Contains(msgs[0].Content, "сводка-два") {
+		t.Fatalf("после второго сжатия первой должна быть только новая сводка: %+v", msgs[0])
+	}
+}
+
 // Сводка уходит с окном и сроком жизни диалога. Без num_ctx сервер поднял бы
 // модель со своим умолчанием, и история длиннее него в сводку не попала бы
 // (этап 115).

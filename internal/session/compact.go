@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
@@ -49,11 +50,12 @@ func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Mess
 		return "", ollama.Stats{}, errors.New("сжимать нечего")
 	}
 	no := false
+	body := transcript(msgs)
 	req := ollama.ChatRequest{
 		Model: model,
 		Messages: []ollama.Message{
 			{Role: ollama.RoleSystem, Content: CompactPrompt},
-			{Role: ollama.RoleUser, Content: transcript(msgs)},
+			{Role: ollama.RoleUser, Content: body},
 		},
 		// Рассуждения здесь не нужны: они удлиняют ответ и не попадают в сводку.
 		Think:     &no,
@@ -88,6 +90,13 @@ func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Mess
 	out := strings.TrimSpace(b.String())
 	if out == "" {
 		return "", stats, errors.New("модель вернула пустую сводку")
+	}
+	// Сводка не короче сжатого окна не освобождает, а точность теряет: такая
+	// отвергается, и вызывающая сторона обрезает историю без сводки (этап 112,
+	// Ш2; «a summary is not guaranteed to be smaller than what it replaced»,
+	// «Multi-Agent AI Engineering», 2026, разд. 13).
+	if n, was := utf8.RuneCountInString(out), utf8.RuneCountInString(body); n >= was {
+		return "", stats, fmt.Errorf("сводка (%d знаков) не короче сжимаемой истории (%d знаков) и не принята", n, was)
 	}
 	return out, stats, nil
 }

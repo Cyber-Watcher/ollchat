@@ -14,7 +14,6 @@ import (
 // в строке прогресса (разбор — чистая функция над строкой, ждать десятки тысяч
 // в секунду на ядро; ниже тысячи — цель тормозит):
 //
-//	export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 //	GOMEMLIMIT=512MiB go test ./internal/permissions/ -run '^$' -fuzz '^FuzzWriteTargets$' -fuzztime 60s
 //
 // Без -fuzz прогоняются только затравки — обычный быстрый тест. Найденный вход

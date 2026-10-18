@@ -102,10 +102,9 @@ WantedBy=default.target
 
 ## Сборка
 
-Только тулчейном проекта:
+`go` из `PATH`, версия — из `go.mod`:
 
 ```bash
-export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 go build -o ollmcp ./ollmcp
 go test ./ollmcp/
 ```

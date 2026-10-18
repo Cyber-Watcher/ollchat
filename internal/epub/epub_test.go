@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
+	"hash/crc32"
 	"strings"
 	"testing"
 )
@@ -16,15 +17,27 @@ func buildEPUB(t testing.TB, store bool, files map[string]string) []byte {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 
-	method := zip.Store
-	if !store {
-		method = zip.Deflate
+	mime := []byte("application/epub+zip")
+	if store {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: "mimetype", Method: zip.Store})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(mime)
+	} else {
+		// Сжатый поток готовый, а не от zip.Deflate: упаковщик Go 1.27 кладёт
+		// 20 байт «хранимым» блоком, то есть открытым текстом, и случай
+		// «признака формата не видно» пропадал (18.10.2026). Поток — zlib
+		// уровня 9 без обёртки, фиксированный Хаффман.
+		deflated := []byte("\x4b\x2c\x28\xc8\xc9\x4c\x4e\x2c\xc9\xcc\xcf\xd3\x4f\x2d\x28\x4d\xd2\xae\xca\x2c\x00\x00")
+		w, err := zw.CreateRaw(&zip.FileHeader{Name: "mimetype", Method: zip.Deflate,
+			CRC32: crc32.ChecksumIEEE(mime), CompressedSize64: uint64(len(deflated)),
+			UncompressedSize64: uint64(len(mime))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(deflated)
 	}
-	w, err := zw.CreateHeader(&zip.FileHeader{Name: "mimetype", Method: method})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.Write([]byte("application/epub+zip"))
 
 	for name, body := range files {
 		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})

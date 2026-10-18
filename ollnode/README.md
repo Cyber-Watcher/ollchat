@@ -35,10 +35,9 @@
 
 ## Установка
 
-Собирается тем же тулчейном, что и остальной проект:
+Собирается тем же `go` из `PATH`, что и остальной проект (версия — из `go.mod`):
 
 ```bash
-export PATH=$HOME/sdk/go1.26.9/bin:$PATH
 go build -o ollnode ./ollnode
 scp ollnode сервер:~/bin/
 ```
