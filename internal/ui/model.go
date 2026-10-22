@@ -21,6 +21,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
+	"github.com/Cyber-Watcher/ollchat/internal/mcphub"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
@@ -52,6 +53,11 @@ type kbState struct {
 	emb    *kbembed.Embedder
 	embURL string // адрес, под который собран эмбеддер
 
+	// lib — общая библиотека организации (kb.server_url); nil — работаем
+	// со своими файлами. С ней свой граф интерфейс не открывает: карту
+	// понятий считает служба (этап 121, А1–А2), см. SetLibrary.
+	lib kb.Library
+
 	// tr — перевод вопроса для словесной ветки (kb.translate); trKey —
 	// настройки, под которые он собран: сменились — собирается заново.
 	tr    *qtranslate.Translator
@@ -79,6 +85,10 @@ type Model struct {
 	cfg      *config.Config
 	guard    *permissions.Guard
 	registry *tools.Registry
+
+	// mcp — сторонние серверы MCP (этап 121, В7): тот же экземпляр, что
+	// кладёт их инструменты в registry. nil — команда /mcp скажет об этом.
+	mcp *mcphub.Hub
 
 	// embed, embedModel — состояние модели эмбеддингов для строки состояния.
 	// Проверяется при запуске и дальше по кругу (kb.embed_check): смысловой
@@ -454,6 +464,35 @@ func (m *Model) SetLive(l *tools.Live) {
 	}
 }
 
+// SetLibrary подключает общую библиотеку организации (kb.server_url).
+//
+// Слово владельца 22.10.2026: «если есть mcp на машине который уже загрузил
+// граф, то зачем его ещё раз загружать в ollchat». С библиотекой интерфейс
+// своего графа не открывает вовсе — ни прогревом при запуске, ни подмешиванием,
+// ни для /mix show: книги ищутся через службу, карту понятий считает она же
+// (этап 121, А1–А2). Свои файлы остаются запасным путём, когда служба не
+// отвечает (А4): граф тогда берётся из общего кэша и закрывается после простоя,
+// а не ложится в модель до выхода.
+//
+// Зовётся до запуска программы: прогрев в Init уже смотрит на библиотеку.
+// nil — работаем со своими файлами, как прежде.
+func (m *Model) SetLibrary(l kb.Library) {
+	m.kb.lib = l
+	if l == nil || m.kb.base != nil {
+		return
+	}
+	// Своих файлов нет вовсе: коллекцию выбирает настройка или служба,
+	// подмешивание — настройки, как и при своих файлах.
+	m.kb.use = m.cfg.KB.Default
+	m.kb.autoOn = m.cfg.Mix.Books
+	m.gr.autoOn = m.cfg.Mix.Graph
+}
+
+// SetMCP подключает сторонние серверы MCP — тот же экземпляр, что положил их
+// инструменты в реестр модели (этап 121, В7): /mcp показывает его состояние,
+// /mcp reconnect переподключает, и инструменты в реестре меняются вместе с ним.
+func (m *Model) SetMCP(h *mcphub.Hub) { m.mcp = h }
+
 // sections отдаёт проверку «есть ли раздел в конфиге» для списка команд.
 //
 // Команды возможности, которую человек в конфиге не описал, в меню и справке
@@ -502,10 +541,31 @@ func toolDriftHint(cfg *config.Config, registry *tools.Registry) string {
 func (m *Model) Init() tea.Cmd {
 	warm := make(chan graph.OpenProgress, 64)
 	m.graphBarStart = time.Now()
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textarea.Blink,
 		m.spin.Tick,
 		m.loadServerInfoCmd(),
+		// Загружена ли модель — спрашиваем сразу, не дожидаясь первого вопроса:
+		// иначе ответ приходит уже посреди ожидания, когда человек успел
+		// решить, что программа зависла. Подробности — в modelload.go.
+		checkResidency(genStartup, m.client, m.modelName),
+		waitGraphProgress(genWarm, warm),
+		// Плановый архив коллекции с графом: первая проверка через полминуты,
+		// дальше раз в пять минут. См. archive.go.
+		archiveTickCmd(archiveFirstCheck),
+	}
+	return tea.Batch(append(cmds, m.kbStartupCmds(warm)...)...)
+}
+
+// kbStartupCmds — команды запуска, которые читают базу знаний.
+//
+// Отдельным списком, чтобы тест шёл тем же путём, что запуск: с общей
+// библиотекой (kb.server_url) ни одна из них не открывает своих коллекций
+// и своего графа — их держит служба (этап 121, А1). Замер 22.10.2026: без
+// этого TUI с библиотекой держал открытыми все четыре коллекции, 1 329 976 КБ.
+// Плановый архив сюда не входит: он работает с каталогом, коллекций не открывая.
+func (m *Model) kbStartupCmds(warm chan<- graph.OpenProgress) []tea.Cmd {
+	return []tea.Cmd{
 		m.kbPendingCmd(),
 		// Проверка эмбеддера: смысловой поиск отваливается молча, и человек
 		// узнаёт об этом по ухудшившимся ответам, а не по сообщению.
@@ -514,19 +574,11 @@ func (m *Model) Init() tea.Cmd {
 		// Состояние графа и смыслов: килобайт чтения, но в фоне — запуск
 		// не должен ждать ни диска, ни разбора файлов.
 		m.checkGraphHealthCmd(),
-		// Загружена ли модель — спрашиваем сразу, не дожидаясь первого вопроса:
-		// иначе ответ приходит уже посреди ожидания, когда человек успел
-		// решить, что программа зависла. Подробности — в modelload.go.
-		checkResidency(genStartup, m.client, m.modelName),
 		// Граф открывается заранее, в фоне: иначе за его открытие платит
 		// первый же вопрос — десятки секунд ожидания там, где человек ждёт
 		// ответа модели.
 		m.warmGraphCmd(warm),
-		waitGraphProgress(genWarm, warm),
-		// Плановый архив коллекции с графом: первая проверка через полминуты,
-		// дальше раз в пять минут. См. archive.go.
-		archiveTickCmd(archiveFirstCheck),
-	)
+	}
 }
 
 // ── Сообщения ────────────────────────────────────────────────────────────────
@@ -923,6 +975,11 @@ func (m *Model) startExchange(text string, images []pendingImage, mix mixResult)
 	// Карта понятий и выдержки из книг уходят отдельным сообщением ПЕРЕД
 	// вопросом. Так библиотека работает и с моделями без поддержки
 	// инструментов. Серая строка под вопросом говорит, что именно ушло.
+	// Служба библиотеки не ответила или отказала — об этом отдельная строка,
+	// и при пустом подмесе тоже (этап 121, А4).
+	if mix.Remote != "" {
+		m.addBlock(block{kind: blockHint, text: mix.Remote})
+	}
 	if !mix.Empty() {
 		m.conv.Append(ollama.Message{Role: ollama.RoleUser, Content: mix.Text})
 		m.addBlock(block{kind: blockNotice, text: mixLine(mix)})

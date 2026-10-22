@@ -247,6 +247,7 @@ func commandHandlers() []cmdHandler {
 		}},
 		{names: []string{"nodes", "узлы"}, run: (*Model).nodesCmd},
 		{names: []string{"tools"}, run: (*Model).toolsCmd},
+		{names: []string{"mcp"}, run: (*Model).mcpCmd},
 		{names: []string{"think"}, run: (*Model).thinkCmd},
 		{names: []string{"calc"}, run: (*Model).calcArgCmd},
 		{names: []string{"mouse"}, run: (*Model).mouseCmd},
@@ -656,6 +657,10 @@ func (m *Model) toolsReport() string {
 	if len(off) > 0 {
 		fmt.Fprintf(&b, "Выключены настройкой agent.tools (%d): %s\n",
 			len(off), strings.Join(off, ", "))
+	}
+	// Инструменты сторонних серверов — числом: их список и права — в /mcp.
+	if ext := m.registry.ExternalNames(); len(ext) > 0 {
+		fmt.Fprintf(&b, "Инструментов сторонних серверов MCP: %d (подробно — /mcp)\n", len(ext))
 	}
 	fmt.Fprintf(&b, "Ограничение итераций: %s. Таймаут команд: %s.\n"+
 		"Изменить на сеанс: /tools iterations <число|off>",

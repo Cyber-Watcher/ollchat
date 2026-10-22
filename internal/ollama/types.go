@@ -6,7 +6,10 @@
 package ollama
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -75,6 +78,136 @@ type ToolParams struct {
 	Type       string              `json:"type"`
 	Properties map[string]ToolProp `json:"properties"`
 	Required   []string            `json:"required,omitempty"`
+
+	// Raw — схема стороннего сервера MCP как он её прислал (этап 121, Б3).
+	// Задана — модели уходит она, слово в слово: items, вложенные объекты,
+	// anyOf и type списком в ToolProp не ложатся, а выбросить их значило бы
+	// звать чужой инструмент не теми доводами. Поля выше при этом — разбор
+	// «на глаз» (RawParams): по ним пишется подсказка о параметрах в ошибке.
+	// Пусто — схема собирается из полей, как у встроенных инструментов.
+	Raw json.RawMessage `json:"-"`
+}
+
+// MarshalJSON отдаёт Raw как есть, если он задан, иначе — поля.
+func (p ToolParams) MarshalJSON() ([]byte, error) {
+	if len(p.Raw) > 0 {
+		return append([]byte(nil), p.Raw...), nil
+	}
+	type plain ToolParams // без метода — иначе рекурсия
+	return json.Marshal(plain(p))
+}
+
+// RawParams — схема параметров стороннего сервера: Raw как есть и разбор
+// для подсказок. Ошибка — схема не JSON, не объект или не ложится в строгий
+// разбор Ollama (ollamaAccepts): такую модели отдавать нельзя, Ollama
+// отвергла бы весь запрос, а не один инструмент.
+//
+// Разбор терпим к тому, чего ToolProp не знает: type списком склеивается
+// через «|», вложенное и items пропускаются — Raw от этого не меняется.
+func RawParams(raw json.RawMessage) (ToolParams, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil || top == nil {
+		return ToolParams{}, errNotObject
+	}
+	// Сжатие без перестановки ключей: лишние пробелы модели не нужны, а
+	// порядок полей — часть того, что прислал сервер.
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return ToolParams{}, errNotObject
+	}
+	if err := ollamaAccepts(compact.Bytes()); err != nil {
+		return ToolParams{}, err
+	}
+	p := ToolParams{Type: "object", Raw: json.RawMessage(compact.Bytes())}
+	_ = json.Unmarshal(top["type"], &p.Type)
+	var props map[string]json.RawMessage
+	_ = json.Unmarshal(top["properties"], &props)
+	if len(props) > 0 {
+		p.Properties = make(map[string]ToolProp, len(props))
+	}
+	for name, v := range props {
+		var one struct {
+			Type        json.RawMessage `json:"type"`
+			Description any             `json:"description"`
+		}
+		_ = json.Unmarshal(v, &one)
+		prop := ToolProp{Type: schemaType(one.Type)}
+		if s, ok := one.Description.(string); ok {
+			prop.Description = s
+		}
+		p.Properties[name] = prop
+	}
+	_ = json.Unmarshal(top["required"], &p.Required)
+	return p, nil
+}
+
+// errNotObject — схема параметров не объект JSON.
+var errNotObject = errors.New("схема параметров должна быть объектом JSON")
+
+// ollamaAccepts — ляжет ли схема в разбор самой Ollama.
+//
+// Ollama читает параметры инструмента в строгие типы (api/types.go:
+// ToolFunctionParameters и ToolProperty, ветка main, прочитано 22.10.2026):
+// type — строка или список строк, description — строка, required — список
+// строк, properties и anyOf — снова такие же схемы. Несовпадение типа там —
+// отказ ВСЕГО /api/chat: один кривой инструмент стороннего сервера ломал бы
+// каждый обмен. Сервер MCP может прислать и такое (`"required": true` у
+// свойства, description объектом), поэтому проверка своя — разбором в
+// зеркало тех же типов тем же encoding/json. items, $defs и прочее Ollama
+// берёт как any и не проверяет — не проверяем и мы.
+func ollamaAccepts(raw []byte) error {
+	var p ollamaParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("схема параметров не ложится в разбор Ollama, весь запрос был бы отвергнут: %v", err)
+	}
+	return nil
+}
+
+// ollamaParams — зеркало ToolFunctionParameters из api/types.go Ollama.
+type ollamaParams struct {
+	Type       string                `json:"type"`
+	Required   []string              `json:"required"`
+	Properties map[string]ollamaProp `json:"properties"`
+}
+
+// ollamaProp — зеркало ToolProperty из api/types.go Ollama.
+type ollamaProp struct {
+	AnyOf       []ollamaProp          `json:"anyOf"`
+	Type        ollamaType            `json:"type"`
+	Description string                `json:"description"`
+	Enum        []any                 `json:"enum"`
+	Properties  map[string]ollamaProp `json:"properties"`
+	Required    []string              `json:"required"`
+}
+
+// ollamaType — зеркало PropertyType: строка или список строк.
+type ollamaType []string
+
+func (t *ollamaType) UnmarshalJSON(data []byte) error {
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		*t = []string{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return err
+	}
+	*t = many
+	return nil
+}
+
+// schemaType — type из схемы строкой: "string", ["string","null"] → "string|null".
+func schemaType(raw json.RawMessage) string {
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		return one
+	}
+	var many []string
+	if json.Unmarshal(raw, &many) == nil {
+		return strings.Join(many, "|")
+	}
+	return ""
 }
 
 // ToolProp — описание одного параметра инструмента.

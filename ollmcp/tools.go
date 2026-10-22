@@ -55,11 +55,8 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 	// заголовками, как диалог со своим сервером. Без них Ollama за прокси
 	// с авторизацией отказывала эмбеддеру, и служба молча откатывалась
 	// на поиск по словам.
-	fallback := ""
-	var headers map[string]string
-	if len(cfg.Servers) > 0 {
-		fallback, headers = cfg.Servers[0].URL, cfg.Servers[0].Headers
-	}
+	// Тот же источник, что у карты понятий службы (gmaint.QueryVector).
+	fallback, headers := cfg.EmbedFallback(), cfg.EmbedFallbackHeaders()
 	// Один переводчик на службу: его кэш общий у инструментов и у /api/v1.
 	// nil — kb.translate выключен.
 	tr := qtranslate.New(cfg, fallback, headers)
@@ -151,6 +148,15 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 	if err != nil {
 		return nil, kbserve.Opts{}, err
 	}
+	// Графовый вход для клиентов ollchat (/api/v1/graph/tool и /graph/search):
+	// тот же, что у `ollchat --serve`, и с тем же кэшем, что у инструментов MCP, —
+	// второго графа в памяти службы не появляется. До 22.10.2026 его здесь
+	// не было вовсе, и оба входа отвечали 501: клиент с kb.server_url не мог
+	// взять у службы ни карту понятий, ни инструменты графа (этап 121, А6).
+	graphReg, err := gmaint.GraphRegistry(registry)
+	if err != nil {
+		return nil, kbserve.Opts{}, fmt.Errorf("набор графового входа службы: %w", err)
+	}
 	return srv,
 		kbserve.Opts{
 			TableBoost: cfg.KB.TableBoost,
@@ -161,6 +167,7 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 			Translator: tr,
 			Default:    cfg.KB.Default,
 			Token:      kbserve.Token(),
+			Graph:      &gmaint.GraphService{Cfg: cfg, Registry: graphReg, Base: base, Cache: graphCache},
 		}, nil
 }
 

@@ -42,14 +42,14 @@ func (g *blockingGraph) Tool(context.Context, string, string, map[string]any) (s
 	return "", nil
 }
 
-func (g *blockingGraph) Search(ctx context.Context, _, _ string) (any, error) {
+func (g *blockingGraph) Search(ctx context.Context, _ GraphSearchRequest) (GraphSearchResponse, error) {
 	g.calls.Add(1)
 	g.entered <- struct{}{}
 	select {
 	case <-g.release:
-		return "ok", nil
+		return GraphSearchResponse{}, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return GraphSearchResponse{}, ctx.Err()
 	}
 }
 

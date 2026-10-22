@@ -224,13 +224,18 @@ func (m *Model) mixShowCmd(question string) tea.Cmd {
 
 // mixShowText — отчёт /mix show: что ушло бы модели и почему.
 func mixShowText(question string, res mixer.Result, report string) string {
+	remote := ""
+	if res.Remote != "" {
+		remote = res.Remote + "\n"
+	}
 	if res.Empty() {
-		return "к этому вопросу не подмешалось бы ничего.\n" +
+		return remote + "к этому вопросу не подмешалось бы ничего.\n" +
 			"Привратник связывает вопрос с понятиями графа; не связался — не подмешивается.\n" +
 			"Проверьте /graph auto и /kb auto, выбрана ли коллекция (/kb use) и есть ли граф."
 	}
 	var b strings.Builder
 	b.WriteString("Подмес к вопросу «" + question + "»\n")
+	b.WriteString(remote)
 	b.WriteString(mixLine(res))
 	b.WriteString("\n\n── что уходит модели ──\n")
 	b.WriteString(res.Text)

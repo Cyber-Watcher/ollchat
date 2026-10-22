@@ -111,6 +111,9 @@ func parsedNames(t *testing.T) map[string]bool {
 	for _, c := range caseStrings(t, "commands.go", "contextCmd") {
 		out["/context "+c] = true
 	}
+	for _, c := range caseStrings(t, "mcpcmd.go", "mcpCmd") {
+		out["/mcp "+c] = true
+	}
 	for _, mode := range []string{permissions.ModeSafe, permissions.ModeAutoEdit,
 		permissions.ModeNoAsk, permissions.ModeYolo} {
 		out["/mode "+mode] = true

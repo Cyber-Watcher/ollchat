@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -94,6 +95,12 @@ type Plan struct {
 	// от модели имена клиентов и врачей, и до 03.10.2026 они ложились
 	// открытым текстом в steps-*.jsonl.
 	LogArgs string
+
+	// Note — пометка о том, КАК исполнен вызов, для журнала шагов (поле note
+	// записи tool). Выставляется внутри Run, когда это ясно только там:
+	// «служба недоступна — искал по своим файлам» (kb.FallbackNote, этап 121,
+	// А4). Пусто — исполнен обычным путём.
+	Note string
 }
 
 // Tool — инструмент, предоставляемый модели.
@@ -129,6 +136,11 @@ type Options struct {
 	// к ней, а не к файлам. Инструменты графа так не умеют: графу нужны файлы,
 	// и они по-прежнему берут коллекцию из KB.
 	Library kb.Library
+
+	// RemoteSearch — исполнитель инструмента search в службе ollmcp по MCP
+	// (этап 121, А3; задаётся вместе с Library, когда kb.server_url указан).
+	// nil — search ищет сам, как раньше.
+	RemoteSearch RemoteCaller
 
 	// GraphCache — открытые графы, живущие между вызовами. Необязателен:
 	// без него каждый вызов открывает граф заново, как было раньше. Нужен
@@ -248,10 +260,19 @@ func ReadOnlyNames() []string {
 }
 
 // Registry — набор включённых инструментов.
+//
+// Встроенные (tools, order) собираются один раз в NewRegistry и дальше не
+// меняются. Инструменты сторонних серверов MCP (ext) меняются на ходу —
+// переподключение, перечитанный список, — пока модель в другой горутине
+// читает Specs и зовёт Plan; поэтому они под замком (этап 121, Б5).
 type Registry struct {
 	opts  Options
 	tools map[string]Tool
 	order []string
+
+	mu  sync.RWMutex
+	ext map[string]Tool     // имя mcp__<сервер>__<инструмент> → инструмент
+	srv map[string][]string // сервер → имена его инструментов, в порядке сервера
 }
 
 // NewRegistry собирает инструменты по списку имён из конфига.
@@ -322,8 +343,18 @@ func NewRegistry(enabled []string, opts Options) (*Registry, error) {
 		// и разрешения остаются местными, уезжает только исполнение.
 		if graphTools[name] {
 			if caller, ok := opts.Library.(GraphCaller); ok {
-				t = &remoteGraphTool{inner: t, caller: caller, collection: opts.KBDefault}
+				t = &remoteGraphTool{inner: t, caller: caller, collection: opts.KBDefault, local: opts.KB != nil}
 			}
+		}
+		// search на общей библиотеке — тоже служба, по MCP (этап 121, А3).
+		if name == NameSearch && opts.RemoteSearch != nil {
+			rs := &remoteSearchTool{inner: t.(*searchTool), caller: opts.RemoteSearch, collection: opts.KBDefault}
+			if opts.KB != nil {
+				lo := opts
+				lo.Library, lo.RemoteSearch = nil, nil
+				rs.local = &searchTool{opts: lo}
+			}
+			t = rs
 		}
 		if _, dup := r.tools[name]; dup {
 			continue
@@ -360,10 +391,13 @@ func (o Options) embedder() kb.Embedder {
 	return o.Embedder
 }
 
-// Names возвращает имена включённых инструментов в порядке конфига.
+// Names возвращает имена включённых встроенных инструментов в порядке конфига.
+//
+// Инструментов сторонних серверов здесь нет намеренно: по этому списку судят
+// «что включено в agent.tools» (/tools, подсказка о расхождении с конфигом,
+// журнал сеанса), а их список — ExternalNames.
 func (r *Registry) Names() []string { return append([]string(nil), r.order...) }
 
-// Has сообщает, включён ли инструмент в этом сеансе.
 // Subset отдаёт тот же набор, урезанный до перечисленных имён.
 //
 // Инструменты берутся **те же самые**, а не собираются заново: у них внутри
@@ -392,15 +426,145 @@ func (r *Registry) spec(name string) string {
 	return t.Spec().Function.Description
 }
 
-func (r *Registry) Has(name string) bool { _, ok := r.tools[name]; return ok }
+// Has сообщает, включён ли инструмент в этом сеансе — встроенный или внешний.
+func (r *Registry) Has(name string) bool {
+	if _, ok := r.tools[name]; ok {
+		return true
+	}
+	_, ok := r.lookupExternal(name)
+	return ok
+}
 
-// Specs возвращает описания инструментов для передачи модели.
+// Specs возвращает описания инструментов для передачи модели: встроенные
+// в порядке конфига, за ними внешние — по серверам в алфавитном порядке,
+// внутри сервера в его порядке. Порядок постоянный: от него зависит кеш
+// промпта на сервере модели.
 func (r *Registry) Specs() []ollama.Tool {
 	specs := make([]ollama.Tool, 0, len(r.order))
 	for _, name := range r.order {
 		specs = append(specs, r.tools[name].Spec())
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	servers := make([]string, 0, len(r.srv))
+	for s := range r.srv {
+		servers = append(servers, s)
+	}
+	sort.Strings(servers)
+	for _, s := range servers {
+		for _, name := range r.srv[s] {
+			specs = append(specs, r.ext[name].Spec())
+		}
+	}
 	return specs
+}
+
+// ExternalPrefix — начало имени инструмента стороннего сервера MCP.
+const ExternalPrefix = "mcp__"
+
+// ExternalName — имя, под которым модель видит инструмент tool сервера server.
+func ExternalName(server, tool string) string { return ExternalPrefix + server + "__" + tool }
+
+// SplitExternalName разбирает mcp__<сервер>__<инструмент>. Имя сервера
+// подчёркиваний не содержит (config: [a-z0-9-]), поэтому первое «__» после
+// приставки — граница; в имени инструмента «__» законно.
+func SplitExternalName(name string) (server, tool string, ok bool) {
+	rest, found := strings.CutPrefix(name, ExternalPrefix)
+	if !found {
+		return "", "", false
+	}
+	server, tool, ok = strings.Cut(rest, "__")
+	if !ok || server == "" || tool == "" {
+		return "", "", false
+	}
+	return server, tool, true
+}
+
+// IsExternalName — имя инструмента стороннего сервера MCP. По приставке,
+// а не по списку: агент проверяет так «выход наружу» и «чужой текст» (gate.go),
+// и сервер, подключённый посреди сеанса, не должен проскочить мимо проверок.
+func IsExternalName(name string) bool {
+	_, _, ok := SplitExternalName(name)
+	return ok
+}
+
+// SetExternal заменяет набор инструментов сервера server (этап 121, Б3).
+// Пустой list убирает сервер из реестра: он упал или выключен.
+//
+// Каждое имя обязано быть ExternalName(server, …) и не совпадать со
+// встроенным: встроенные не заменяются ни при каких описаниях сервера.
+// Ошибка — набор сервера не меняется вовсе, а не наполовину.
+func (r *Registry) SetExternal(server string, list []Tool) error {
+	names := make([]string, 0, len(list))
+	seen := map[string]bool{}
+	for _, t := range list {
+		name := t.Name()
+		s, _, ok := SplitExternalName(name)
+		if !ok || s != server {
+			return fmt.Errorf("инструмент %q: имя внешнего инструмента сервера %s обязано быть %s<инструмент>",
+				name, server, ExternalName(server, ""))
+		}
+		if _, builtin := r.tools[name]; builtin {
+			return fmt.Errorf("инструмент %q совпадает со встроенным", name)
+		}
+		if t.Spec().Function.Name != name {
+			return fmt.Errorf("инструмент %q описан для модели под именем %q", name, t.Spec().Function.Name)
+		}
+		if seen[name] {
+			return fmt.Errorf("инструмент %q у сервера %s дважды", name, server)
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ext == nil {
+		r.ext, r.srv = map[string]Tool{}, map[string][]string{}
+	}
+	for _, old := range r.srv[server] {
+		delete(r.ext, old)
+	}
+	delete(r.srv, server)
+	if len(list) == 0 {
+		return nil
+	}
+	for _, t := range list {
+		r.ext[t.Name()] = t
+	}
+	r.srv[server] = names
+	return nil
+}
+
+// ExternalNames — имена инструментов сторонних серверов, в порядке Specs.
+func (r *Registry) ExternalNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	servers := make([]string, 0, len(r.srv))
+	for s := range r.srv {
+		servers = append(servers, s)
+	}
+	sort.Strings(servers)
+	var out []string
+	for _, s := range servers {
+		out = append(out, r.srv[s]...)
+	}
+	return out
+}
+
+// lookupExternal — внешний инструмент по имени.
+func (r *Registry) lookupExternal(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.ext[name]
+	return t, ok
+}
+
+// lookup — инструмент по имени: встроенный или внешний.
+func (r *Registry) lookup(name string) (Tool, bool) {
+	if t, ok := r.tools[name]; ok {
+		return t, true
+	}
+	return r.lookupExternal(name)
 }
 
 // ErrUnknownTool возвращается, когда модель запросила неизвестный инструмент.
@@ -412,9 +576,9 @@ var ErrUnknownTool = errors.New("инструмент недоступен")
 // это сообщение уходит модели, и без подсказки она нередко пробует наугад
 // поля от другого инструмента вместо того, чтобы исправить вызов.
 func (r *Registry) Plan(name string, args map[string]any) (*Plan, error) {
-	t, ok := r.tools[name]
+	t, ok := r.lookup(name)
 	if !ok {
-		available := r.Names()
+		available := append(r.Names(), r.ExternalNames()...)
 		sort.Strings(available)
 		return nil, fmt.Errorf("%w: %s (доступны: %s)", ErrUnknownTool, name, strings.Join(available, ", "))
 	}
@@ -436,7 +600,8 @@ type argsHider interface {
 // (Plan вернул ошибку, и Plan.LogArgs взять неоткуда). Пусто — инструмент
 // ничего не прячет, аргументы пишутся как есть.
 func (r *Registry) SafeArgs(name string, args map[string]any) string {
-	if h, ok := r.tools[name].(argsHider); ok {
+	t, _ := r.lookup(name)
+	if h, ok := t.(argsHider); ok {
 		return h.SafeArgs(args)
 	}
 	return ""

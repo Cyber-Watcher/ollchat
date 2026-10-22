@@ -35,11 +35,21 @@ var foreignSources = map[string]bool{
 	"graph_topic": true, "graph_search": true, "scan_redact": true, "confluence_connector": true,
 }
 
+// isEgress — инструмент отправляет данные наружу: из списка или любой
+// инструмент стороннего сервера MCP (этап 121, Б4) — доводы модели уходят на
+// чужую машину. По приставке имени, а не перечислением: сервер, подключённый
+// посреди сеанса, иначе проскочил бы мимо проверок хода.
+func isEgress(name string) bool { return egressTools[name] || tools.IsExternalName(name) }
+
+// isForeign — вывод инструмента — чужой текст: из списка или ответ стороннего
+// сервера MCP (этап 121, Б4).
+func isForeign(name string) bool { return foreignSources[name] || tools.IsExternalName(name) }
+
 // tainted — вошёл ли в разговор чужой текст: есть результат инструмента-источника,
 // и это не отказ (отклонённый вызов ничего не принёс).
 func tainted(msgs []ollama.Message) bool {
 	for _, m := range msgs {
-		if m.Role == ollama.RoleTool && foreignSources[m.ToolName] && !refusal(m.Content) {
+		if m.Role == ollama.RoleTool && isForeign(m.ToolName) && !refusal(m.Content) {
 			return true
 		}
 	}
@@ -198,6 +208,21 @@ func privateTarget(args string) string {
 	return ""
 }
 
+// PrivateEgress — причина отказа по agent.private_egress_check (Н16), если
+// инструмент name исходящий (http_fetch, web_search, сторонний сервер MCP),
+// а в доводах rawArgs частный адрес или имя хоста; пусто — отказывать не в чем.
+// Одна проверка на модель (gate) и на ключ --mcp-call, который зовёт
+// инструмент мимо агента: оттуда частному адресу уходить наружу тоже нельзя.
+func PrivateEgress(name, rawArgs string) string {
+	if !isEgress(name) {
+		return ""
+	}
+	if what := privateTarget(rawArgs); what != "" {
+		return "в исходящем запросе " + what + " (agent.private_egress_check)"
+	}
+	return ""
+}
+
 var (
 	sshReMu sync.Mutex
 	sshRe   = map[string]*regexp.Regexp{}
@@ -222,7 +247,7 @@ func (r *Runner) gate(name string, plan *tools.Plan, rawArgs string, d permissio
 		return d
 	}
 	kind := plan.Req.Kind
-	risky := kind == permissions.KindWrite || kind == permissions.KindBash || kind == permissions.KindFetch || egressTools[name]
+	risky := kind == permissions.KindWrite || kind == permissions.KindBash || kind == permissions.KindFetch || isEgress(name)
 
 	// Н6: действие с последствиями без следа в журнале не исполняется.
 	if r.JournalFailClosed && risky && r.Steps != nil {
@@ -232,15 +257,14 @@ func (r *Runner) gate(name string, plan *tools.Plan, rawArgs string, d permissio
 		}
 	}
 	// Н16: частные адреса и имена наружу не уходят.
-	if r.PrivateEgressCheck && egressTools[name] {
-		if what := privateTarget(rawArgs); what != "" {
-			return permissions.Result{Decision: permissions.DecisionDeny,
-				Reason: "в исходящем запросе " + what + " (agent.private_egress_check)"}
+	if r.PrivateEgressCheck {
+		if why := PrivateEgress(name, rawArgs); why != "" {
+			return permissions.Result{Decision: permissions.DecisionDeny, Reason: why}
 		}
 	}
 	// Т7, О15: после чужого текста исходящий запрос — только с согласия человека.
 	// В yolo не спрашивается ничего (слово владельца 16.10.2026).
-	if r.UntrustedGate && egressTools[name] && r.tainted && d.Decision == permissions.DecisionAllow &&
+	if r.UntrustedGate && isEgress(name) && r.tainted && d.Decision == permissions.DecisionAllow &&
 		(r.Guard == nil || r.Guard.Mode() != permissions.ModeYolo) {
 		return permissions.Result{Decision: permissions.DecisionAsk,
 			Reason: "в разговоре чужой текст (страница, книга, документ) — исходящий запрос только с вашего согласия (agent.untrusted_gate)"}

@@ -435,7 +435,7 @@ func (m *Model) kbUseCmd(arg string) tea.Cmd {
 		return nil
 	}
 	if name == "off" || name == "выкл" {
-		m.kb.use = ""
+		m.kb.use, m.kb.picked = "", false
 		m.kb.coll = nil
 		m.closeGraph()
 		m.addBlock(block{kind: blockNotice, text: "коллекция снята: модель больше не ищет по книгам"})
@@ -446,7 +446,9 @@ func (m *Model) kbUseCmd(arg string) tea.Cmd {
 		m.fail("/kb use", err)
 		return nil
 	}
-	m.kb.use = name
+	// Выбор человека, а не «единственная сама»: с общей библиотекой это имя
+	// уходит службе (planRemote), а /kb status не зовёт его выбранным само.
+	m.kb.use, m.kb.picked = name, false
 	m.kb.coll = coll
 	m.closeGraph() // граф прежней коллекции больше не при чём
 	st := coll.Stats()
@@ -704,8 +706,13 @@ type kbPendingMsg struct{ text string }
 //
 // Только сообщает. Ни индексация, ни векторизация сама не запускается: это
 // минуты работы и чужое решение — а на общем сервере ещё и чужая видеопамять.
+//
+// С общей библиотекой (kb.server_url) сверки нет: она открывает КАЖДУЮ свою
+// коллекцию, и та остаётся в памяти до выхода. Замер 22.10.2026: TUI с
+// библиотекой держал открытыми все четыре коллекции — 282 файла, 1 329 976 КБ.
+// Книги ищет служба, свои файлы — только запасной путь и явные команды /kb.
 func (m *Model) kbPendingCmd() tea.Cmd {
-	if m.kb.base == nil {
+	if m.kb.base == nil || m.kb.lib != nil {
 		return nil
 	}
 	checkFolders := m.cfg.KB.SyncOnStart

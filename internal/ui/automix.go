@@ -44,6 +44,13 @@ type mixJob struct {
 	// реплика» для продолжения (kb.followup_concat, этап 112, У9). Модели всё
 	// равно уходит вопрос как есть — он едет в mixReadyMsg отдельно.
 	query string
+
+	// lib, name — подмес через общую библиотеку (этап 121, А2): коллекцию
+	// открывает команда, потому что это запрос по сети, а mixPlan обязан
+	// оставаться чтением полей. lib — kb.Fallback со своими файлами на случай
+	// недоступной службы (А4); nil — подмес по своим файлам.
+	lib  kb.Library
+	name string
 }
 
 // needsOpen сообщает, что команде придётся открывать граф — это десятки секунд.
@@ -73,22 +80,24 @@ type mixReadyMsg struct {
 // mixPlan снимает с модели всё, что нужно подмешиванию. Быстрое: чтение полей.
 // Второе значение — есть ли что подмешивать вообще.
 func (m *Model) mixPlan() (mixJob, bool) {
-	if m.kb.use == "" || m.kb.base == nil {
+	remote := m.kb.lib != nil
+	if !remote && (m.kb.use == "" || m.kb.base == nil) {
 		return mixJob{}, false
 	}
 	if !m.kb.autoOn && !m.gr.autoOn {
 		return mixJob{}, false
 	}
-	coll, err := m.kbCollection(m.kb.use)
-	if err != nil {
-		return mixJob{}, false
+	var coll *kb.Collection
+	if !remote {
+		c, err := m.kbCollection(m.kb.use)
+		if err != nil {
+			return mixJob{}, false
+		}
+		coll = c
 	}
 	topK, maxPerBook, minCos, semWeight := m.live.KB()
-	dir := coll.Dir()
-	stamp := graphStamp(dir, m.cfg.Graph.Name)
 	job := mixJob{
 		deps: mixer.Deps{
-			Coll:     coll,
 			Embedder: m.embedder(),
 			Reranker: kbrerank.New(m.cfg.KB.RerankOptions()),
 			BooksOn:  m.kb.autoOn,
@@ -126,17 +135,74 @@ func (m *Model) mixPlan() (mixJob, bool) {
 			},
 			Collection: m.kb.use,
 		},
-		graphDir:   dir,
-		graphStamp: stamp,
-		chunks:     coll.ChunkCount(),
-		graphCfg:   m.cfg.Graph,
+		graphCfg: m.cfg.Graph,
 	}
+	if remote {
+		m.planRemote(&job)
+		return job, true
+	}
+	dir := coll.Dir()
+	stamp := graphStamp(dir, m.cfg.Graph.Name)
+	job.deps.Coll = coll
+	job.graphDir, job.graphStamp, job.chunks = dir, stamp, coll.ChunkCount()
 	// Отпечаток тот же — граф в памяти годен. Реестр дозаписывается идущей
 	// рядом сборкой, поэтому сверяется размер файла, а не сам факт открытия.
 	if m.gr.open != nil && m.gr.dir == dir && m.gr.stamp == stamp {
 		job.graphOpen = m.gr.open
 	}
 	return job, true
+}
+
+// planRemote готовит подмес через общую библиотеку (этап 121, А2).
+//
+// Свой граф не открывается и в модель не ложится: needsOpen() ложно, graphOpen
+// пуст, значка «GR» нет. Книги — у службы, карта понятий — у неё же
+// (mixer.Deps.Map), свои файлы — только запасным путём, когда служба не
+// отвечает (А4): коллекция открывается при переходе, граф — из общего кэша
+// графов на один подмес. Здесь только чтение полей: в замыкания уходят база,
+// кэш и настройки, но не модель — job считает горутина команды.
+func (m *Model) planRemote(job *mixJob) {
+	job.graphStamp = -1 // своего графа подмес не открывает
+	job.name = m.kb.use
+	if m.kb.picked {
+		// Своя единственная коллекция, выбранная сама при пустом kb.default, —
+		// не выбор человека, и у службы её может не быть: службе уходит пустое
+		// имя, её умолчание, как и у инструментов модели. Своё имя — только
+		// запасному пути: свой граф (localCollection ниже) — по нему, а книги
+		// kb.Fallback при пустом имени и пустом kb.default берёт из той же
+		// единственной (рецензия этапа 121).
+		job.name, job.set.Collection = "", ""
+	}
+	lib := kb.Fallback{Remote: m.kb.lib, Default: m.cfg.KB.Default}
+	if base := m.kb.base; base != nil {
+		lib.Local = base
+		name, def := m.kb.use, m.cfg.KB.Default
+		job.deps.LocalGraph = mixer.CachedGraph(m.gr.cache, m.cfg.Graph.Rules(),
+			func() (*kb.Collection, error) { return localCollection(base, name, def) })
+	}
+	job.lib = lib
+	if ms, ok := m.kb.lib.(mixer.MapSource); ok {
+		job.deps.Map = ms
+	}
+}
+
+// localCollection открывает свою коллекцию для запасного пути: названную,
+// по настройке или единственную — так же, как kb.Fallback выбирает её для книг.
+func localCollection(base *kb.Base, name, def string) (*kb.Collection, error) {
+	if name == "" {
+		name = def
+	}
+	if name == "" {
+		names, err := base.Names()
+		if err != nil {
+			return nil, err
+		}
+		if len(names) != 1 {
+			return nil, fmt.Errorf("коллекция не выбрана (kb.default), своих коллекций %d", len(names))
+		}
+		name = names[0]
+	}
+	return base.Open(name)
 }
 
 // runMixCmd считает подмешивание вне цикла событий.
@@ -148,6 +214,20 @@ func runMixCmd(gen int, question string, job mixJob, prog chan<- graph.OpenProgr
 	return func() tea.Msg {
 		defer close(prog) // закрытый канал говорит ленте, что полосу пора убрать
 		msg := mixReadyMsg{gen: gen, question: question, lent: job.graphOpen}
+		if job.lib != nil {
+			// Коллекция службы — запрос по сети, поэтому здесь, а не в mixPlan.
+			// Не открылась ни у службы, ни у себя — подмешивать нечего, а почему,
+			// человек видит строкой под вопросом.
+			src, err := job.lib.Source(job.name)
+			if err != nil {
+				msg.mix = mixResult{Remote: err.Error()}
+				return msg
+			}
+			job.deps.Coll = src
+			if job.set.Collection == "" {
+				job.set.Collection = src.Name() // умолчание выбрала служба
+			}
+		}
 		g := job.graphOpen
 		if job.needsOpen() {
 			opened, err := graph.OpenWithProgress(job.graphDir, job.chunks, job.graphCfg.Rules(), sendProgress(prog))
@@ -214,6 +294,11 @@ func runMixShowCmd(question string, job mixJob, report string, prog chan<- graph
 // тратится, пока он читает приветствие и набирает вопрос, и к моменту Enter
 // граф чаще всего уже в памяти.
 func (m *Model) warmGraphCmd(prog chan<- graph.OpenProgress) tea.Cmd {
+	// С общей библиотекой граф держит служба: открывать свой — ровно второй
+	// граф в памяти, от которого этап 121 и избавляет (А1).
+	if m.kb.lib != nil {
+		return nil
+	}
 	if !m.cfg.Mix.Graph || !m.cfg.Graph.Cache || m.kb.base == nil || m.kb.use == "" {
 		return nil
 	}
@@ -251,6 +336,15 @@ func sendProgress(prog chan<- graph.OpenProgress) func(graph.OpenProgress) {
 
 // autoMix собирает то, что уйдёт модели вместе с вопросом.
 func (m *Model) autoMix(question string) mixResult {
+	if m.kb.lib != nil {
+		// Через общую библиотеку — тем же путём, что вопрос в диалоге
+		// (mixPlan и runMixCmd): свой граф в модель не ложится.
+		job, ok := m.mixPlan()
+		if !ok {
+			return mixResult{}
+		}
+		return runMixCmd(genWarm, question, job, make(chan graph.OpenProgress, 1))().(mixReadyMsg).mix
+	}
 	if m.kb.use == "" || m.kb.base == nil {
 		return mixResult{}
 	}

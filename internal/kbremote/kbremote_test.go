@@ -3,6 +3,8 @@ package kbremote
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,6 +35,11 @@ type fakeServer struct {
 	fail     int // код ответа вместо выдачи; 0 — отвечать нормально
 
 	booksFail int // сколько следующих запросов реестра книг отклонить
+
+	// Поиск по графу: тело последнего запроса как пришло и ответ как есть —
+	// договор проверяется по самим байтам, без серверных типов.
+	graphBody []byte
+	graphResp string
 }
 
 func (f *fakeServer) handler() http.Handler {
@@ -87,6 +94,10 @@ func (f *fakeServer) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(searchResponse{
 			Results: f.results, Note: f.note, Generation: f.gen, Collection: "books",
 		})
+	})
+	mux.HandleFunc("/api/v1/graph/search", func(w http.ResponseWriter, r *http.Request) {
+		f.graphBody, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, f.graphResp)
 	})
 	mux.HandleFunc("/api/v1/around", func(w http.ResponseWriter, r *http.Request) {
 		var req aroundRequest
@@ -363,5 +374,139 @@ func TestAroundOverNetwork(t *testing.T) {
 	}
 	if len(parts) != 1 || parts[0].ID != "books/12#37" {
 		t.Errorf("не тот кусок: %+v", parts)
+	}
+}
+
+// Служба не дала ответа — ошибка помечена kb.ErrUnreachable: по метке клиент
+// переходит на свои файлы (этап 121, А4). Текст прежний — с адресом.
+func TestUnreachableIsMarked(t *testing.T) {
+	f := &fakeServer{gen: "g1", books: 1}
+	cl, ts := newFake(t, f)
+	ts.Close()
+
+	_, err := cl.Source("books")
+	if !errors.Is(err, kb.ErrUnreachable) {
+		t.Fatalf("отказ в соединении не помечен как недоступность службы: %v", err)
+	}
+	if !strings.Contains(err.Error(), ts.URL) {
+		t.Errorf("в ошибке нет адреса службы: %v", err)
+	}
+}
+
+// Срок ожидания — тоже недоступность: служба не ответила вовремя.
+func TestTimeoutIsMarked(t *testing.T) {
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer ts.Close()
+	defer close(release)
+	cl, err := New(Opts{URL: ts.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.Names(); !errors.Is(err, kb.ErrUnreachable) {
+		t.Errorf("срок ожидания не помечен как недоступность службы: %v", err)
+	}
+}
+
+// Отказ по смыслу — ключ, неизвестная коллекция, ошибка службы — не
+// недоступность: перехода на свои файлы по нему нет.
+func TestRefusalIsNotUnreachable(t *testing.T) {
+	f := &fakeServer{token: "верный-ключ", gen: "g1", books: 1}
+	ts := httptest.NewServer(f.handler())
+	defer ts.Close()
+
+	stranger, err := New(Opts{URL: ts.URL, Token: "чужой-ключ"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stranger.Source("books"); err == nil || errors.Is(err, kb.ErrUnreachable) {
+		t.Errorf("401: %v", err)
+	}
+	owner, err := New(Opts{URL: ts.URL, Token: "верный-ключ"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Source("нет-такой"); err == nil || errors.Is(err, kb.ErrUnreachable) {
+		t.Errorf("неизвестная коллекция: %v", err)
+	}
+	src, err := owner.Source("books")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.fail = http.StatusNotFound
+	if _, err := src.SearchWith(context.Background(), "q", kb.DefaultSearchOpts(), nil); err == nil ||
+		errors.Is(err, kb.ErrUnreachable) {
+		t.Errorf("ошибка службы со статусом: %v", err)
+	}
+}
+
+// Отмена вызывающим (человек нажал Esc) — не недоступность службы: искать
+// у себя брошенное незачем.
+func TestCancelIsNotUnreachable(t *testing.T) {
+	f := &fakeServer{gen: "g1", books: 1}
+	cl, _ := newFake(t, f)
+	src, err := cl.Source("books")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = src.SearchWith(ctx, "q", kb.DefaultSearchOpts(), nil)
+	if err == nil || errors.Is(err, kb.ErrUnreachable) {
+		t.Errorf("отменённый запрос: %v", err)
+	}
+}
+
+// Размер карты решает клиент: entities и neighbors уходят службе. Ноль —
+// «как у службы», и тогда полей в запросе нет вовсе — служба прежней сборки
+// видит прежний запрос (этап 121, А2).
+func TestGraphSearchSendsMapSize(t *testing.T) {
+	f := &fakeServer{graphResp: `{"result":{"Entities":[{"Name":"горутина","Mentions":3}]},` +
+		`"chain":[{"From":"горутина","To":"канал","Type":"uses"},{"From":"канал","To":"рантайм","Type":"part_of"}]}`}
+	cl, _ := newFake(t, f)
+
+	res, chain, err := cl.GraphSearch(context.Background(), "books", "как связаны горутина и рантайм", 6, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(f.graphBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["entities"] != float64(6) || sent["neighbors"] != float64(4) || sent["collection"] != "books" {
+		t.Errorf("службе ушло: %s", f.graphBody)
+	}
+	if len(res.Entities) != 1 || res.Entities[0].Name != "горутина" || res.Entities[0].Mentions != 3 {
+		t.Errorf("карта не разобралась: %+v", res)
+	}
+	// Цепочка между понятиями вопроса приходит со службы (А6).
+	if len(chain) != 2 || chain[0].From != "горутина" || chain[1].To != "рантайм" {
+		t.Errorf("цепочка не разобралась: %+v", chain)
+	}
+
+	if _, _, err := cl.GraphSearch(context.Background(), "books", "q", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(f.graphBody), "entities") || strings.Contains(string(f.graphBody), "neighbors") {
+		t.Errorf("при нуле поля размера ушли службе: %s", f.graphBody)
+	}
+}
+
+// Служба прежней сборки отдаёт карту без цепочки — клиент читает карту,
+// цепочка пустая.
+func TestGraphSearchOldServiceWithoutChain(t *testing.T) {
+	f := &fakeServer{graphResp: `{"result":{"Entities":[{"Name":"горутина"}]}}`}
+	cl, _ := newFake(t, f)
+	res, chain, err := cl.GraphSearch(context.Background(), "books", "q", 6, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Entities) != 1 || len(chain) != 0 {
+		t.Errorf("ответ прежней службы: карта %+v, цепочка %+v", res, chain)
 	}
 }

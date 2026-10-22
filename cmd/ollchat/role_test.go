@@ -53,6 +53,7 @@ var (
 		"--kb-eval-gen", "--kb-sample", "--kb-eval", "--graph-entry-eval", "--graph-book",
 		"--graph-stats", "--doc-probe", "--scan-redact", "--scan-redact-llm", "--census",
 		"--probes", "--graph-status", "--ask", "--ask-stdin", "--questions", "--serve",
+		"--mcp-servers", "--mcp-ping", "--mcp-tools", "--mcp-call", "--mcp-registry", "--kb-remote-check",
 	}
 	// flagsModifying — не команды: уточняют команду или запуск целиком.
 	flagsModifying = []string{
@@ -91,7 +92,7 @@ var (
 		"--graph-sense", "--graph-pool", "--mix-entities", "--mix-neighbors", "--kb-topk",
 		"--kb-max-per-book", "--kb-min-cosine", "--kb-semantic-weight",
 		"--mix-pin", "--mix-full", "--mix-sense-snippet", "--mix-only", "--kb-eval-gen-must", "--kb-eval-gen-code", "--logprobs",
-		"--kb-eval-gen-distract", "--tool-perturb", "--kb-eval-part",
+		"--kb-eval-gen-distract", "--tool-perturb", "--kb-eval-part", "--mcp-yes",
 	}
 )
 

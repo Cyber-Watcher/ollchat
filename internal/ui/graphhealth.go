@@ -32,7 +32,11 @@ const healthEvery = 10 * time.Minute
 // оказаться сетевым или спящим. Интерфейс не должен ждать ничего.
 func (m *Model) checkGraphHealthCmd() tea.Cmd {
 	base, use := m.kb.base, m.kb.use
-	if base == nil || use == "" {
+	// Библиотека через службу (kb.server_url): свой граф и свою коллекцию TUI
+	// не открывает, здоровье графа — забота службы. Проверка же открывала
+	// коллекцию и держала её до выхода: замер 22.10.2026 — TUI без своего графа
+	// занимал 1 332 296 КБ, открыты chunks.dat и словесный индекс books.
+	if base == nil || use == "" || m.kb.lib != nil {
 		return nil
 	}
 	return func() tea.Msg {

@@ -490,11 +490,12 @@ func graphNeedsLocalFiles(cfg *config.Config, name string, err error) error {
 	if strings.TrimSpace(cfg.KB.ServerURL) == "" {
 		return err // обычная работа с файлами — отказ и так по существу
 	}
-	return fmt.Errorf("граф понятий через общую библиотеку (%s) пока не раздаётся, "+
+	return fmt.Errorf("команды графа работают только со своими файлами, "+
 		"а локальной коллекции %q в каталоге %s нет.\n"+
-		"Поиск по книгам при этом работает: спрашивайте модель или /kb search.\n"+
-		"Для поиска по графу нужна локальная копия коллекции вместе с каталогом graph/",
-		cfg.KB.ServerURL, name, cfg.KB.Dir)
+		"Поиск по книгам и графу через общую библиотеку (%s) при этом работает: "+
+		"спрашивайте модель; проверка — ollchat --kb-remote-check.\n"+
+		"Для этой команды нужна локальная копия коллекции вместе с каталогом graph/",
+		name, cfg.KB.Dir, cfg.KB.ServerURL)
 }
 
 // CacheFor заводит кэш открытых графов, если он не выключен настройкой.
@@ -522,8 +523,10 @@ func NeighborRank(cfg *config.Config) graph.NeighborRank {
 }
 
 func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
-	fallback := cfg.EmbedFallback()
-	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 30*time.Second, nil)
+	// Заголовки — того же сервера, что адрес: без них служба (GraphService.Search)
+	// за прокси с авторизацией молча считала карту без смыслового входа, хотя
+	// её инструменты получали заголовки (ollmcp, рецензия этапа 121).
+	emb := kbembed.New(cfg.KB.EmbedOptions(), cfg.EmbedFallback(), 30*time.Second, cfg.EmbedFallbackHeaders())
 	if emb == nil {
 		return nil
 	}

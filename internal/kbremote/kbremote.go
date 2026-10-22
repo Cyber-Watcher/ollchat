@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -298,13 +299,13 @@ func (c *Client) do(req *http.Request, out any) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("библиотека %s недоступна: %w", c.base, err)
+		return transport(req, fmt.Errorf("библиотека %s недоступна: %w", c.base, err))
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return fmt.Errorf("библиотека %s: ответ не дочитался: %w", c.base, err)
+		return transport(req, fmt.Errorf("библиотека %s: ответ не дочитался: %w", c.base, err))
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e struct {
@@ -323,6 +324,28 @@ func (c *Client) do(req *http.Request, out any) error {
 	}
 	return nil
 }
+
+// transport помечает ошибку, при которой служба не дала ответа (отказ
+// в соединении, срок, обрыв), как kb.ErrUnreachable: по этой метке клиент
+// переходит на свои файлы (этап 121, А4). Ответ со статусом — 401, 404,
+// «нет такой коллекции», 501 «граф не подключён» — сюда не попадает: это
+// отказ по смыслу, и переход его спрятал бы.
+//
+// Отмена вызывающим — человек нажал Esc — не недоступность службы: искать
+// у себя то, что человек сам бросил, незачем.
+func transport(req *http.Request, err error) error {
+	if errors.Is(req.Context().Err(), context.Canceled) {
+		return err
+	}
+	return unreachable{err}
+}
+
+// unreachable — ошибка службы, не давшей ответа. Текст прежний (адрес
+// и причина), метка — kb.ErrUnreachable.
+type unreachable struct{ err error }
+
+func (e unreachable) Error() string   { return e.err.Error() }
+func (e unreachable) Unwrap() []error { return []error{kb.ErrUnreachable, e.err} }
 
 // Формы запросов и ответов повторяют серверные (`internal/kbserve/kbserve.go`).
 // Дублирование намеренное: связать их общим пакетом значило бы, что клиент
@@ -387,17 +410,36 @@ func (c *Client) GraphTool(ctx context.Context, collection, name string, args ma
 	return resp.Text, nil
 }
 
-// GraphSearch отдаёт разбираемый результат поиска по графу.
+// GraphSearch отдаёт разбираемый результат поиска по графу и цепочку между
+// двумя понятиями вопроса.
 //
 // Нужен подмешиванию карты понятий к вопросу: размер карты решает, сколько
 // контекста уйдёт на каждый вопрос, и решать это должен тот, кто за контекст
-// платит, — клиент.
-func (c *Client) GraphSearch(ctx context.Context, collection, query string) (graph.SearchResult, error) {
-	var resp struct {
-		Result graph.SearchResult `json:"result"`
-	}
-	err := c.post(ctx, "/api/v1/graph/search", map[string]any{
-		"collection": collection, "query": query,
+// платит, — клиент. Поэтому entities и neighbors (mix.entities, mix.neighbors
+// клиента) уходят службе; ноль — «как настроено у службы», и тогда поля
+// в запросе нет вовсе: служба прежней сборки получает тот же запрос, что раньше.
+//
+// Цепочку служба считает тем же find.Chain по своему графу (этап 121, А6).
+// Служба прежней сборки поля chain не отдаёт — цепочка пустая, карта та же.
+func (c *Client) GraphSearch(ctx context.Context, collection, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error) {
+	var resp graphSearchResponse
+	err := c.post(ctx, "/api/v1/graph/search", graphSearchRequest{
+		Collection: collection, Query: query, Entities: entities, Neighbors: neighbors,
 	}, &resp)
-	return resp.Result, err
+	return resp.Result, resp.Chain, err
+}
+
+// graphSearchRequest и graphSearchResponse повторяют серверные
+// (`kbserve.GraphSearchRequest`, `kbserve.GraphSearchResponse`) — по той же
+// причине, что формы поиска выше.
+type graphSearchRequest struct {
+	Collection string `json:"collection"`
+	Query      string `json:"query"`
+	Entities   int    `json:"entities,omitempty"`
+	Neighbors  int    `json:"neighbors,omitempty"`
+}
+
+type graphSearchResponse struct {
+	Result graph.SearchResult `json:"result"`
+	Chain  []graph.PathStep   `json:"chain"`
 }

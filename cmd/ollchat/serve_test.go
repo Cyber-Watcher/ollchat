@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
+	gmaint "github.com/Cyber-Watcher/ollchat/internal/graph/maint"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/kbserve"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
@@ -57,7 +58,7 @@ func TestServeGraphToolRefusesWritingTools(t *testing.T) {
 	// одной сверки имени должно хватить, даже если урезание реестра однажды
 	// сломают.
 	for _, reg := range []*tools.Registry{full, mustGraphRegistry(t, full)} {
-		svc := &graphService{cfg: config.Default(), registry: reg, base: base}
+		svc := &gmaint.GraphService{Cfg: config.Default(), Registry: reg, Base: base}
 		mux := kbserve.Handler(kbserve.Opts{Base: base, Graph: svc, Token: "k"})
 
 		marker := filepath.Join(root, "pwned")
@@ -109,7 +110,7 @@ func TestServeGraphToolLetsGraphToolsThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := dialogRegistry(t, t.TempDir())
-	svc := &graphService{cfg: config.Default(), registry: mustGraphRegistry(t, full), base: base}
+	svc := &gmaint.GraphService{Cfg: config.Default(), Registry: mustGraphRegistry(t, full), Base: base}
 	_, err = svc.Tool(context.Background(), "", tools.NameGraphSearch, map[string]any{"query": "мьютекс"})
 	if errors.Is(err, kbserve.ErrToolNotServed) {
 		t.Fatalf("инструмент графа отвергнут как неисполняемый: %v", err)
@@ -265,7 +266,7 @@ func TestServeEmbedderSendsServerHeaders(t *testing.T) {
 
 func mustGraphRegistry(t *testing.T, full *tools.Registry) *tools.Registry {
 	t.Helper()
-	reg, err := graphRegistry(full)
+	reg, err := gmaint.GraphRegistry(full)
 	if err != nil {
 		t.Fatal(err)
 	}

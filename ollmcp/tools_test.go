@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
+	"github.com/Cyber-Watcher/ollchat/internal/kbserve"
 	"github.com/Cyber-Watcher/ollchat/internal/mcp"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
@@ -110,6 +112,47 @@ func TestServiceEmbedderSendsServerHeaders(t *testing.T) {
 	}
 	if h := <-got; h != "секрет" {
 		t.Errorf("эмбеддер службы пришёл без заголовков сервера: X-Proxy-Auth = %q", h)
+	}
+}
+
+// Служба раздаёт граф клиентам ollchat (этап 121, А6): до 22.10.2026 у
+// `ollmcp --http` графового входа не было вовсе, и /api/v1/graph/* отвечали
+// 501 — клиент с kb.server_url не получал ни карты понятий, ни инструментов
+// графа. Вход тот же, что у `ollchat --serve`: чужой инструмент — 403.
+func TestServiceServesGraphToOllchatClients(t *testing.T) {
+	t.Setenv("OLLMCP_TOKEN", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := "[kb]\ndir = \"" + filepath.Join(dir, "kb") + "\"\n[log]\nenabled = false\n" +
+		"[[servers]]\nname = \"local\"\nurl = \"http://ollama.example:11434\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := build(cfg, false, mcp.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data.Graph == nil {
+		t.Fatal("у службы нет графового входа")
+	}
+	mux := kbserve.Handler(data)
+	post := func(route, body string) int {
+		r := httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := post("/api/v1/graph/tool", `{"name":"bash","args":{"command":"true"}}`); code != http.StatusForbidden {
+		t.Errorf("bash через графовый вход: код %d, ждали 403", code)
+	}
+	// Коллекций нет — отказ по существу (400), а не «граф не подключён» (501).
+	if code := post("/api/v1/graph/search", `{"query":"горутина"}`); code == http.StatusNotImplemented {
+		t.Error("поиск по графу у службы не подключён")
 	}
 }
 

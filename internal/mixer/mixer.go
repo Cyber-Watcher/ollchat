@@ -2,6 +2,7 @@ package mixer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"strings"
@@ -174,8 +175,34 @@ type Deps struct {
 	Steps *steplog.Writer
 	Turn  string
 
+	// Map — карта понятий от службы общей библиотеки (kb.server_url, этап 121,
+	// А2). Своего графа при ней нет (Graph — nil): граф держит служба, и сюда
+	// приходит готовый результат поиска по нему вместе с цепочкой между
+	// понятиями вопроса (А6). Размер карты — Settings.Entities и Neighbors
+	// клиента: за контекст платит он. Привратник, отбор книг и отрисовка — те же,
+	// что со своим графом. nil — карту считает свой граф, если он есть.
+	Map MapSource
+
+	// LocalGraph — свой граф на случай, когда служба не ответила (решение
+	// владельца, этап 121, А4): берётся только при переходе, из общего кэша
+	// графов, и отпускается в конце Build — до выхода он в памяти не держится.
+	// nil — своего графа нет, и карты при недоступной службе не будет.
+	LocalGraph func() (*graph.Graph, func(), error)
+
 	probe *searchProbe // первый поиск по книгам за Build — для записи в журнал
 }
+
+// MapSource — служба, отдающая карту понятий по вопросу: kbremote.Client.
+//
+// Ноль в entities и neighbors — «как настроено у службы». Ошибка с меткой
+// kb.ErrUnreachable означает «служба не ответила» — по ней Build переходит
+// на свой граф; прочие ошибки — отказ по смыслу, и перехода по ним нет.
+type MapSource interface {
+	GraphSearch(ctx context.Context, collection, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error)
+}
+
+// mapTimeout — сколько ждать карту от службы; столько же Build ждёт книги.
+const mapTimeout = 30 * time.Second
 
 // searchProbe — сигналы первого поиска по книгам за один Build. Поисков за
 // вопрос бывает два (проба привратника и сами выдержки) по тому же вопросу и
@@ -208,6 +235,12 @@ type Result struct {
 	// одна на всю выдачу, чтобы не шуметь у каждой цитаты.
 	From, To int
 	Note     string
+
+	// Remote — что сказать о службе библиотеки: «служба недоступна — искал
+	// по своим файлам» (kb.FallbackNote) или её отказ по смыслу. Пусто —
+	// служба ответила или её нет вовсе. Строка идёт человеку под вопросом
+	// и в журнал шагов (этап 121, А4); бывает и при пустом подмесе.
+	Remote string
 }
 
 // Empty сообщает, что подмешивать нечего.
@@ -227,6 +260,16 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 		d.probe = &searchProbe{}
 		defer func() { logSearch(question, d, s, mixed, time.Since(started)) }()
 	}
+	// Заметка о службе ставится последней — после всех возвратов, но до записи
+	// в журнал (отложенные вызовы идут в обратном порядке): книги могли уйти
+	// на свои файлы в любом месте ниже.
+	var remote string
+	defer func() {
+		if remote == "" && kb.Fell(d.Coll) {
+			remote = kb.FallbackNote
+		}
+		mixed.Remote = remote
+	}()
 	coll := d.Coll
 	if len(s.Pin) > 0 {
 		return pinned(coll, question, s, d.Reranker)
@@ -237,7 +280,12 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 	quotesNoTools := d.NoTools && s.QuotesWithoutTools > 0
 
 	g := d.Graph
-	if g == nil {
+	// Карта выключена (mix.graph = false) — у службы её не спрашиваем, а при
+	// недоступной службе не открываем и свой граф через d.LocalGraph: каждый
+	// вопрос открывал бы граф, хотя карта не нужна (рецензия этапа 121).
+	// Здесь, а не в вызывающих: d.Map ещё и метит журнал шагов «service».
+	fromService := g == nil && d.Map != nil && d.GraphOn
+	if g == nil && !fromService {
 		// Графа нет — прежний порядок: решает подмешивание книг.
 		if !d.BooksOn {
 			return Result{}
@@ -252,32 +300,53 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 		return Result{}
 	}
 
-	// Вектор вопроса под граф: одно место на всех — find.QueryVector, оно же
-	// сверяет модель эмбеддера с векторами графа (разные модели дают
-	// бессмысленные расстояния).
-	var qv []int8
-	if s.SenseEntry && d.Embedder != nil {
-		qctx, cancel := context.WithTimeout(context.Background(), queryTimeout(s))
-		qv, _, _ = find.QueryVector(qctx, find.Deps{Graph: g, Embedder: d.Embedder}, question,
-			find.Opts{Semantic: true, QueryTimeout: queryTimeout(s)})
-		cancel()
+	var res graph.SearchResult
+	var chain []graph.PathStep
+	served := false // карта и цепочка пришли от службы готовыми
+	if fromService {
+		var release func()
+		res, chain, served, g, release, remote = serviceMap(question, d, s)
+		if release != nil {
+			defer release()
+		}
+		if !served && g == nil {
+			// Карты нет ни у службы, ни своей — прежний порядок без графа.
+			if !d.BooksOn {
+				return Result{}
+			}
+			out, _ := books(coll, question, question, 0, d, s)
+			return out
+		}
 	}
 
-	res := g.Search(question, graph.SearchOpts{
-		QueryVector:  qv,
-		TopEntities:  s.Entities,
-		TopNeighbors: s.Neighbors,
-		// Ранжирование связей — то же, что у поиска и у инструментов модели.
-		// До 28.08.2026 подмешивание его не читало вовсе: настройка меняла
-		// выдачу /graph find, а карта понятий в вопросе оставалась прежней,
-		// и расхождение было ничем не видно.
-		Neighbors: s.Rank,
-		TopChunks: 1, // куски здесь не печатаются, но поиск их не считает даром
-		// Одноразовые понятия в карту не берём: их 59% от всех, и это
-		// в основном шум разбора. Замер: вопрос «чем RAG отличается
-		// от дообучения» приводил в карту понятие «отличается».
-		MinMentions: 2,
-	})
+	if !served {
+		// Вектор вопроса под граф: одно место на всех — find.QueryVector, оно же
+		// сверяет модель эмбеддера с векторами графа (разные модели дают
+		// бессмысленные расстояния).
+		var qv []int8
+		if s.SenseEntry && d.Embedder != nil {
+			qctx, cancel := context.WithTimeout(context.Background(), queryTimeout(s))
+			qv, _, _ = find.QueryVector(qctx, find.Deps{Graph: g, Embedder: d.Embedder}, question,
+				find.Opts{Semantic: true, QueryTimeout: queryTimeout(s)})
+			cancel()
+		}
+
+		res = g.Search(question, graph.SearchOpts{
+			QueryVector:  qv,
+			TopEntities:  s.Entities,
+			TopNeighbors: s.Neighbors,
+			// Ранжирование связей — то же, что у поиска и у инструментов модели.
+			// До 28.08.2026 подмешивание его не читало вовсе: настройка меняла
+			// выдачу /graph find, а карта понятий в вопросе оставалась прежней,
+			// и расхождение было ничем не видно.
+			Neighbors: s.Rank,
+			TopChunks: 1, // куски здесь не печатаются, но поиск их не считает даром
+			// Одноразовые понятия в карту не берём: их 59% от всех, и это
+			// в основном шум разбора. Замер: вопрос «чем RAG отличается
+			// от дообучения» приводил в карту понятие «отличается».
+			MinMentions: 2,
+		})
+	}
 	if len(res.Entities) == 0 {
 		// Привратник: вопрос не о том, что есть в библиотеке.
 		return Result{}
@@ -337,8 +406,8 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 
 	// Цепочка между двумя понятиями вопроса считается заранее: она нужна
 	// и карте (s.Chain), и решению «вопрос ли это о связи» (MapPairOnly).
-	var chain []graph.PathStep
-	if s.Chain || s.MapPairOnly {
+	// От службы она приходит вместе с картой, посчитанная тем же find.Chain.
+	if (s.Chain || s.MapPairOnly) && !served {
 		chain = find.Chain(g, res.Entities, res.Relations, find.Opts{})
 	}
 	if s.MapPairOnly && !aboutPair(res, chain) {
@@ -441,6 +510,70 @@ func queryTimeout(s Settings) time.Duration {
 	return kb.DefaultQueryTimeout
 }
 
+// serviceMap берёт карту понятий у службы (этап 121, А2 и А6).
+//
+// Служба не ответила (kb.ErrUnreachable) — карту считает свой граф из
+// d.LocalGraph, и в заметке «служба недоступна — искал по своим файлам» (А4).
+// Если книги уже ушли на свои файлы при открытии коллекции, служба этого
+// вопроса не ответит и сейчас — ждать её второй раз незачем. Отказ службы
+// по смыслу (нет графа, неизвестная коллекция) — карты нет, заметка — сам
+// отказ: свой граф спрятал бы беду на службе за ответом.
+//
+// served — карта пришла от службы; local, release — свой граф и как его
+// отпустить, когда карту считает он.
+func serviceMap(question string, d Deps, s Settings) (res graph.SearchResult, chain []graph.PathStep,
+	served bool, local *graph.Graph, release func(), note string) {
+
+	err := kb.ErrUnreachable
+	if !kb.Fell(d.Coll) {
+		ctx, cancel := context.WithTimeout(context.Background(), mapTimeout)
+		res, chain, err = d.Map.GraphSearch(ctx, d.Coll.Name(), question, s.Entities, s.Neighbors)
+		cancel()
+		if err == nil {
+			return res, chain, true, nil, nil, ""
+		}
+	}
+	if !errors.Is(err, kb.ErrUnreachable) {
+		return graph.SearchResult{}, nil, false, nil, nil, "карта понятий: " + err.Error()
+	}
+	if d.LocalGraph == nil {
+		return graph.SearchResult{}, nil, false, nil, nil, err.Error() + " — своего графа нет, карта не подмешана"
+	}
+	g, rel, lerr := d.LocalGraph()
+	if lerr != nil || g == nil {
+		if rel != nil {
+			rel()
+		}
+		why := "своего графа нет"
+		if lerr != nil {
+			why = "свой граф не открылся: " + lerr.Error()
+		}
+		return graph.SearchResult{}, nil, false, nil, nil, kb.FallbackNote + "; " + why + ", карта не подмешана"
+	}
+	return graph.SearchResult{}, nil, false, g, rel, kb.FallbackNote
+}
+
+// CachedGraph — свой граф для запасного пути (Deps.LocalGraph): коллекция
+// открывается только при переходе, граф берётся из общего кэша графов
+// и отпускается после подмеса — кэш закроет его после простоя. Без кэша
+// (graph.cache = false) граф открывается на подмес и закрывается после него.
+func CachedGraph(cache *graph.Cache, rules graph.Rules, open func() (*kb.Collection, error)) func() (*graph.Graph, func(), error) {
+	return func() (*graph.Graph, func(), error) {
+		coll, err := open()
+		if err != nil {
+			return nil, nil, err
+		}
+		if cache != nil {
+			return cache.Get(coll.Dir(), coll.ChunkCount())
+		}
+		g, err := graph.Open(coll.Dir(), coll.ChunkCount(), rules)
+		if err != nil {
+			return nil, nil, err
+		}
+		return g, func() { _ = g.Close() }, nil
+	}
+}
+
 // aboutPair — о связи ли понятий вопрос: найдено не меньше двух понятий
 // и между какими-то двумя из них есть прямая связь либо найдена цепочка.
 // Вопрос с одним понятием («что такое горутина») — не о связи, и карта
@@ -520,8 +653,14 @@ func logSearch(question string, d Deps, s Settings, mixed Result, took time.Dura
 	if p.done && p.sig.Hits > 0 {
 		extra["top1"], extra["top1_gap"] = p.sig.Top1, p.sig.Top1Gap
 	}
+	if d.Map != nil {
+		// Подмес через службу общей библиотеки (этап 121): по этому полю
+		// отчёт отделяет его от подмеса по своим файлам, а Note говорит,
+		// если служба не ответила и искал свой граф.
+		extra["service"] = true
+	}
 	d.Steps.Write(steplog.Step{Turn: d.Turn, Kind: steplog.KindSearch, Args: question,
-		MS: took.Milliseconds(), Extra: extra})
+		MS: took.Milliseconds(), Extra: extra, Note: mixed.Remote})
 }
 
 // pinned подаёт модели заданные куски вместо найденных (Settings.Pin).

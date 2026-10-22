@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ type Config struct {
 	Confluence   Confluence `toml:"confluence"`
 	Viewers      Viewers    `toml:"viewers"`
 	Servers      []Server   `toml:"servers"`
+	MCP          MCP        `toml:"mcp"`
 
 	// Path — фактический путь, откуда загружен конфиг (не из файла).
 	Path string `toml:"-"`
@@ -1333,6 +1335,111 @@ func (c Confluence) TimeoutDuration() time.Duration {
 	return 60 * time.Second
 }
 
+// MCP — сторонние серверы MCP, чьи инструменты получает модель (этап 121, Б2).
+//
+// Только HTTP (Streamable HTTP, ревизии с рукопожатием): запуск сервера
+// командой — отдельный этап. Инструменты приходят под именами
+// mcp__<сервер>__<инструмент>, встроенных не заменяют, и каждый вызов идёт
+// через подтверждение (вид Fetch, цель mcp://<сервер>/<инструмент>) — даже
+// в noask; без вопроса — только перечисленные в allow и режим yolo
+// (решения владельца 22.10.2026).
+type MCP struct {
+	Servers map[string]MCPServer `toml:"servers"`
+}
+
+// MCPServer — один сторонний сервер, раздел [mcp.servers.<имя>].
+//
+// Ключа здесь нет, как и у Confluence: только откуда его взять — файл,
+// переменная окружения или команда (первое заданное).
+type MCPServer struct {
+	URL       string `toml:"url"`
+	TokenFile string `toml:"token_file"`
+	TokenEnv  string `toml:"token_env"`
+	TokenCmd  string `toml:"token_cmd"`
+	// Timeout — срок одного обмена с сервером; пусто — 60 с.
+	Timeout string `toml:"timeout"`
+	// Tools — какие инструменты сервера видит модель; пусто — все.
+	Tools []string `toml:"tools"`
+	// Allow — какие из них вызываются без вопроса. Имя обязано быть в Tools,
+	// если тот непуст: разрешить невидимое — опечатка, а не намерение.
+	Allow []string `toml:"allow"`
+	// Enabled — подключаться ли; не задано — да. Выключенный сервер виден
+	// в /mcp и --mcp-servers, но не подключается.
+	Enabled *bool `toml:"enabled"`
+}
+
+// On — включён ли сервер.
+func (s MCPServer) On() bool { return s.Enabled == nil || *s.Enabled }
+
+// TimeoutDuration — срок одного обмена с сервером.
+func (s MCPServer) TimeoutDuration() time.Duration {
+	if d, err := time.ParseDuration(s.Timeout); err == nil && d > 0 {
+		return d
+	}
+	return 60 * time.Second
+}
+
+// Names — имена серверов по алфавиту: порядок инструментов в запросе к модели
+// от него зависит, и он не должен меняться от запуска к запуску (кеш промпта).
+func (m MCP) Names() []string {
+	out := make([]string, 0, len(m.Servers))
+	for name := range m.Servers {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mcpServerName — имя сервера: строчные латинские буквы, цифры и дефис. Без
+// подчёркиваний вовсе — «__» разделяет части имени инструмента
+// mcp__<сервер>__<инструмент>, и сервер с ним сделал бы имя двусмысленным.
+var mcpServerName = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// mcpToolName — имя инструмента в tools и allow: латиница, цифры, «_», «-»,
+// «.». Звёздочки и скобки здесь — не шаблон, а ошибка: allow = ["*"]
+// разрешил бы всё молча, а правило Fetch(mcp://…) читает их как шаблон.
+var mcpToolName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+
+// validate проверяет [mcp.servers.*] при запуске, а не на первом вызове.
+func (m *MCP) validate() error {
+	for _, name := range m.Names() {
+		s := m.Servers[name]
+		where := "mcp.servers." + name
+		if !mcpServerName.MatchString(name) {
+			return fmt.Errorf("%s: недопустимое имя сервера (строчные латинские буквы, цифры и дефис, до 32 знаков)", where)
+		}
+		u, err := url.Parse(strings.TrimSpace(s.URL))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%s.url: нужен адрес http:// или https:// с именем машины, например http://mcp.example:8377/mcp "+
+				"(другие транспорты не поддержаны)", where)
+		}
+		if s.Timeout != "" {
+			if d, err := time.ParseDuration(s.Timeout); err != nil || d <= 0 {
+				return fmt.Errorf("%s.timeout = %q: ожидается длительность вида \"30s\" или \"2m\"", where, s.Timeout)
+			}
+		}
+		visible := map[string]bool{}
+		for _, t := range s.Tools {
+			if !mcpToolName.MatchString(t) {
+				return fmt.Errorf("%s.tools: недопустимое имя инструмента %q (латиница, цифры, _ - .)", where, t)
+			}
+			visible[t] = true
+		}
+		for _, t := range s.Allow {
+			if !mcpToolName.MatchString(t) {
+				return fmt.Errorf("%s.allow: недопустимое имя инструмента %q (латиница, цифры, _ - .; шаблонов нет)", where, t)
+			}
+			if len(s.Tools) > 0 && !visible[t] {
+				return fmt.Errorf("%s.allow: инструмента %q нет в tools — модель его не увидит", where, t)
+			}
+		}
+		s.URL = strings.TrimSpace(s.URL)
+		s.TokenFile = ExpandPath(s.TokenFile)
+		m.Servers[name] = s
+	}
+	return nil
+}
+
 // Web — поиск в сети.
 //
 // Публичные поисковики запросы от программ отклоняют, поэтому нужен свой
@@ -1674,7 +1781,7 @@ func Load(path string) (cfg *Config, exists bool, err error) {
 	// значение»: умолчания подставляются всем, и по значению не отличить
 	// «не настраивал» от «настроил так же». А отличать нужно: команды
 	// ненастроенной возможности в меню не показываются — см. Config.Has.
-	for _, name := range []string{"kb", "graph", "mix", "confluence", "web"} {
+	for _, name := range []string{"kb", "graph", "mix", "confluence", "web", "mcp"} {
 		if md.IsDefined(name) {
 			loaded.sections = append(loaded.sections, name)
 		}
@@ -1955,6 +2062,16 @@ func (c *Config) EmbedFallback() string {
 		return c.Servers[0].URL
 	}
 	return ""
+}
+
+// EmbedFallbackHeaders — заголовки того же сервера, что EmbedFallback: Ollama
+// за прокси с авторизацией без них отказывает эмбеддеру, и поиск молча
+// откатывается на слова. Один источник для службы и её карты понятий.
+func (c *Config) EmbedFallbackHeaders() map[string]string {
+	if len(c.Servers) > 0 {
+		return c.Servers[0].Headers
+	}
+	return nil
 }
 
 // ThinLimits собирает пределы «тощей» книги для индексации — так же, как
@@ -2243,6 +2360,12 @@ func (c *Config) finalize() error {
 		}
 	}
 	c.KB.ServerTokenFile = ExpandPath(c.KB.ServerTokenFile)
+
+	// Сторонние серверы MCP (этап 121, Б2): имя, адрес, сроки и списки —
+	// при запуске, а не на первом вызове модели.
+	if err := c.MCP.validate(); err != nil {
+		return err
+	}
 
 	// Ранжирование связей графа. Отрицательный вес — не «выключено наоборот»,
 	// а опечатка: он поднял бы наверх связи, наиболее далёкие от вопроса.

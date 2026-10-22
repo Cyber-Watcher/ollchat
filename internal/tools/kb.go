@@ -79,23 +79,30 @@ func (t *kbSearchTool) Plan(args map[string]any) (*Plan, error) {
 	if name != "" {
 		title = fmt.Sprintf("%s(%s, %s)", NameKBSearch, name, textx.ShortenOneLine(query, 40))
 	}
-	return &Plan{
+	p := &Plan{
 		Tool: NameKBSearch,
 		// Поиск читает только собственные данные приложения, поэтому целью
 		// проверки прав служит каталог базы знаний, а не книги на диске.
 		Req:   permissions.Request{Kind: permissions.KindRead, Target: t.opts.KBDir, Tool: NameKBSearch, Fixed: true},
 		Title: title,
-		Run: func(ctx context.Context) (string, error) {
-			return t.run(ctx, name, query, book, topK)
-		},
-	}, nil
+	}
+	p.Run = func(ctx context.Context) (string, error) {
+		coll, err := t.opts.collection(name)
+		if err != nil {
+			return "", err
+		}
+		out, err := t.run(ctx, coll, name, query, book, topK)
+		if err != nil {
+			return out, err
+		}
+		return fallbackOut(p, coll, out), nil
+	}
+	return p, nil
 }
 
-func (t *kbSearchTool) run(ctx context.Context, name, query, book string, topK int) (string, error) {
-	coll, err := t.opts.collection(name)
-	if err != nil {
-		return "", err
-	}
+// run ищет по коллекции coll; name — как её назвала модель (пусто —
+// умолчание), он нужен дополнению запроса именами понятий своего графа.
+func (t *kbSearchTool) run(ctx context.Context, coll kb.Source, name, query, book string, topK int) (string, error) {
 	kbTopK, maxPerDoc, minCos, semWeight := t.opts.kbNumbers()
 	if topK > 0 {
 		kbTopK = min(topK, 20)
@@ -263,25 +270,31 @@ func (t *kbReadTool) Plan(args map[string]any) (*Plan, error) {
 	id = strings.TrimSpace(id)
 	around := argInt(args, "around", 1)
 
-	return &Plan{
+	p := &Plan{
 		Tool:  NameKBRead,
 		Req:   permissions.Request{Kind: permissions.KindRead, Target: t.opts.KBDir, Tool: NameKBRead, Fixed: true},
 		Title: fmt.Sprintf("%s(%s)", NameKBRead, id),
-		Run: func(ctx context.Context) (string, error) {
-			return t.run(id, around)
-		},
-	}, nil
+	}
+	p.Run = func(ctx context.Context) (string, error) {
+		name := ""
+		if i := strings.Index(id, "/"); i > 0 {
+			name = id[:i]
+		}
+		coll, err := t.opts.collection(name)
+		if err != nil {
+			return "", err
+		}
+		out, err := t.run(coll, id, around)
+		if err != nil {
+			return out, err
+		}
+		return fallbackOut(p, coll, out), nil
+	}
+	return p, nil
 }
 
-func (t *kbReadTool) run(id string, around int) (string, error) {
-	name := ""
-	if i := strings.Index(id, "/"); i > 0 {
-		name = id[:i]
-	}
-	coll, err := t.opts.collection(name)
-	if err != nil {
-		return "", err
-	}
+// run читает кусок id из коллекции coll вместе с соседями.
+func (t *kbReadTool) run(coll kb.Source, id string, around int) (string, error) {
 	parts, err := coll.Around(id, around)
 	if err != nil {
 		return "", err
@@ -321,6 +334,12 @@ func (o Options) collection(name string) (kb.Source, error) {
 	if o.Library != nil {
 		return o.library(name)
 	}
+	return o.localSource(name)
+}
+
+// localSource открывает свою коллекцию: названную, выбранную пользователем
+// или единственную.
+func (o Options) localSource(name string) (kb.Source, error) {
 	if o.KB == nil {
 		return nil, fmt.Errorf("база знаний не настроена: укажите kb.dir в файле настроек")
 	}
@@ -351,11 +370,30 @@ func (o Options) collection(name string) (kb.Source, error) {
 // у файлов он читается с диска мгновенно, у службы это запрос по сети, и
 // делать его дважды (сначала за именами, потом за коллекцией) незачем —
 // драйвер сам разбирается с умолчанием и единственной коллекцией.
+//
+// Служба не ответила — тот же запрос к своим файлам, если они есть (решение
+// владельца, этап 121, А4): kb.Fallback. Источник заводится на один вызов,
+// и по нему инструмент узнаёт, искал ли он у себя (fallbackOut).
 func (o Options) library(name string) (kb.Source, error) {
 	if name == "" {
 		name = o.KBDefault
 	}
-	return o.Library.Source(name)
+	lib := kb.Fallback{Remote: o.Library, Default: o.KBDefault}
+	if o.KB != nil {
+		lib.Local = o.KB
+	}
+	return lib.Source(name)
+}
+
+// fallbackOut помечает выдачу инструмента, который искал по своим файлам
+// вместо недоступной службы: строка в начале — модели и человеку в ленте,
+// Plan.Note — журналу шагов (этап 121, А4).
+func fallbackOut(p *Plan, src kb.Source, out string) string {
+	if !kb.Fell(src) {
+		return out
+	}
+	p.Note = kb.FallbackNote
+	return "(" + kb.FallbackNote + ")\n" + out
 }
 
 // argStringOr возвращает строковый аргумент или значение по умолчанию.

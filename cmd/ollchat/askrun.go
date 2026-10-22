@@ -100,6 +100,14 @@ type askOpts struct {
 	// были теми же самыми.
 	registry *tools.Registry
 	guard    *permissions.Guard
+
+	// library — общая библиотека (kb.server_url): подмес идёт через службу,
+	// свой граф не открывается (этап 121, А2); nil — по своим файлам.
+	// graphCache — общий кэш графов для запасного пути, когда служба не
+	// отвечает (А4): граф открывается при переходе и отпускается после вопроса.
+	library    kb.Library
+	graphCache *graph.Cache
+	base       *kb.Base // свои файлы для запасного пути; nil — их нет
 }
 
 // askAnswer — одна строка вывода --json.
@@ -128,6 +136,9 @@ type askAnswer struct {
 	MixChunks    int      `json:"mix_chunks,omitempty"`
 	MixTokens    int      `json:"mix_tokens,omitempty"`
 	MixRefs      []string `json:"mix_refs,omitempty"` // поданные куски в порядке подачи
+	// MixRemote — служба библиотеки не ответила (искал по своим файлам) или
+	// отказала; пусто — подмес шёл обычным путём (этап 121, А4).
+	MixRemote string `json:"mix_remote,omitempty"`
 
 	Tools []string `json:"tools,omitempty"`
 	Error string   `json:"error,omitempty"`
@@ -165,9 +176,12 @@ func runAsk(cfg *config.Config, srv *config.Server, model string, o askOpts) err
 
 	// Коллекция и граф открываются один раз на весь прогон: открытие графа
 	// стоит секунды, а вопросов в файле бывают сотни.
+	//
+	// С общей библиотекой своего не открывается ничего: книги и карта — у службы
+	// на каждый вопрос (askOne), свои файлы — только при её недоступности.
 	var coll *kb.Collection
 	var g *graph.Graph
-	if askMixWanted(cfg, o) {
+	if askMixWanted(cfg, o) && o.library == nil {
 		coll, g, err = askOpenKB(cfg, o)
 		if err != nil {
 			return err
@@ -242,16 +256,25 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 	conv := session.New(srv.SystemPrompt)
 	conv.SetToday(cfg.General.Today)
 
-	if coll != nil {
-		mix := mixer.Build(question, mixer.Deps{
-			Coll:       coll,
-			Graph:      g,
+	if coll != nil || (o.library != nil && askMixWanted(cfg, o)) {
+		deps := mixer.Deps{
 			Embedder:   kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), srv.Headers),
 			Translator: qtranslate.New(cfg, srv.URL, srv.Headers),
 			Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
 			BooksOn:    askMixBooks(cfg, o),
 			GraphOn:    askMixGraph(cfg, o),
-		}, set)
+		}
+		var mix mixer.Result
+		if coll != nil {
+			deps.Coll, deps.Graph = coll, g
+			mix = mixer.Build(question, deps, set)
+		} else {
+			mix = askRemoteMix(cfg, o, question, deps, set)
+		}
+		if mix.Remote != "" {
+			ans.MixRemote = mix.Remote
+			fmt.Fprintln(os.Stderr, "подмес: "+mix.Remote)
+		}
 		if !mix.Empty() {
 			conv.Append(ollama.Message{Role: ollama.RoleUser, Content: mix.Text})
 			ans.MixText = mix.Text
@@ -552,6 +575,47 @@ func askOpenKB(cfg *config.Config, o askOpts) (*kb.Collection, *graph.Graph, err
 		g = nil // графа нет — подмешаются одни выдержки, это законное состояние
 	}
 	return coll, g, nil
+}
+
+// askRemoteMix — подмес через общую библиотеку (этап 121, А2): книги и карта
+// понятий — у службы, свой граф не открывается. Служба не отвечает — свои
+// файлы (А4): коллекция открывается при переходе, граф берётся из общего кэша
+// графов на один вопрос.
+//
+// Коллекция службы открывается на каждый вопрос, как у инструментов модели:
+// это два запроса по сети, а не гигабайт графа в памяти.
+func askRemoteMix(cfg *config.Config, o askOpts, question string, deps mixer.Deps, set mixer.Settings) mixer.Result {
+	name := askCollection(cfg, o)
+	lib := kb.Fallback{Remote: o.library}
+	if o.base != nil {
+		// Своя коллекция выбирается так же, как в askOpenKB: названная, иначе первая.
+		local := name
+		if local == "" {
+			if names, err := o.base.Names(); err == nil && len(names) > 0 {
+				local = names[0]
+			}
+		}
+		lib.Local, lib.Default = o.base, local
+		base := o.base
+		deps.LocalGraph = mixer.CachedGraph(o.graphCache, cfg.Graph.Rules(), func() (*kb.Collection, error) {
+			if local == "" {
+				return nil, fmt.Errorf("коллекция не задана: укажите --kb-use или kb.default")
+			}
+			return base.Open(local)
+		})
+	}
+	src, err := lib.Source(name)
+	if err != nil {
+		return mixer.Result{Remote: err.Error()}
+	}
+	deps.Coll = src
+	if ms, ok := o.library.(mixer.MapSource); ok {
+		deps.Map = ms
+	}
+	if set.Collection == "" {
+		set.Collection = src.Name()
+	}
+	return mixer.Build(question, deps, set)
 }
 
 // askQuestions — откуда брать вопросы: ключ, файл или стандартный ввод.

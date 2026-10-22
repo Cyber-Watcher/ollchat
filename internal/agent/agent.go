@@ -508,6 +508,11 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			if info.decision != "" {
 				extra["kind"], extra["target"], extra["decision"] = info.kind, info.target, info.decision
 			}
+			// Инструмент стороннего сервера MCP — сервер отдельным полем (этап 121,
+			// Б6): сводки по журналу шагов группируют вызовы по нему, не разбирая имя.
+			if srv, _, ok := tools.SplitExternalName(call.Function.Name); ok {
+				extra["server"] = srv
+			}
 			r.Steps.Write(steplog.Step{Turn: r.Turn, Step: step, Kind: steplog.KindTool, Model: r.Model,
 				Tool: call.Function.Name, Args: info.args,
 				Outcome: info.status, MS: info.ms, Note: info.note, Extra: extra})
@@ -1047,10 +1052,12 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 	if plan.Req.Kind == permissions.KindWrite {
 		r.writes++
 	}
-	if foreignSources[name] {
+	if isForeign(name) {
 		r.tainted = true
 	}
-	return output, images, callInfo{outcome: callOK, status: steplog.OutcomeOK, ms: ms}
+	// Пометка инструмента о пути исполнения — «служба недоступна, искал по
+	// своим файлам» (этап 121, А4) — ложится в note записи журнала шагов.
+	return output, images, callInfo{outcome: callOK, status: steplog.OutcomeOK, ms: ms, note: plan.Note}
 }
 
 // stripImages убирает картинки из истории для модели без vision.

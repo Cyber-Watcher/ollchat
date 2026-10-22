@@ -62,6 +62,10 @@ var commands = []cmdInfo{
 	{Name: "nodes", Alias: []string{"узлы"},
 		Desc: "состояние серверов сборки: карта, память, слоты, чужая работа", Need: "kb"},
 	{Name: "tools", Args: "[iterations <n|off>]", Desc: "доступные инструменты и предел их вызовов"},
+	{Name: "mcp", Args: "[подкоманда]", Desc: "сторонние серверы MCP: состояние, ревизия, инструменты", Need: "mcp", Sub: []cmdInfo{
+		{Name: "tools", Args: "<сервер>", Desc: "инструменты сервера, как их видит модель, и какие без вопроса"},
+		{Name: "reconnect", Args: "[сервер]", Desc: "подключиться заново (без имени — ко всем)"},
+	}},
 	{Name: "think", Args: "[on|off]", Desc: "режим рассуждений модели"},
 	{Name: "mouse", Args: "[on|off]", Desc: "мышь приложению или терминалу (F2)"},
 	{Name: "paste", Alias: []string{"image"}, Desc: "вставить изображение из буфера обмена (Ctrl+V)"},

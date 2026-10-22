@@ -134,7 +134,7 @@ func (c *Config) ApplyProject(path string, data []byte) error {
 			*l.dst = union(l.global, *l.dst)
 		}
 	}
-	for _, name := range []string{"kb", "mix", "confluence", "web"} {
+	for _, name := range []string{"kb", "mix", "confluence", "web", "mcp"} {
 		if md.IsDefined(name) && !slices.Contains(c.sections, name) {
 			c.sections = append(c.sections, name)
 		}

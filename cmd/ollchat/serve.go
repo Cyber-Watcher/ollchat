@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -125,7 +124,7 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 	// Графовому входу — только инструменты графа. Реестр диалога содержит то,
 	// что человек включил себе (bash, запись файлов, правку кода), и отдать
 	// его службе значило бы исполнять это по сети без правил и подтверждений.
-	graphReg, err := graphRegistry(registry)
+	graphReg, err := gmaint.GraphRegistry(registry)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("набор графового входа службы: %w", err)
 	}
@@ -139,7 +138,7 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 		Translator: qtranslate.New(cfg, fallback, headers),
 		Default:    cfg.KB.Default,
 		Token:      token,
-		Graph:      &graphService{cfg: cfg, registry: graphReg, base: base, cache: cache},
+		Graph:      &gmaint.GraphService{Cfg: cfg, Registry: graphReg, Base: base, Cache: cache},
 		Verbose:    true,
 	})
 
@@ -192,105 +191,9 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 	return mux, names, closeSvc, nil
 }
 
-// graphService отвечает на вопросы к графу от имени службы.
-//
-// Инструменты берутся из **того же реестра**, что у локального ollchat: клиент
-// обязан получить ровно тот текст, который увидел бы, работая с файлами.
-// Своей реализации поиска здесь нет намеренно — вторая реализация означала бы
-// вторую выдачу.
-//
-// Реестр урезан до инструментов графа (graphRegistry), а Tool ещё и сверяет
-// имя с тем же набором: две независимые преграды на пути к `bash`.
-type graphService struct {
-	cfg      *config.Config
-	registry *tools.Registry
-	base     *kb.Base
-	cache    *graph.Cache
-}
-
-// Tool выполняет именованный инструмент графа.
-//
-// Имя сверяется с набором инструментов графа ДО обращения к реестру. Прежде
-// проверялось только «включён ли такой инструмент», а реестр был диалоговым:
-// запрос `{"name":"bash",…}` исполнял команду от имени службы — без правил
-// deny, без подтверждения, а без OLLMCP_TOKEN и без ключа.
-func (g *graphService) Tool(ctx context.Context, collection, name string, args map[string]any) (string, error) {
-	if !tools.IsGraphTool(name) {
-		return "", fmt.Errorf("%w: %s (графовый вход принимает только %s)",
-			kbserve.ErrToolNotServed, name, strings.Join(tools.GraphToolNames(), ", "))
-	}
-	if g.registry == nil || !g.registry.Has(name) {
-		return "", fmt.Errorf("инструмент %s на этой службе не включён", name)
-	}
-	if args == nil {
-		args = map[string]any{}
-	}
-	// Коллекцию навязывает клиент, а не модель: он уже выбрал её у себя,
-	// и подставлять другую было бы подменой.
-	if collection != "" {
-		args["collection"] = collection
-	}
-	plan, err := g.registry.Plan(name, args)
-	if err != nil {
-		return "", err
-	}
-	return plan.Run(ctx)
-}
-
-// Search отдаёт разбираемый результат поиска по графу.
-//
-// Нужен подмешиванию карты понятий к вопросу: там текст собирается на стороне
-// клиента, потому что от размера карты зависит цена контекста, и решать её
-// должен тот, кто за контекст платит.
-func (g *graphService) Search(ctx context.Context, collection, query string) (any, error) {
-	coll, gr, _, release, err := openGraphFor(g, collection)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
-	res := gr.Search(query, graph.SearchOpts{
-		TopEntities:  g.cfg.Mix.Entities,
-		TopNeighbors: g.cfg.Mix.Neighbors,
-		TopChunks:    1,
-		MinMentions:  2,
-		Neighbors:    gmaint.NeighborRank(g.cfg),
-		Rank:         graph.RankWith(coll),
-		QueryVector:  gmaint.QueryVector(gr, g.cfg, query),
-	})
-	return res, nil
-}
-
-// openGraphFor открывает граф коллекции службы.
-func openGraphFor(g *graphService, collection string) (*kb.Collection, *graph.Graph, string, func(), error) {
-	name := collection
-	if name == "" {
-		name = g.cfg.KB.Default
-	}
-	if name == "" {
-		names, err := g.base.Names()
-		if err != nil || len(names) == 0 {
-			return nil, nil, "", nil, fmt.Errorf("на службе нет коллекций")
-		}
-		name = names[0]
-	}
-	coll, err := g.base.Open(name)
-	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("коллекция %s: %w", name, err)
-	}
-	if g.cache != nil {
-		gr, release, err := g.cache.Get(coll.Dir(), coll.ChunkCount())
-		if err != nil {
-			return nil, nil, "", nil, fmt.Errorf("граф коллекции %s: %w", name, err)
-		}
-		return coll, gr, name, release, nil
-	}
-	gr, err := graph.Open(coll.Dir(), coll.ChunkCount(), g.cfg.Graph.Rules())
-	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("граф коллекции %s: %w", name, err)
-	}
-	return coll, gr, name, func() { gr.Close() }, nil
-}
+// Графовый вход службы — gmaint.GraphService: его зовут и `ollchat --serve`,
+// и `ollmcp --http`, поэтому он живёт в internal/graph/maint, а не здесь
+// (этап 121, А6).
 
 // readOnlyRegistry собирает набор инструментов службы: только чтение.
 //
@@ -304,25 +207,6 @@ func readOnlyRegistry(full *tools.Registry) (*tools.Registry, error) {
 		// web_search не должен появляться в службе только потому, что он
 		// значится в списке безопасных.
 		if full != nil && full.Has(n) {
-			want = append(want, n)
-		}
-	}
-	return full.Subset(want)
-}
-
-// graphRegistry собирает набор графового входа службы: только инструменты
-// графа, и только те, что включены у администратора.
-//
-// Устроен так же, как readOnlyRegistry, и по той же причине: набор
-// пересобирается из перечисления, а не фильтруется вычитанием опасного, —
-// новый пишущий инструмент не попадёт сюда сам.
-func graphRegistry(full *tools.Registry) (*tools.Registry, error) {
-	if full == nil {
-		return nil, nil
-	}
-	want := make([]string, 0, 5)
-	for _, n := range tools.GraphToolNames() {
-		if full.Has(n) {
 			want = append(want, n)
 		}
 	}

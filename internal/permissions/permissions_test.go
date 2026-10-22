@@ -428,3 +428,111 @@ func TestSandboxRelKeepsDotDotNames(t *testing.T) {
 		t.Errorf("путь вне корня показан относительным: %q", got)
 	}
 }
+
+// externalGuard — охранник с правилами, какие складываются у человека
+// с одним сторонним сервером MCP: allow сервера (Fetch(mcp://…)), запрет
+// одного его инструмента, общее разрешение страниц сети и «спросить» по Fetch.
+func externalGuard(t *testing.T, mode string) *Guard {
+	t.Helper()
+	sb, err := NewSandbox(t.TempDir(), false, false, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := Compile(
+		[]string{"Fetch(mcp://srv/allowed)", "Fetch(**)"},
+		[]string{"Fetch(*)"},
+		[]string{"Fetch(mcp://srv/denied)"},
+		sb.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewGuard(set, sb, mode)
+}
+
+// Решение владельца 22.10.2026 (этап 121, Б4): инструмент стороннего сервера
+// идёт через подтверждение в любом режиме, кроме yolo; без вопроса — только
+// allow сервера; deny — запрет всегда. В noask «спросить» остаётся вопросом,
+// общее Fetch(**) инструмент MCP не разрешает. Поменявшееся описание (Changed)
+// снимает allow до перезапуска.
+func TestExternalToolModes(t *testing.T) {
+	ask, allow, deny := DecisionAsk, DecisionAllow, DecisionDeny
+	cases := []struct {
+		target  string
+		changed bool
+		want    map[string]Decision
+	}{
+		{"mcp://srv/allowed", false, map[string]Decision{ModeSafe: allow, ModeAutoEdit: allow, ModeNoAsk: allow, ModeYolo: allow}},
+		{"mcp://srv/denied", false, map[string]Decision{ModeSafe: deny, ModeAutoEdit: deny, ModeNoAsk: deny, ModeYolo: deny}},
+		{"mcp://srv/other", false, map[string]Decision{ModeSafe: ask, ModeAutoEdit: ask, ModeNoAsk: ask, ModeYolo: allow}},
+		{"mcp://srv/allowed", true, map[string]Decision{ModeSafe: ask, ModeAutoEdit: ask, ModeNoAsk: ask, ModeYolo: allow}},
+		{"mcp://srv/denied", true, map[string]Decision{ModeSafe: deny, ModeAutoEdit: deny, ModeNoAsk: deny, ModeYolo: deny}},
+	}
+	for _, c := range cases {
+		for _, mode := range []string{ModeSafe, ModeAutoEdit, ModeNoAsk, ModeYolo} {
+			g := externalGuard(t, mode)
+			got := g.Check(Request{Kind: KindFetch, Target: c.target, Tool: "mcp__srv__x",
+				External: true, Changed: c.changed})
+			if got.Decision != c.want[mode] {
+				t.Errorf("%s (поменялся: %v), режим %s: %v (%s), ждали %v",
+					c.target, c.changed, mode, got.Decision, got.Reason, c.want[mode])
+			}
+		}
+	}
+}
+
+// Встроенный Fetch поведения не меняет: та же цель без признака External
+// разрешается общим Fetch(**), а без правила noask по-прежнему не спрашивает.
+func TestBuiltinFetchUnchangedByExternalRules(t *testing.T) {
+	for _, mode := range []string{ModeSafe, ModeAutoEdit, ModeNoAsk, ModeYolo} {
+		g := externalGuard(t, mode)
+		if got := g.Check(Request{Kind: KindFetch, Target: "https://pkg.go.dev/x", Tool: "http_fetch"}); got.Decision != DecisionAllow {
+			t.Errorf("режим %s: http_fetch под Fetch(**) — %v, ждали allow", mode, got.Decision)
+		}
+		if got := g.Check(Request{Kind: KindFetch, Target: "mcp://srv/denied", Tool: "http_fetch"}); got.Decision != DecisionDeny {
+			t.Errorf("режим %s: deny на цель не сработал без External — %v", mode, got.Decision)
+		}
+	}
+	g, _ := newTestGuard(t, ModeNoAsk)
+	if got := g.Check(Request{Kind: KindFetch, Target: "https://example.org/", Tool: "http_fetch"}); got.Decision != DecisionAllow {
+		t.Errorf("noask, http_fetch без allow: %v, ждали allow, как до этапа 121", got.Decision)
+	}
+	g, _ = newTestGuard(t, ModeSafe)
+	if got := g.Check(Request{Kind: KindFetch, Target: "https://example.org/", Tool: "http_fetch"}); got.Decision != DecisionAsk {
+		t.Errorf("safe, http_fetch без allow: %v, ждали ask", got.Decision)
+	}
+}
+
+// Разрешение на сеанс — ответ человека, а не правило: оно действует и на
+// внешний инструмент, пока его описание не поменялось.
+func TestExternalToolSessionGrants(t *testing.T) {
+	for _, mode := range []string{ModeSafe, ModeNoAsk} {
+		g := externalGuard(t, mode)
+		req := Request{Kind: KindFetch, Target: "mcp://srv/other", Tool: "mcp__srv__other", External: true}
+		if err := g.GrantSession(req.Kind, req.Target); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.Check(req); got.Decision != DecisionAllow {
+			t.Errorf("режим %s: после «всегда» — %v", mode, got.Decision)
+		}
+		req.Changed = true
+		if got := g.Check(req); got.Decision != DecisionAsk {
+			t.Errorf("режим %s: описание поменялось, а сеансовое разрешение действует — %v", mode, got.Decision)
+		}
+
+		g = externalGuard(t, mode)
+		tool := Request{Kind: KindFetch, Target: "mcp://srv/other", Tool: "mcp__srv__other", External: true}
+		if err := g.GrantSessionTool(tool.Tool); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.Check(tool); got.Decision != DecisionAllow {
+			t.Errorf("режим %s: инструмент разрешён целиком — %v", mode, got.Decision)
+		}
+		tool.Changed = true
+		if got := g.Check(tool); got.Decision != DecisionAsk {
+			t.Errorf("режим %s: описание поменялось, а разрешение инструмента действует — %v", mode, got.Decision)
+		}
+		if err := g.GrantSession(KindFetch, "mcp://srv/denied"); err == nil {
+			t.Errorf("режим %s: «всегда» на запрещённый инструмент выдано", mode)
+		}
+	}
+}

@@ -32,6 +32,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 	"github.com/Cyber-Watcher/ollchat/internal/kbremote"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
+	"github.com/Cyber-Watcher/ollchat/internal/mcphub"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"github.com/Cyber-Watcher/ollchat/internal/redact"
@@ -302,6 +303,15 @@ type cliFlags struct {
 	askPerBook            *int
 	askMinCos             *float64
 	askSemW               *float64
+
+	// Проверка серверов MCP и общей библиотеки без TUI (этап 121, А5, В1–В5).
+	mcpServers    *bool
+	mcpPing       *string
+	mcpTools      *string
+	mcpCall       *string
+	mcpYes        *bool
+	mcpRegistry   *bool
+	kbRemoteCheck *bool
 
 	// args — значения командной строки, не относящиеся к ключам: пути книг
 	// у --kb-index и --kb-reindex, всё после «--» у подкоманд. Вместо
@@ -744,6 +754,18 @@ func parseFlagsNoParse() *cliFlags {
 	f.askPerBook = flag.Int("kb-max-per-book", 0, "не больше стольких фрагментов из одной книги")
 	f.askMinCos = flag.Float64("kb-min-cosine", -1, "порог смысловой близости фрагмента")
 	f.askSemW = flag.Float64("kb-semantic-weight", -1, "вес смысла против совпадения слов")
+
+	f.mcpServers = flag.Bool("mcp-servers", false, "серверы MCP из конфига: имя, адрес, включён, сколько в tools и allow")
+	f.mcpPing = flag.String("mcp-ping", "", "рукопожатие с сервером MCP: время, ревизия, имя и версия сервера: --mcp-ping <сервер>")
+	f.mcpTools = flag.String("mcp-tools", "", "инструменты сервера MCP, как их увидит модель, и какие без вопроса: --mcp-tools <сервер>")
+	f.mcpCall = flag.String("mcp-call", "",
+		"один вызов инструмента сервера MCP через те же права, что в интерфейсе:\n"+
+			"--mcp-call <сервер> <инструмент> '{\"довод\":\"значение\"}'; «спросить» — отказ без --mcp-yes")
+	f.mcpYes = flag.Bool("mcp-yes", false, "с --mcp-call: подтвердить вызов, которому правила велят спросить (запрет deny не снимает)")
+	f.mcpRegistry = flag.Bool("mcp-registry", false, "весь набор инструментов модели, со сторонними серверами MCP, строкой JSON")
+	f.kbRemoteCheck = flag.Bool("kb-remote-check", false,
+		"проверить общую библиотеку (kb.server_url) без интерфейса: коллекции, книги, поиск, карта,\n"+
+			"инструмент графа, MCP — со временем каждого шага: --kb-remote-check [вопрос]")
 	flag.Usage = usage
 	return f
 }
@@ -919,6 +941,13 @@ func commands(f *cliFlags) []cliCommand {
 		{name: "--ask-stdin", on: on(f.askStdin)},
 		{name: "--questions", on: str(f.askFile)},
 		{name: "--serve", on: str(f.serveAddr)},
+		// Серверы MCP и общая библиотека (этап 121): выполняет сам run.
+		{name: "--mcp-servers", on: on(f.mcpServers)},
+		{name: "--mcp-ping", on: str(f.mcpPing)},
+		{name: "--mcp-tools", on: str(f.mcpTools)},
+		{name: "--mcp-call", on: str(f.mcpCall), can: cmdArgs},
+		{name: "--mcp-registry", on: on(f.mcpRegistry)},
+		{name: "--kb-remote-check", on: on(f.kbRemoteCheck), can: cmdArgs},
 	}
 }
 
@@ -1416,14 +1445,33 @@ func run() error {
 	if err := guard.SetMode(mode); err != nil {
 		return err
 	}
+	// Сторонние серверы MCP (этап 121, Б4): allow сервера — правило
+	// Fetch(mcp://<сервер>/<инструмент>) в наборе разрешённых, до первого
+	// вызова модели. Сеть здесь не трогается.
+	hub := mcphub.New(cfg, clientVersion())
+	for _, r := range hub.AllowRules() {
+		rule, err := permissions.ParseRule(r, sandbox.Root())
+		if err != nil {
+			return fmt.Errorf("mcp.servers: %w", err)
+		}
+		ruleSet.AddAllow(rule)
+	}
+	// Ключи проверки серверов MCP (В1–В4): им нужны только серверы и права.
+	if mcpKeyRequested(f) {
+		return runMCPKey(f, hub, guard, cfg.Agent.PrivateEgressCheck, os.Stdout, os.Stderr)
+	}
 	// Копии перед правкой — путь отката write_file и edit_file (Н5):
 	// .ollchat/backups/<дата>/ в каталоге запуска. Правка, копию которой не
 	// сделать, — необратима и спрашивается даже в noask.
 	backups := backup.New(sandbox.RealRoot(), cfg.Agent.BackupKeepDays)
-	if n, err := backups.Prune(); err != nil {
-		fmt.Fprintf(os.Stderr, "копии файлов: не удалось убрать старые: %v\n", err)
-	} else if n > 0 {
-		fmt.Fprintf(os.Stderr, "копии файлов: удалено дней старше %d: %d\n", cfg.Agent.BackupKeepDays, n)
+	// Ключи проверки (--mcp-registry, --kb-remote-check) ничего не пишут —
+	// и старых копий не убирают.
+	if !*f.mcpRegistry && !*f.kbRemoteCheck {
+		if n, err := backups.Prune(); err != nil {
+			fmt.Fprintf(os.Stderr, "копии файлов: не удалось убрать старые: %v\n", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "копии файлов: удалено дней старше %d: %d\n", cfg.Agent.BackupKeepDays, n)
+		}
 	}
 	guard.WriteIrreversible = backups.Irreversible
 	backupBeforeWrite := func(path string) error {
@@ -1483,6 +1531,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("общая библиотека: %w", err)
 	}
+	// Инструмент search при общей библиотеке исполняет служба по MCP
+	// (этап 121, А3): у неё он есть только там. Сеть не трогается до вызова.
+	var remoteSearch tools.RemoteCaller
+	if library != nil {
+		if remoteSearch, err = mcphub.LibrarySearch(context.Background(), cfg.KB, clientVersion()); err != nil {
+			return fmt.Errorf("общая библиотека: %w", err)
+		}
+	}
 
 	// Живые числа отбора: один экземпляр на реестр инструментов и на интерфейс,
 	// иначе крутилка /graph tune меняла бы поиск в диалоге, а модель искала бы
@@ -1504,6 +1560,7 @@ func run() error {
 		KBAbstainScore:       cfg.KB.AbstainScore,
 		Live:                 live,
 		Library:              libraryOrNil(library),
+		RemoteSearch:         remoteSearch,
 		Sandbox:              sandbox,
 		Backup:               backupBeforeWrite,
 		Isolation:            tools.Isolation{Kind: cfg.Sandbox.Isolation, Network: cfg.Sandbox.IsolationNetwork, Hide: cfg.Sandbox.IsolationHide},
@@ -1556,6 +1613,19 @@ func run() error {
 			return fmt.Errorf("--tool-perturb: %w", err)
 		}
 	}
+	// Инструменты сторонних серверов MCP попадают в тот же реестр (Б3).
+	if err := hub.Attach(registry); err != nil {
+		return err
+	}
+	if *f.mcpRegistry {
+		return runMCPRegistry(hub, registry, os.Stdout, os.Stderr)
+	}
+	if *f.kbRemoteCheck {
+		if library == nil { // nil-указатель в интерфейсе был бы «не nil»
+			return runKBRemoteCheck(cfg, nil, hub, f.args, os.Stdout)
+		}
+		return runKBRemoteCheck(cfg, library, hub, f.args, os.Stdout)
+	}
 
 	logPattern, err := cfg.Log.NamePattern()
 	if err != nil {
@@ -1575,6 +1645,24 @@ func run() error {
 	}
 
 	store := session.NewStore(sessionDir())
+
+	// Сторонние серверы MCP — диалогу и --ask --tools, не службе (её набор —
+	// только встроенные, Subset) и не --ask без инструментов. Разом и с общим
+	// сроком: недоступный сервер запуск не роняет и не задерживает дольше
+	// mcphub.ConnectTimeout (Б3, Б5).
+	headless := *f.askQ != "" || *f.askStdin || *f.askFile != ""
+	if *f.serveAddr == "" && cfg.Agent.Enabled && (!headless || *f.askTools) && hub.Connectable() {
+		fmt.Fprintf(os.Stderr, "подключаюсь к серверам MCP (не дольше %s)…\n", mcphub.ConnectTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), mcphub.ConnectTimeout)
+		hub.Connect(ctx)
+		cancel()
+		for _, st := range hub.Statuses() {
+			if st.Enabled && !st.Library && !st.Up() {
+				fmt.Fprintf(os.Stderr, "сервер MCP %s: его инструментов нет в этом сеансе (%s) — /mcp, /mcp reconnect %s\n",
+					st.Name, st.Problem(), st.Name)
+			}
+		}
+	}
 
 	// Безголовый режим: спросить модель и напечатать ответ. Стоит здесь,
 	// потому что ему нужны и сервер с моделью, и — при --tools — тот же реестр
@@ -1610,6 +1698,8 @@ func run() error {
 			MixOnly: *f.askMixOnly, Logprobs: *f.askLogprobs,
 
 			registry: registry, guard: guard,
+			// Подмес через общую библиотеку, свои файлы — запасным путём (этап 121).
+			library: libraryOrNil(library), graphCache: graphCache, base: base,
 		})
 	}
 
@@ -1624,6 +1714,10 @@ func run() error {
 	m := ui.New(cfg, guard, registry, logger, steps, store, srv, model)
 	m.SetLive(live)             // тот же экземпляр, что у инструментов
 	m.SetGraphCache(graphCache) // и тот же кэш графов
+	// Общая библиотека: свой граф интерфейс не открывает, карту считает служба
+	// (этап 121, А1–А2). До Init — там прогрев.
+	m.SetLibrary(libraryOrNil(library))
+	m.SetMCP(hub) // сторонние серверы MCP: /mcp (этап 121, В7)
 	m.SetConfluence(cfSession)
 	// Полноэкранный режим и режим мыши в Bubble Tea v2 задаются самим экраном
 	// (полями AltScreen и MouseMode в Model.View), а не настройками программы:

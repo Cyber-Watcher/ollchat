@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
@@ -190,8 +191,10 @@ type GraphServer interface {
 	Tool(ctx context.Context, collection, name string, args map[string]any) (string, error)
 
 	// Search отдаёт разбираемый результат поиска по графу: понятия, связи,
-	// ссылки на куски. Нужен подмешиванию карты понятий к вопросу.
-	Search(ctx context.Context, collection, query string) (any, error)
+	// ссылки на куски — и цепочку между двумя понятиями вопроса. Нужен
+	// подмешиванию карты понятий к вопросу. Размер карты — из запроса
+	// (req.Entities, req.Neighbors), ноль — по настройкам службы.
+	Search(ctx context.Context, req GraphSearchRequest) (GraphSearchResponse, error)
 }
 
 // Handler собирает маршрутизатор службы.
@@ -368,12 +371,16 @@ func Mount(mux *http.ServeMux, o Opts) {
 			return
 		}
 		defer leave()
-		res, err := o.Graph.Search(r.Context(), req.Collection, req.Query)
+		// Размер карты выбирает клиент — за контекст платит он, — но в пределах
+		// службы, как top_k у поиска: ноль и меньше — «как настроено здесь».
+		req.Entities = clampPositive(req.Entities, maxTopK)
+		req.Neighbors = clampPositive(req.Neighbors, maxTopK)
+		res, err := o.Graph.Search(r.Context(), req)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, map[string]any{"result": res})
+		writeJSON(w, res)
 	}))
 
 	mux.HandleFunc("/api/v1/books", guard(func(w http.ResponseWriter, r *http.Request) {
@@ -485,9 +492,23 @@ type GraphToolResponse struct {
 }
 
 // GraphSearchRequest — разбираемый поиск по графу.
+//
+// Entities и Neighbors — размер карты, который выбрал клиент (его
+// mix.entities и mix.neighbors); ноль — по настройкам службы. Клиент прежней
+// сборки полей не шлёт и получает прежнюю карту.
 type GraphSearchRequest struct {
 	Collection string `json:"collection"`
 	Query      string `json:"query"`
+	Entities   int    `json:"entities,omitempty"`
+	Neighbors  int    `json:"neighbors,omitempty"`
+}
+
+// GraphSearchResponse — карта понятий по вопросу и цепочка между двумя его
+// понятиями (find.Chain по графу службы, этап 121, А6). Клиент прежней сборки
+// поле chain не читает — ответ совместим.
+type GraphSearchResponse struct {
+	Result graph.SearchResult `json:"result"`
+	Chain  []graph.PathStep   `json:"chain,omitempty"`
 }
 
 // ErrToolNotServed — служба этот инструмент не исполняет и исполнять не будет.

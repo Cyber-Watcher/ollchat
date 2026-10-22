@@ -53,6 +53,21 @@ type Request struct {
 	//
 	// Запрет сильнее: правило deny на этот путь по-прежнему закрывает доступ.
 	Fixed bool
+
+	// External — инструмент стороннего сервера MCP (этап 121, Б4; цель —
+	// mcp://<сервер>/<инструмент>, вид Fetch). Решение владельца 22.10.2026:
+	// такой инструмент спрашивает и в noask; без вопроса — только правило allow,
+	// написанное для MCP (цель с mcp://, в том числе allow сервера из
+	// [mcp.servers.<имя>]), разрешение на сеанс, данное человеком, и режим yolo.
+	// Общее `Fetch(**)` из allow его не разрешает: оно писалось для страниц
+	// сети, а не для чужих инструментов. Запрет deny действует как всегда.
+	External bool
+
+	// Changed — описание или схема внешнего инструмента поменялись против
+	// первого чтения за сеанс (Б5): правила allow и разрешения сеанса на него
+	// больше не действуют, до перезапуска он спрашивает (в yolo — нет, запрет
+	// deny — всегда). Цель не меняется намеренно: deny на неё обязан ловить.
+	Changed bool
 }
 
 // Result — итог проверки.
@@ -173,6 +188,9 @@ func (g *Guard) Check(req Request) Result {
 	}
 	if res, ok := g.irreversible(req, mode, nil); ok {
 		return res
+	}
+	if req.External {
+		return g.checkExternal(req, mode, granted, toolGranted)
 	}
 	// Инструмент, разрешённый целиком, не спрашивает про каждую цель отдельно.
 	if toolGranted {
@@ -395,6 +413,56 @@ func reasonForMode(kind Kind, mode string) string {
 		}
 	}
 	return "требуется подтверждение"
+}
+
+// mcpTarget — начало цели инструмента стороннего сервера MCP.
+const mcpTarget = "mcp://"
+
+// checkExternal — решение для инструмента стороннего сервера MCP (Request.External),
+// после запрета, защищённого и необратимого — их Check уже проверил.
+//
+// Отличия от прочих действий вида Fetch (решение владельца 22.10.2026, этап 121):
+// «спросить» режим noask не снимает — снимает только yolo; правило allow
+// засчитывается лишь написанное для MCP (шаблон начинается с mcp://), чтобы
+// общее разрешение страниц сети не раздало чужие инструменты молча; у
+// инструмента с поменявшимся описанием (Changed) разрешения не действуют вовсе.
+func (g *Guard) checkExternal(req Request, mode string, granted []Rule, toolGranted bool) Result {
+	if mode == ModeYolo {
+		return Result{Decision: DecisionAllow, Reason: reasonForMode(req.Kind, mode)}
+	}
+	if req.Changed {
+		return Result{Decision: DecisionAsk,
+			Reason: "описание или схема инструмента сервера MCP поменялись за сеанс — до перезапуска он спрашивает"}
+	}
+	if toolGranted {
+		return Result{Decision: DecisionAllow,
+			Reason: fmt.Sprintf("инструмент %s разрешён на время сеанса", req.Tool)}
+	}
+	for i := range granted {
+		if granted[i].Match(req.Kind, req.Target) {
+			return Result{Decision: DecisionAllow, Rule: &granted[i],
+				Reason: "разрешено на время сеанса"}
+		}
+	}
+	for i := range g.set.allow {
+		r := &g.set.allow[i]
+		if strings.HasPrefix(r.Pattern, mcpTarget) && r.Match(req.Kind, req.Target) {
+			return Result{Decision: DecisionAllow, Rule: r,
+				Reason: fmt.Sprintf("разрешено правилом %s", r.Source)}
+		}
+	}
+	var rule *Rule
+	for i := range g.set.ask {
+		if g.set.ask[i].Match(req.Kind, req.Target) {
+			rule = &g.set.ask[i]
+			break
+		}
+	}
+	reason := "инструмент стороннего сервера MCP — требуется подтверждение"
+	if mode == ModeNoAsk {
+		reason = "инструмент стороннего сервера MCP спрашивает и в noask: без вопроса — только allow сервера или yolo"
+	}
+	return Result{Decision: DecisionAsk, Rule: rule, Reason: reason}
 }
 
 // GrantSession выдаёт разрешение на время сеанса по ответу «всегда разрешать».
