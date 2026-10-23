@@ -383,6 +383,11 @@ func TokenFromFile(path string) (string, error) {
 // TokenFromCmd берёт токен у команды — хранилища паролей вроде pass.
 func TokenFromCmd(ctx context.Context, line string) (string, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", line)
+	// Срок ctx снимает только sh, а потомок (pinentry, агент хранилища),
+	// держащий stdout, оставил бы Output ждать вечно — тот же случай, что
+	// зависание на долгой команде (этап 14). WaitDelay закрывает канал и
+	// возвращает ошибку через две секунды после снятия.
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("команда за токеном не отработала: %w", err)

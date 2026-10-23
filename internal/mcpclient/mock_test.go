@@ -979,11 +979,13 @@ func TestRedirectNotFollowed(t *testing.T) {
 		return true
 	})
 	_, err := ms.client(t, 5*time.Second).Initialize(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "307") || !strings.Contains(err.Error(), other.URL+"/mcp") {
-		t.Fatalf("ждали отказ с новым адресом, получили %v", err)
+	// Новый адрес — у MovedTo, а не в тексте: текст уходит модели (решение
+	// владельца 23.10.2026; прежде тест требовал адрес в тексте).
+	if err == nil || !strings.Contains(err.Error(), "307") || MovedTo(err) != other.URL+"/mcp" {
+		t.Fatalf("ждали отказ с новым адресом, получили %v (MovedTo %q)", err, MovedTo(err))
 	}
-	if strings.Contains(err.Error(), "секрет") {
-		t.Fatalf("строка запроса нового адреса в ошибке: %v", err)
+	if strings.Contains(err.Error(), "секрет") || strings.Contains(err.Error(), other.URL) {
+		t.Fatalf("новый адрес или его строка запроса в ошибке: %v", err)
 	}
 	if elsewhere.Load() != 0 {
 		t.Fatal("клиент пошёл по перенаправлению")

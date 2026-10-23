@@ -147,6 +147,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applySearchResult(msg)
 		return m, nil
 
+	case kbUseDoneMsg:
+		m.onKBUseDone(msg)
+		return m, nil
+
 	case residencyMsg:
 		return m.onResidency(msg)
 

@@ -7,11 +7,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbserve"
 )
 
 // fakeServer — служба, отвечающая заранее заданным набором.
@@ -508,5 +514,218 @@ func TestGraphSearchOldServiceWithoutChain(t *testing.T) {
 	}
 	if len(res.Entities) != 1 || len(chain) != 0 {
 		t.Errorf("ответ прежней службы: карта %+v, цепочка %+v", res, chain)
+	}
+}
+
+// Ключ в адресе службы не поддерживается (решение владельца 23.10.2026):
+// учётные данные, строка запроса и якорь в kb.server_url — отказ при заведении
+// клиента, и в тексте отказа самого ключа нет. FromConfig отказывает до
+// запуска kb.server_token_cmd. Прежде адрес принимался, и «user:pass@» с
+// «?key=» уходили в текст каждой ошибки — модели, в ленту и журнал шагов
+// (аудит 23.10.2026, находка 8).
+func TestKeyInURLIsRefused(t *testing.T) {
+	for _, addr := range []string{
+		"http://reader:s3cretpass@kb.example:8377",
+		"http://kb.example:8377/?key=k3y",
+		"http://kb.example:8377/kb?",
+		"http://kb.example:8377/#k3y",
+	} {
+		c, err := New(Opts{URL: addr})
+		if err == nil || c != nil {
+			t.Errorf("%s: адрес с ключом принят", addr)
+			continue
+		}
+		if strings.Contains(err.Error(), "s3cretpass") || strings.Contains(err.Error(), "k3y") {
+			t.Errorf("%s: ключ в тексте отказа: %v", addr, err)
+		}
+		if !strings.Contains(err.Error(), "kb.example:8377") {
+			t.Errorf("%s: отказ не называет службу: %v", addr, err)
+		}
+		if CheckURL(addr) == nil {
+			t.Errorf("%s: CheckURL пропустил адрес, который New отвергает", addr)
+		}
+	}
+	if err := CheckURL("http://kb.example:8377/kb"); err != nil {
+		t.Errorf("обычный адрес с путём отвергнут: %v", err)
+	}
+
+	ran := filepath.Join(t.TempDir(), "ran")
+	_, err := FromConfig(context.Background(), config.KB{ServerURL: "http://u:p@kb.example:8377",
+		ServerTokenCmd: "echo x >> " + ran + "; echo ключ"})
+	if err == nil {
+		t.Error("FromConfig принял адрес с ключом")
+	}
+	if _, serr := os.Stat(ran); serr == nil {
+		t.Error("kb.server_token_cmd выполнен ради адреса, который всё равно отвергнут")
+	}
+}
+
+// kb.server_token_cmd выполняется один раз на процесс: при kb.server_url ключ
+// берут клиент библиотеки, инструмент search и сервер kb в хабе — прежде
+// команда шла до трёх раз за запуск (аудит 23.10.2026). Неудача не
+// запоминается.
+func TestTokenCmdRunsOncePerProcess(t *testing.T) {
+	ran := filepath.Join(t.TempDir(), "ran")
+	k := config.KB{ServerTokenCmd: "echo x >> " + ran + "; echo ключ-раз"}
+	for i := 0; i < 3; i++ {
+		tok, err := Token(context.Background(), k)
+		if err != nil || tok != "ключ-раз" {
+			t.Fatalf("вызов %d: ключ %q, ошибка %v", i+1, tok, err)
+		}
+	}
+	data, err := os.ReadFile(ran)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "x"); n != 1 {
+		t.Errorf("команда за ключом выполнена %d раз за три вызова Token", n)
+	}
+
+	failed := filepath.Join(t.TempDir(), "failed")
+	bad := config.KB{ServerTokenCmd: "echo x >> " + failed + "; exit 3"}
+	for i := 0; i < 2; i++ {
+		if _, err := Token(context.Background(), bad); err == nil {
+			t.Fatal("неудача команды за ключом не дала ошибки")
+		}
+	}
+	if data, _ := os.ReadFile(failed); strings.Count(string(data), "x") != 2 {
+		t.Errorf("неудача запомнилась: команда выполнена %d раз за два вызова", strings.Count(string(data), "x"))
+	}
+}
+
+// Занятая служба — не недоступная (решение владельца 23.10.2026): клиент
+// говорит службе, сколько готов ждать места в очереди (половину своего
+// срока), служба отвечает 503 «занята» раньше, чем у клиента истечёт срок,
+// и ошибка несёт kb.ErrBusy, а не kb.ErrUnreachable — перехода на свои файлы
+// по ней нет. Прежде клиент ждал до своего срока и считал службу недоступной.
+func TestBusyServiceIsNotUnreachable(t *testing.T) {
+	base, err := kb.OpenBase(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { base.Close() })
+	hold := &holdGraph{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(hold.release)
+	ts := httptest.NewServer(kbserve.Handler(kbserve.Opts{Base: base, Graph: hold, HeavySlots: 1}))
+	defer ts.Close()
+	cl, err := New(Opts{URL: ts.URL, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _, _ = cl.GraphSearch(context.Background(), "books", "занять", 0, 0) }()
+	<-hold.entered
+
+	started := time.Now()
+	_, err = cl.GraphMap(context.Background(), "books", "второй", 0, 0)
+	if err == nil {
+		t.Fatal("занятая служба ответила картой")
+	}
+	if errors.Is(err, kb.ErrUnreachable) || !errors.Is(err, kb.ErrBusy) {
+		t.Errorf("занятость сочтена недоступностью или не помечена: %v", err)
+	}
+	if !strings.Contains(err.Error(), "очередь службы полна") || !strings.Contains(err.Error(), "ждал в очереди") {
+		t.Errorf("текст не говорит об очереди: %v", err)
+	}
+	if took := time.Since(started); took >= 2*time.Second {
+		t.Errorf("ответ «занята» пришёл через %v — не раньше срока клиента", took)
+	}
+}
+
+// holdGraph держит каждый запрос карты, пока тест не отпустит.
+type holdGraph struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *holdGraph) Tool(context.Context, string, string, map[string]any) (string, error) {
+	return "", nil
+}
+
+func (h *holdGraph) Search(ctx context.Context, _ kbserve.GraphSearchRequest) (kbserve.GraphSearchResponse, error) {
+	h.entered <- struct{}{}
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	return kbserve.GraphSearchResponse{}, nil
+}
+
+func (h *holdGraph) Graph(string) (*graph.Graph, graph.NeighborRank, func(), error) {
+	return nil, graph.NeighborRank{}, nil, errors.New("графа нет")
+}
+
+// Ответ службы с годами связей и временем в очереди: клиент их читает; годы
+// не по числу связей — отбрасываются. Ожидание в очереди у инструмента графа —
+// первой строкой его текста.
+func TestGraphMapYearsAndQueue(t *testing.T) {
+	var gotWait string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotWait = r.Header.Get(queueWaitHeader)
+		switch r.URL.Path {
+		case "/api/v1/graph/search":
+			io.WriteString(w, `{"result":{"Relations":[{"Src":"a"},{"Src":"b"}]},"relation_years":[2021,0],"queued_ms":1500}`)
+		case "/api/v1/graph/tool":
+			io.WriteString(w, `{"text":"карточка","queued_ms":700}`)
+		}
+	}))
+	defer ts.Close()
+	cl, err := New(Opts{URL: ts.URL, Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := cl.GraphMap(context.Background(), "books", "q", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Years) != 2 || m.Years[0] != 2021 || m.Queued != 1500*time.Millisecond {
+		t.Errorf("годы %v, очередь %v", m.Years, m.Queued)
+	}
+	if ms, err := strconv.Atoi(gotWait); err != nil || ms <= 0 || ms > 5000 {
+		t.Errorf("заголовок ожидания очереди %q: ждали половину срока клиента (не больше 5000 мс)", gotWait)
+	}
+	text, err := cl.GraphTool(context.Background(), "books", "graph_entity", nil)
+	if err != nil || !strings.HasPrefix(text, "(служба занята: ждал в очереди 700 мс)\nкарточка") {
+		t.Errorf("текст инструмента: %q, %v", text, err)
+	}
+
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"result":{"Relations":[{"Src":"a"},{"Src":"b"}]},"relation_years":[2021]}`)
+	}))
+	defer bad.Close()
+	cl, _ = New(Opts{URL: bad.URL})
+	if m, err := cl.GraphMap(context.Background(), "books", "q", 0, 0); err != nil || m.Years != nil {
+		t.Errorf("годы не по числу связей приняты: %v, %v", m.Years, err)
+	}
+}
+
+// /search через службу: вход /api/v1/find; у службы прежней сборки его нет —
+// ошибка ErrNotServed, а не недоступность.
+func TestFindOverNetwork(t *testing.T) {
+	var got FindRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/find" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		io.WriteString(w, `{"result":{"Query":"q","Excerpts":[{"ID":"books/1#2"}]},"text":"выдача","collection":"books","queued_ms":40}`)
+	}))
+	defer ts.Close()
+	cl, _ := New(Opts{URL: ts.URL})
+	rep, err := cl.Find(context.Background(), FindRequest{Collection: "books", Query: "q", TopK: 7, Graph: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TopK != 7 || !got.Graph || rep.Text != "выдача" || len(rep.Result.Excerpts) != 1 ||
+		rep.Queued != 40*time.Millisecond {
+		t.Errorf("запрос %+v, ответ %+v", got, rep)
+	}
+
+	old := httptest.NewServer(http.NotFoundHandler())
+	defer old.Close()
+	cl, _ = New(Opts{URL: old.URL})
+	_, err = cl.Find(context.Background(), FindRequest{Query: "q"})
+	if !errors.Is(err, ErrNotServed) || errors.Is(err, kb.ErrUnreachable) {
+		t.Errorf("служба прежней сборки: %v", err)
 	}
 }

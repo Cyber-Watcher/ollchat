@@ -10,6 +10,8 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbremote"
+	"github.com/Cyber-Watcher/ollchat/internal/mixer"
 )
 
 // askService — общая библиотека для --ask: книги той же коллекции, карта
@@ -37,14 +39,23 @@ func (s *askService) Source(string) (kb.Source, error) {
 	return s.coll, nil
 }
 
-func (s *askService) GraphSearch(_ context.Context, _, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error) {
+func (s *askService) GraphMap(_ context.Context, _, query string, entities, neighbors int) (kbremote.GraphMap, error) {
 	s.calls++
 	if s.down {
-		return graph.SearchResult{}, nil, errAskServiceDown
+		return kbremote.GraphMap{}, errAskServiceDown
 	}
 	res := s.g.Search(query, graph.SearchOpts{TopEntities: entities, TopNeighbors: neighbors, TopChunks: 1, MinMentions: 2})
-	return res, find.Chain(s.g, res.Entities, res.Relations, find.Opts{}), nil
+	return kbremote.GraphMap{Result: res, Chain: find.Chain(s.g, res.Entities, res.Relations, find.Opts{})}, nil
 }
+
+// GraphSearch — то же без годов и очереди, как kbremote.Client.GraphSearch
+// (его зовёт --kb-remote-check).
+func (s *askService) GraphSearch(ctx context.Context, coll, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error) {
+	m, err := s.GraphMap(ctx, coll, query, entities, neighbors)
+	return m.Result, m.Chain, err
+}
+
+var _ mixer.MapSource = (*askService)(nil)
 
 // askChainService — служба с графом «горутина → канал → рантайм».
 func askChainService(t *testing.T) *askService {
@@ -108,6 +119,47 @@ func TestAskMixThroughService(t *testing.T) {
 	}
 	if ans.MixRemote != "" {
 		t.Errorf("служба ответила, а заметка о ней есть: %q", ans.MixRemote)
+	}
+}
+
+// Служба не отвечает, коллекция не названа, своих коллекций несколько —
+// запасной путь не берёт молча первую, а отказывает с перечнем, как TUI;
+// с единственной своей коллекцией — ищет по ней и называет её в заметке
+// (аудит 23.10.2026).
+func TestAskRemoteMixLocalCollectionChoice(t *testing.T) {
+	cfg := config.Default()
+	cfg.KB.EmbedModel = ""
+	base, err := kb.OpenBase(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { base.Close() })
+	for _, n := range []string{"alpha", "beta"} {
+		if _, err := base.Create(n, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := askChainService(t)
+	svc.down = true
+	o := askOpts{library: svc, base: base}
+	out := askRemoteMix(cfg, o, "как связаны горутина и рантайм", mixer.Deps{BooksOn: true, GraphOn: true},
+		mixer.Settings{TopK: 3})
+	if !strings.Contains(out.Remote, "alpha, beta") || strings.Contains(out.Remote, kb.FallbackNote) {
+		t.Errorf("при двух своих коллекциях без kb.default запасной путь выбрал сам: %q", out.Remote)
+	}
+
+	solo, err := kb.OpenBase(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { solo.Close() })
+	if _, err := solo.Create("solo", ""); err != nil {
+		t.Fatal(err)
+	}
+	o.base = solo
+	out = askRemoteMix(cfg, o, "как связаны горутина и рантайм", mixer.Deps{BooksOn: true}, mixer.Settings{TopK: 3})
+	if !strings.Contains(out.Remote, kb.FallbackNote) || !strings.Contains(out.Remote, "solo") {
+		t.Errorf("переход на единственную свою коллекцию без её имени в заметке: %q", out.Remote)
 	}
 }
 

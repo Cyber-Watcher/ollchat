@@ -317,6 +317,10 @@ type cliFlags struct {
 	// у --kb-index и --kb-reindex, всё после «--» у подкоманд. Вместо
 	// flag.Args(): после разбора вперемешку (parseArgs) там лишь хвост.
 	args []string
+
+	// emptyValue — ключи со значением, заданные пустыми (`--mcp-ping=`):
+	// их сверяет checkEmptyValues.
+	emptyValue map[string]bool
 }
 
 // parseFlags объявляет и разбирает ключи.
@@ -325,7 +329,23 @@ func parseFlags() *cliFlags {
 	// Ошибка разбора до нас не доходит: flag.CommandLine сам печатает её
 	// и завершает процесс с кодом 2, как и прежний flag.Parse.
 	f.args, _ = parseArgs(flag.CommandLine, os.Args[1:])
+	f.emptyValue = emptyValued(flag.CommandLine)
 	return f
+}
+
+// emptyValued — ключи со значением (не переключатели), заданные в строке
+// пустыми или из одних пробелов: `--mcp-ping=`, `--kb-index " "`.
+func emptyValued(fs *flag.FlagSet) map[string]bool {
+	out := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) {
+		if b, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			return
+		}
+		if strings.TrimSpace(fl.Value.String()) == "" {
+			out[fl.Name] = true
+		}
+	})
+	return out
 }
 
 // parseArgs разбирает ключи вперемешку со значениями и возвращает значения.
@@ -775,6 +795,7 @@ func parseFlagsNoParse() *cliFlags {
 func parseFlagsWith(args []string) *cliFlags {
 	f := parseFlagsNoParse()
 	f.args, _ = parseArgs(flag.CommandLine, args)
+	f.emptyValue = emptyValued(flag.CommandLine)
 	return f
 }
 
@@ -984,13 +1005,45 @@ func dryRunHelp() string {
 // checkCommandLine проверяет командную строку целиком до запуска: всё, что
 // раньше молча пропускалось, теперь — отказ с объяснением.
 func checkCommandLine(f *cliFlags) error {
+	if err := checkEmptyValues(f); err != nil {
+		return err
+	}
 	if err := checkOneCommand(f); err != nil {
 		return err
 	}
 	if err := checkArgs(f); err != nil {
 		return err
 	}
+	if err := checkMCPYes(f); err != nil {
+		return err
+	}
 	return checkDryRun(f)
+}
+
+// checkEmptyValues — команда с пустым значением ключа (аудит 23.10.2026):
+// `--mcp-ping=` не называл сервер, команда не считалась запрошенной,
+// и запуск без единого слова уходил в интерфейс. Так у любой команды
+// таблицы, которая берёт значение, поэтому проверка по таблице, а не по ключу.
+func checkEmptyValues(f *cliFlags) error {
+	for _, c := range commands(f) {
+		if f.emptyValue[strings.TrimPrefix(c.name, "--")] {
+			return fmt.Errorf("ключ %s задан с пустым значением — команда не выполнилась бы, а запуск ушёл бы в интерфейс.\n"+
+				"  Значение пишется сразу за ключом: %s <значение> или %s=<значение>", c.name, c.name, c.name)
+		}
+	}
+	return nil
+}
+
+// checkMCPYes — --mcp-yes подтверждает только вызов --mcp-call (аудит
+// 23.10.2026): с другой командой и без команды он пропускался молча, и человек
+// думал, что подтвердил то, чего не было. Как --kb-dry-run у команды, которая
+// его не понимает (checkDryRun).
+func checkMCPYes(f *cliFlags) error {
+	if *f.mcpYes && *f.mcpCall == "" {
+		return errors.New("--mcp-yes действует только с --mcp-call: он подтверждает вызов инструмента, " +
+			"которому правила велят спросить; с другой командой и без команды ему нечего подтверждать")
+	}
+	return nil
 }
 
 // checkArgs — значения после ключей берут только команды, которым они нужны:
@@ -1449,6 +1502,8 @@ func run() error {
 	// Fetch(mcp://<сервер>/<инструмент>) в наборе разрешённых, до первого
 	// вызова модели. Сеть здесь не трогается.
 	hub := mcphub.New(cfg, clientVersion())
+	// Сеансы серверов MCP кончаются на выходе из run: и TUI, и ключей.
+	defer closeHub(hub)
 	for _, r := range hub.AllowRules() {
 		rule, err := permissions.ParseRule(r, sandbox.Root())
 		if err != nil {
@@ -1546,6 +1601,14 @@ func run() error {
 	live := tools.NewLive(gmaint.NeighborRank(cfg),
 		cfg.KB.TopK, cfg.KB.MaxPerBook, cfg.KB.MinCosine, cfg.KB.SemanticWeight)
 
+	// Положение /kb source (этап 121, Д3) — тоже один экземпляр на реестр
+	// инструментов, интерфейс и подмес: переключил человек — переключилась и
+	// модель. При старте — auto, если служба задана, иначе local.
+	libMode := kb.NewSourceSwitch(kb.SourceLocal)
+	if library != nil {
+		libMode.Set(kb.SourceAuto)
+	}
+
 	// Кэш открытых графов один на программу: у инструментов модели и у поиска
 	// в интерфейсе он общий, иначе в памяти жили бы два одинаковых графа.
 	graphCache := gmaint.CacheFor(cfg, 5*time.Minute)
@@ -1561,6 +1624,7 @@ func run() error {
 		Live:                 live,
 		Library:              libraryOrNil(library),
 		RemoteSearch:         remoteSearch,
+		LibraryMode:          libMode,
 		Sandbox:              sandbox,
 		Backup:               backupBeforeWrite,
 		Isolation:            tools.Isolation{Kind: cfg.Sandbox.Isolation, Network: cfg.Sandbox.IsolationNetwork, Hide: cfg.Sandbox.IsolationHide},
@@ -1717,7 +1781,8 @@ func run() error {
 	// Общая библиотека: свой граф интерфейс не открывает, карту считает служба
 	// (этап 121, А1–А2). До Init — там прогрев.
 	m.SetLibrary(libraryOrNil(library))
-	m.SetMCP(hub) // сторонние серверы MCP: /mcp (этап 121, В7)
+	m.SetLibraryMode(libMode) // /kb source — тот же переключатель, что у инструментов
+	m.SetMCP(hub)             // сторонние серверы MCP: /mcp (этап 121, В7)
 	m.SetConfluence(cfSession)
 	// Полноэкранный режим и режим мыши в Bubble Tea v2 задаются самим экраном
 	// (полями AltScreen и MouseMode в Model.View), а не настройками программы:

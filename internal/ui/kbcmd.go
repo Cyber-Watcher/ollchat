@@ -6,6 +6,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	kmaint "github.com/Cyber-Watcher/ollchat/internal/kb/maint"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -34,7 +35,10 @@ const kbHelp = `База знаний по книгам:
   /kb search <запрос>          поиск своими глазами
   /kb use <имя|off>            коллекция по умолчанию для поиска моделью
   /kb auto on|off              подмешивать найденное перед каждым вопросом
-  /kb style                    как модель отвечает по книгам: действующая политика
+  /kb source [auto|service|local]
+                               кто ищет при kb.server_url: служба с запасным путём
+                               на свои файлы, только служба или только свои файлы
+  /kb style                  как модель отвечает по книгам: действующая политика
   /kb stop                     остановить индексацию (то же, что Esc дважды)
   /kb rm <имя> [--book <путь>] удалить коллекцию или одну книгу
   /kb embed <имя> [--dry-run] [--recount]
@@ -79,6 +83,17 @@ func subNames(subs []subCommand) []string {
 	return out
 }
 
+// kbWithoutOwnFiles — подкоманды /kb, которым свои файлы (m.kb.base) не
+// нужны: справка, выбор коллекции и поиск (при службе идут в неё), включение
+// подмеса, числа отбора, стиль ответа, остановка задачи. Прочие при пустом
+// m.kb.base отказывают (kbCommand). Новая подкоманда без своих файлов —
+// сюда же.
+var kbWithoutOwnFiles = map[string]bool{
+	"help": true, "?": true, "use": true, "search": true, "find": true,
+	"auto": true, "off": true, "выкл": true, "tune": true, "отбор": true,
+	"style": true, "стиль": true, "stop": true, "source": true,
+}
+
 // kbSubs — подкоманды /kb.
 var kbSubs = []subCommand{
 	{names: []string{"help", "?"}, run: func(m *Model, _ string) tea.Cmd {
@@ -93,6 +108,7 @@ var kbSubs = []subCommand{
 	{names: []string{"search", "find"}, run: (*Model).kbSearch},
 	{names: []string{"use"}, run: (*Model).kbUseCmd},
 	{names: []string{"auto"}, run: (*Model).kbAutoCmd},
+	{names: []string{"source"}, run: (*Model).kbSourceCmd},
 	// /kb off — то же, что /kb auto off. Обещано в меню, и человек, увидев
 	// его там, набирает именно так, а не «auto off».
 	{names: []string{"off", "выкл"}, run: func(m *Model, _ string) tea.Cmd {
@@ -120,11 +136,21 @@ var kbSubs = []subCommand{
 func (m *Model) kbCommand(arg string) tea.Cmd {
 	fields := strings.Fields(arg)
 	if len(fields) == 0 {
+		if m.kb.base == nil {
+			m.fail("/kb", m.errNoOwnFiles())
+			return nil
+		}
 		return m.kbStatus()
 	}
 	sub := strings.ToLower(fields[0])
 	rest := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
 
+	// Подкоманды над своими файлами без них отказывают словами (аудит
+	// 23.10.2026): прежде падали на пустом m.kb.base.
+	if m.kb.base == nil && !kbWithoutOwnFiles[sub] && slices.Contains(subNames(kbSubs), sub) {
+		m.fail("/kb "+sub, m.errNoOwnFiles())
+		return nil
+	}
 	if cmd, ok := runSub(kbSubs, m, sub, rest); ok {
 		return cmd
 	}
@@ -434,11 +460,20 @@ func (m *Model) kbUseCmd(arg string) tea.Cmd {
 		}
 		return nil
 	}
+	// Новый выбор: ответ службы на прежний, если он ещё в пути, уже не нужен.
+	m.kb.useGen++
 	if name == "off" || name == "выкл" {
 		m.kb.use, m.kb.picked = "", false
 		m.kb.coll = nil
 		m.closeGraph()
 		m.addBlock(block{kind: blockNotice, text: "коллекция снята: модель больше не ищет по книгам"})
+		return nil
+	}
+	if m.viaService() {
+		return m.kbUseRemote(name)
+	}
+	if m.kb.base == nil {
+		m.fail("/kb use", m.errNoOwnFiles())
 		return nil
 	}
 	coll, err := m.kb.base.Open(name)
@@ -458,6 +493,139 @@ func (m *Model) kbUseCmd(arg string) tea.Cmd {
 	}
 	m.addBlock(block{kind: blockNotice, text: text})
 	return nil
+}
+
+// kbUseRemote — /kb use с общей библиотекой: коллекцию выбирают из коллекций
+// службы, а не своих (решение владельца 23.10.2026: «Команды в службу»).
+// Прежде открывалась своя коллекция, и ту, что есть только у службы, выбрать
+// было нельзя. Служба не ответила — своя коллекция с тем же именем
+// и пометкой, как у модели (kb.Fallback); нет такой у службы — её отказ
+// со списком того, что есть. В положении service (/kb source) недоступная
+// служба — ошибка, свои файлы не берутся.
+//
+// Запрос по сети — в горутине команды, а не в цикле событий: до
+// kb.server_timeout интерфейс иначе стоял бы мёртвым (рецензия этапа 121, Д3).
+// Выбор ложится в модель, когда служба ответила (onKBUseDone); пока ответа
+// нет, прежняя коллекция остаётся в силе.
+func (m *Model) kbUseRemote(name string) tea.Cmd {
+	lib, gen := m.library(), m.kb.useGen
+	m.addBlock(block{kind: blockNotice, text: "спрашиваю коллекцию " + name + " у службы…"})
+	return func() tea.Msg {
+		src, err := lib.Source(name)
+		if err != nil {
+			return kbUseDoneMsg{gen: gen, name: name, err: err}
+		}
+		st := src.Stats()
+		where := "службы"
+		if kb.Fell(src) {
+			where = "своих файлов (" + kb.FallbackNote + ")"
+		}
+		return kbUseDoneMsg{gen: gen, name: name, text: fmt.Sprintf(
+			"модель будет искать в коллекции %s %s (книг %d, кусков %d)", name, where, st.Indexed, st.Chunks)}
+	}
+}
+
+// kbUseDoneMsg — ответ службы на /kb use (kbUseRemote).
+type kbUseDoneMsg struct {
+	gen  int // поколение выбора: m.kb.useGen на момент команды
+	name string
+	text string // что сказать человеку
+	err  error
+}
+
+// onKBUseDone кладёт выбор коллекции в модель, когда служба ответила.
+// Ответ на выбор, после которого человек успел сделать новый, выбрасывается.
+func (m *Model) onKBUseDone(msg kbUseDoneMsg) {
+	if msg.gen != m.kb.useGen {
+		return
+	}
+	if msg.err != nil {
+		m.fail("/kb use", msg.err)
+		return
+	}
+	// Выбор человека: это имя уходит службе (planRemote).
+	m.kb.use, m.kb.picked = msg.name, false
+	m.kb.coll = nil // своя коллекция при службе не держится
+	m.closeGraph()
+	m.addBlock(block{kind: blockNotice, text: msg.text})
+}
+
+// kbSourceCmd — /kb source [auto|service|local] (этап 121, Д3; решение
+// владельца 23.10.2026): кто исполняет поиск по книгам и графу при
+// kb.server_url — служба с запасным путём, только служба или только свои
+// файлы. Положение одно на интерфейс, инструменты модели и подмес
+// (kb.SourceSwitch); имена инструментов модели во всех положениях те же,
+// меняется только исполнитель. Без службы положение всегда local.
+func (m *Model) kbSourceCmd(arg string) tea.Cmd {
+	want := strings.TrimSpace(arg)
+	if m.kb.lib == nil {
+		if want == "" || strings.EqualFold(want, kb.SourceLocal.String()) {
+			m.addBlock(block{kind: blockNotice, text: "службы нет (kb.server_url не задан): " +
+				"книги и граф — свои файлы, положение local"})
+			return nil
+		}
+		m.addBlock(block{kind: blockError, text: "/kb source: службы нет (kb.server_url не задан) — " +
+			"переключать не на что, положение всегда local"})
+		return nil
+	}
+	if want == "" {
+		mode := m.kbMode()
+		m.addBlock(block{kind: blockNotice, text: "положение " + mode.String() + ": " + sourceModeText(mode) +
+			"\n  сменить: /kb source auto|service|local"})
+		return nil
+	}
+	mode, err := kb.ParseSourceMode(want)
+	if err != nil {
+		m.fail("/kb source", err)
+		return nil
+	}
+	if mode == kb.SourceLocal && m.kb.base == nil {
+		m.fail("/kb source", m.errNoOwnFiles())
+		return nil
+	}
+	if m.kb.mode == nil {
+		m.kb.mode = kb.NewSourceSwitch(kb.SourceAuto)
+	}
+	prev := m.kbMode()
+	m.kb.mode.Set(mode)
+	text := "положение " + mode.String() + ": " + sourceModeText(mode)
+	if prev == kb.SourceLocal && mode != kb.SourceLocal {
+		// Свой граф в положении local брался из общего кэша и закроется после
+		// простоя; держать в модели нечего — и своё не должно пережить уход.
+		m.closeGraph()
+		m.kb.coll = nil
+		text += "\n  свой граф закроется после простоя кэша графов"
+	}
+	if mode == kb.SourceLocal && m.kb.use != "" {
+		if names, err := m.kb.base.Names(); err == nil && !slices.Contains(names, m.kb.use) {
+			text += fmt.Sprintf("\n  коллекции %s среди своих файлов нет — выберите свою: /kb use <имя> (есть: %s)",
+				m.kb.use, strings.Join(names, ", "))
+		}
+	}
+	m.addBlock(block{kind: blockNotice, text: text})
+	return nil
+}
+
+// sourceModeText — что значит положение /kb source, словами человеку.
+func sourceModeText(mode kb.SourceMode) string {
+	switch mode {
+	case kb.SourceService:
+		return "только служба; не ответила — ошибка, свои файлы и свой граф не открываются"
+	case kb.SourceLocal:
+		return "только свои файлы и свой граф (из общего кэша графов, закрывается после простоя); " +
+			"служба не спрашивается"
+	default:
+		return "сперва служба; не ответила — свои файлы с пометкой «" + kb.FallbackNote + "»"
+	}
+}
+
+// sourceStatus — значок положения /kb source для строки состояния. Только
+// при общей библиотеке: без неё положение всегда local, переключать нечего.
+func (m *Model) sourceStatus() string {
+	if m.kb.lib == nil {
+		return ""
+	}
+	return "kb: " + m.kbMode().String()
 }
 
 func (m *Model) kbAutoCmd(arg string) tea.Cmd {
@@ -855,10 +1023,37 @@ func (m *Model) kbCollection(name string) (*kb.Collection, error) {
 	return m.kb.base.Open(name)
 }
 
+// errNoOwnFiles — своих файлов библиотеки нет (m.kb.base == nil): каталог
+// kb.dir не открылся. SetLibrary такой режим допускает явно — книги тогда
+// только у службы, — и команды над своими файлами обязаны отказать словами,
+// а не упасть на пустом указателе (аудит 23.10.2026).
+func (m *Model) errNoOwnFiles() error {
+	if m.kb.lib != nil {
+		return fmt.Errorf("своих файлов библиотеки нет (каталог kb.dir не открылся): книги — у службы, " +
+			"команды над своими файлами недоступны")
+	}
+	return fmt.Errorf("своих файлов библиотеки нет: каталог kb.dir не открылся")
+}
+
+// library — общая библиотека с запасным путём на свои файлы, тем же, что
+// у модели и подмешивания (kb.Fallback): служба не ответила — свои файлы,
+// если они есть. Положение /kb source — то же, что у модели: service —
+// без запасного пути, local — сразу свои файлы.
+func (m *Model) library() kb.Library {
+	lib := kb.Fallback{Remote: m.kb.lib, Default: m.cfg.KB.Default, Mode: m.kbMode()}
+	if m.kb.base != nil {
+		lib.Local = m.kb.base
+	}
+	return lib
+}
+
 // resolveKBName — какую коллекцию имеют в виду: названную, выбранную или
 // единственную. Дёшево (список каталогов); само открытие коллекции — секунды
 // на большой библиотеке, и ему место в фоне.
 func (m *Model) resolveKBName(name string) (string, error) {
+	if m.kb.base == nil {
+		return "", m.errNoOwnFiles()
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = m.kb.use

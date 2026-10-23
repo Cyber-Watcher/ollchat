@@ -154,6 +154,16 @@ func TestServiceServesGraphToOllchatClients(t *testing.T) {
 	if code := post("/api/v1/graph/search", `{"query":"горутина"}`); code == http.StatusNotImplemented {
 		t.Error("поиск по графу у службы не подключён")
 	}
+	// /search клиента (решение владельца 23.10.2026: «Команды в службу»):
+	// вход есть — коллекций нет, отказ по существу (JSON с ошибкой), а не
+	// «404 page not found» неизвестного пути.
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/find", strings.NewReader(`{"query":"горутина","graph":true}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if !strings.Contains(w.Body.String(), `"error"`) {
+		t.Errorf("/api/v1/find у ollmcp --http не подключён: код %d, %s", w.Code, w.Body.String())
+	}
 }
 
 // kb_status берёт граф из общего кеша службы и сверяет его актуальность.

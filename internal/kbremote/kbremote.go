@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
@@ -69,14 +71,20 @@ type Opts struct {
 }
 
 // New заводит клиента. Пустой адрес — не ошибка, а «работаем с файлами».
+//
+// **Ключа в адресе нет** (решение владельца 23.10.2026: «ключ в адресе
+// не поддерживаем»). Учётные данные (`user:pass@`) и строка запроса (`?key=…`)
+// в kb.server_url — отказ: адрес службы входит в текст ошибок, а их видят
+// модель, лента, журнал шагов и JSON `--ask` (аудит 23.10.2026, находка 8).
+// Ключ доступа — Opts.Token (kb.server_token_file). Отказ адреса с ключом
+// не повторяет: печатается адрес без него.
 func New(o Opts) (*Client, error) {
 	addr := strings.TrimSpace(o.URL)
 	if addr == "" {
 		return nil, nil
 	}
-	u, err := url.Parse(addr)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("kb.server_url = %q: нужен адрес вида http://машина:порт", o.URL)
+	if err := CheckURL(addr); err != nil {
+		return nil, err
 	}
 	timeout := o.Timeout
 	if timeout <= 0 {
@@ -88,6 +96,30 @@ func New(o Opts) (*Client, error) {
 		http:    &http.Client{Timeout: timeout},
 		timeout: timeout,
 	}, nil
+}
+
+// CheckURL проверяет kb.server_url так же, как New: адрес вида
+// http://машина:порт[/путь] без учётных данных, строки запроса и якоря. Для
+// тех, кто строит из этого адреса свои (сервер kb хаба MCP: `<адрес>/mcp`) и
+// должен отказать тем же словами, а не дописать путь к строке запроса.
+// Пустой адрес — не ошибка. Отказ ключа не повторяет.
+func CheckURL(raw string) error {
+	addr := strings.TrimSpace(raw)
+	if addr == "" {
+		return nil
+	}
+	u, err := url.Parse(addr)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("kb.server_url = %q: нужен адрес вида http://машина:порт", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		clean := *u
+		clean.User, clean.RawQuery, clean.ForceQuery, clean.Fragment, clean.RawFragment = nil, "", false, "", ""
+		return fmt.Errorf("kb.server_url = %s…: учётные данные (user:pass@), строка запроса (?…) "+
+			"и якорь (#…) в адресе службы не поддерживаются — ключ доступа задаётся kb.server_token_file",
+			clean.String())
+	}
+	return nil
 }
 
 // Names — какие коллекции есть на сервере.
@@ -148,9 +180,30 @@ type source struct {
 	books []kb.BookRec
 	gen   string
 	note  string
+	// queued — сколько вызовы этого источника ждали места в очереди службы.
+	// Источник заводится на одно действие (kb.Fallback), так что это время
+	// одного подмеса или одного вызова инструмента.
+	queued time.Duration
 }
 
 func (s *source) Name() string { return s.name }
+
+// Queued — сколько вызовы источника ждали очереди службы (kb.Queued).
+func (s *source) Queued() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queued
+}
+
+// waited прибавляет ожидание в очереди из ответа службы.
+func (s *source) waited(ms int64) {
+	if ms <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.queued += time.Duration(ms) * time.Millisecond
+	s.mu.Unlock()
+}
 
 func (s *source) Stats() kb.Stats {
 	s.mu.RLock()
@@ -185,6 +238,7 @@ func (s *source) SearchWith(ctx context.Context, query string, opt kb.SearchOpts
 	if err := s.cl.post(ctx, "/api/v1/search", req, &resp); err != nil {
 		return nil, err
 	}
+	s.waited(resp.QueuedMS)
 	s.afterCall(ctx, resp.Generation, resp.Note)
 	return resp.Results, nil
 }
@@ -199,6 +253,7 @@ func (s *source) Around(id string, around int) ([]kb.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.waited(resp.QueuedMS)
 	s.afterCall(ctx, resp.Generation, "")
 	return resp.Results, nil
 }
@@ -297,6 +352,7 @@ func (c *Client) do(req *http.Request, out any) error {
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+	req.Header.Set(queueWaitHeader, strconv.FormatInt(c.queueWait(req.Context()).Milliseconds(), 10))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return transport(req, fmt.Errorf("библиотека %s недоступна: %w", c.base, err))
@@ -309,13 +365,26 @@ func (c *Client) do(req *http.Request, out any) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e struct {
-			Error string `json:"error"`
+			Error    string `json:"error"`
+			Busy     bool   `json:"busy"`
+			QueuedMS int64  `json:"queued_ms"`
 		}
-		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		parsed := json.Unmarshal(body, &e) == nil
+		if resp.StatusCode == http.StatusServiceUnavailable && parsed && e.Busy {
+			// Служба жива, но занята: не недоступность (решение владельца
+			// 23.10.2026) — на свои файлы клиент не переходит, а говорит об очереди.
+			return busy{fmt.Errorf("библиотека %s: %w — очередь службы полна, ждал в очереди %d мс; повторите позже",
+				c.base, kb.ErrBusy, e.QueuedMS)}
+		}
+		if parsed && e.Error != "" {
 			return fmt.Errorf("библиотека %s: %s", c.base, e.Error)
 		}
 		if resp.StatusCode == http.StatusUnauthorized {
 			return fmt.Errorf("библиотека %s: нужен ключ доступа (kb.server_token_file)", c.base)
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			// Вход без разбираемой ошибки — его нет у службы прежней сборки.
+			return fmt.Errorf("библиотека %s: %w (%s)", c.base, ErrNotServed, req.URL.Path)
 		}
 		return fmt.Errorf("библиотека %s ответила %s", c.base, resp.Status)
 	}
@@ -347,6 +416,38 @@ type unreachable struct{ err error }
 func (e unreachable) Error() string   { return e.err.Error() }
 func (e unreachable) Unwrap() []error { return []error{kb.ErrUnreachable, e.err} }
 
+// busy — служба ответила 503 с признаком «занята»: метка kb.ErrBusy внутри
+// текста, kb.ErrUnreachable нет — переход на свои файлы по ней не идёт.
+type busy struct{ err error }
+
+func (e busy) Error() string { return e.err.Error() }
+func (e busy) Unwrap() error { return e.err }
+
+// ErrNotServed — вход службе неизвестен (404 без разбираемой ошибки): служба
+// прежней сборки. Клиент обходится тем, что у неё есть.
+var ErrNotServed = errors.New("у службы нет такого входа — служба прежней сборки")
+
+// queueWaitHeader — kbserve.QueueWaitHeader: сколько клиент готов ждать места
+// в очереди службы, мс. Повторён здесь по той же причине, что формы ниже.
+const queueWaitHeader = "X-Ollchat-Queue-Wait-Ms"
+
+// queueWait — сколько просить службу ждать места в очереди: половину того,
+// что осталось до своего срока (kb.server_timeout или срок вызывающего).
+// Вторая половина — на сам поиск: служба отвечает «занята» раньше, чем клиент
+// сочтёт её недоступной, и очередь не превращается в переход на свои файлы.
+func (c *Client) queueWait(ctx context.Context) time.Duration {
+	left := c.timeout
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d < left {
+			left = d
+		}
+	}
+	if wait := left / 2; wait >= time.Millisecond {
+		return wait
+	}
+	return time.Millisecond
+}
+
 // Формы запросов и ответов повторяют серверные (`internal/kbserve/kbserve.go`).
 // Дублирование намеренное: связать их общим пакетом значило бы, что клиент
 // и служба обязаны обновляться вместе, а они живут на разных машинах и
@@ -374,6 +475,7 @@ type searchResponse struct {
 	Note       string      `json:"note,omitempty"`
 	Generation string      `json:"generation"`
 	Collection string      `json:"collection"`
+	QueuedMS   int64       `json:"queued_ms,omitempty"`
 }
 
 type collectionInfo struct {
@@ -397,9 +499,15 @@ var (
 //
 // Возвращается **тот же текст**, который модель увидела бы, работая с файлами:
 // службу и клиента обслуживает одна реализация инструментов, второй нет.
+//
+// Ждал запрос места в очереди службы — первой строкой текста «(служба
+// занята: ждал в очереди N мс)»: модель и человек видят, почему ответ шёл
+// долго (решение владельца 23.10.2026). Занята настолько, что места не
+// нашлось, — ошибка с меткой kb.ErrBusy, на свои файлы по ней не переходят.
 func (c *Client) GraphTool(ctx context.Context, collection, name string, args map[string]any) (string, error) {
 	var resp struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		QueuedMS int64  `json:"queued_ms,omitempty"`
 	}
 	err := c.post(ctx, "/api/v1/graph/tool", map[string]any{
 		"collection": collection, "name": name, "args": args,
@@ -407,26 +515,106 @@ func (c *Client) GraphTool(ctx context.Context, collection, name string, args ma
 	if err != nil {
 		return "", err
 	}
+	if note := kb.QueueNote(time.Duration(resp.QueuedMS) * time.Millisecond); note != "" {
+		return "(" + note + ")\n" + resp.Text, nil
+	}
 	return resp.Text, nil
 }
 
 // GraphSearch отдаёт разбираемый результат поиска по графу и цепочку между
-// двумя понятиями вопроса.
+// двумя понятиями вопроса — то же, что GraphMap, без годов связей и времени
+// в очереди (ключ --kb-remote-check).
+func (c *Client) GraphSearch(ctx context.Context, collection, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error) {
+	m, err := c.GraphMap(ctx, collection, query, entities, neighbors)
+	return m.Result, m.Chain, err
+}
+
+// GraphMap — карта понятий от службы со всем, что к ней прилагается.
+type GraphMap struct {
+	Result graph.SearchResult
+	Chain  []graph.PathStep
+
+	// Years — год самой свежей книги у каждой связи Result.Relations, в том же
+	// порядке; 0 — года нет. nil — служба прежней сборки или годов нет вовсе:
+	// у связей тогда нет «свежайшее N г.», остальное то же.
+	Years []int
+
+	// Queued — сколько запрос ждал места в очереди службы.
+	Queued time.Duration
+}
+
+// GraphMap отдаёт разбираемый результат поиска по графу, цепочку между двумя
+// понятиями вопроса и годы связей.
 //
 // Нужен подмешиванию карты понятий к вопросу: размер карты решает, сколько
 // контекста уйдёт на каждый вопрос, и решать это должен тот, кто за контекст
 // платит, — клиент. Поэтому entities и neighbors (mix.entities, mix.neighbors
 // клиента) уходят службе; ноль — «как настроено у службы», и тогда поля
 // в запросе нет вовсе: служба прежней сборки получает тот же запрос, что раньше.
+// Ранжирование связей (/graph tune, graph.neighbor_*) и смысловой вход
+// (mix.sense_entry) — по настройкам службы: в запросе их нет.
 //
 // Цепочку служба считает тем же find.Chain по своему графу (этап 121, А6).
 // Служба прежней сборки поля chain не отдаёт — цепочка пустая, карта та же.
-func (c *Client) GraphSearch(ctx context.Context, collection, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error) {
+func (c *Client) GraphMap(ctx context.Context, collection, query string, entities, neighbors int) (GraphMap, error) {
 	var resp graphSearchResponse
 	err := c.post(ctx, "/api/v1/graph/search", graphSearchRequest{
 		Collection: collection, Query: query, Entities: entities, Neighbors: neighbors,
 	}, &resp)
-	return resp.Result, resp.Chain, err
+	if err != nil {
+		return GraphMap{}, err
+	}
+	years := resp.RelationYears
+	if len(years) != len(resp.Result.Relations) {
+		years = nil // не по связям — года не к чему приложить
+	}
+	return GraphMap{Result: resp.Result, Chain: resp.Chain, Years: years,
+		Queued: time.Duration(resp.QueuedMS) * time.Millisecond}, nil
+}
+
+// FindRequest — поиск по графу и книгам одной выдачей у службы: команды
+// человека /search (Graph) и /kb search (без графа). Числа — живые числа
+// клиента (/kb tune); ноль — как настроено у службы.
+type FindRequest struct {
+	Collection     string  `json:"collection"`
+	Query          string  `json:"query"`
+	TopK           int     `json:"top_k,omitempty"`
+	MaxPerBook     int     `json:"max_per_book,omitempty"`
+	MinCosine      float64 `json:"min_cosine,omitempty"`
+	SemanticWeight float64 `json:"semantic_weight,omitempty"`
+	Entities       int     `json:"entities,omitempty"`
+	Neighbors      int     `json:"neighbors,omitempty"`
+	Graph          bool    `json:"graph,omitempty"`
+	Rerank         bool    `json:"rerank,omitempty"`
+	Full           bool    `json:"full,omitempty"`
+}
+
+// FindReply — выдача службы: разобранная (для /read N и Ctrl+F) и
+// напечатанная её файлами (Text — выдержки под связями и годы связей).
+type FindReply struct {
+	Result     find.Result
+	Text       string
+	Note       string // оговорка службы: переранжирование не настроено и подобное
+	Collection string
+	Queued     time.Duration
+}
+
+// Find — поиск /search у службы (вход /api/v1/find, решение владельца
+// 23.10.2026: «Команды в службу»). Служба прежней сборки входа не знает —
+// ошибка с меткой ErrNotServed.
+func (c *Client) Find(ctx context.Context, req FindRequest) (FindReply, error) {
+	var resp struct {
+		Result     find.Result `json:"result"`
+		Text       string      `json:"text"`
+		Note       string      `json:"note,omitempty"`
+		Collection string      `json:"collection"`
+		QueuedMS   int64       `json:"queued_ms,omitempty"`
+	}
+	if err := c.post(ctx, "/api/v1/find", req, &resp); err != nil {
+		return FindReply{}, err
+	}
+	return FindReply{Result: resp.Result, Text: resp.Text, Note: resp.Note, Collection: resp.Collection,
+		Queued: time.Duration(resp.QueuedMS) * time.Millisecond}, nil
 }
 
 // graphSearchRequest и graphSearchResponse повторяют серверные
@@ -440,6 +628,8 @@ type graphSearchRequest struct {
 }
 
 type graphSearchResponse struct {
-	Result graph.SearchResult `json:"result"`
-	Chain  []graph.PathStep   `json:"chain"`
+	Result        graph.SearchResult `json:"result"`
+	Chain         []graph.PathStep   `json:"chain"`
+	RelationYears []int              `json:"relation_years,omitempty"`
+	QueuedMS      int64              `json:"queued_ms,omitempty"`
 }

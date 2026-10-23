@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Cyber-Watcher/ollchat/internal/mcpclient"
 )
@@ -22,8 +23,12 @@ type Status struct {
 	ToolsCfg int  // сколько имён в tools (0 — все)
 	AllowCfg int  // сколько в allow
 
-	State   string
-	Err     string
+	State string
+	Err   string
+	// Moved — новый адрес, если сервер ответил перенаправлением
+	// (mcpclient.MovedTo): его видит человек в /mcp, а в тексте ошибки, который
+	// может уйти модели, его нет (решение владельца 23.10.2026).
+	Moved   string
 	Info    mcpclient.Info
 	HasInfo bool
 	Tools   int       // сколько инструментов видит модель
@@ -42,7 +47,15 @@ func (s Status) Problem() string {
 	if s.Err == "" {
 		return s.State
 	}
-	return s.State + ": " + oneLine(s.Err)
+	return s.State + ": " + OneLine(s.Err) + movedNote(s.Moved)
+}
+
+// movedNote — подсказка человеку о новом адресе сервера; пусто — не переезжал.
+func movedNote(moved string) string {
+	if moved == "" {
+		return ""
+	}
+	return " (сервер перенаправляет на " + OneLine(moved) + " — поправьте url в конфиге)"
 }
 
 // Statuses — состояние всех серверов.
@@ -56,7 +69,7 @@ func (h *Hub) Statuses() []Status {
 			ToolsCfg: len(s.cfg.Tools), AllowCfg: len(s.cfg.Allow), State: s.state,
 			Info: s.info, HasInfo: s.hasInfo, Tools: len(s.tools), Skipped: len(s.skipped), Listed: s.listed}
 		if s.err != nil {
-			st.Err = s.err.Error()
+			st.Err, st.Moved = s.err.Error(), mcpclient.MovedTo(s.err)
 		}
 		if s.client != nil {
 			st.Stale = s.client.Stale()
@@ -106,7 +119,7 @@ func (h *Hub) Report() string {
 		line := "      " + st.State
 		if st.HasInfo {
 			line += fmt.Sprintf(", ревизия %s, сервер %s %s", st.Info.Protocol,
-				oneLine(st.Info.ServerName), oneLine(st.Info.ServerVersion))
+				OneLine(st.Info.ServerName), OneLine(st.Info.ServerVersion))
 		}
 		if st.State == stateUp && (!st.Library || st.ToolsCfg > 0) {
 			line += fmt.Sprintf(", инструментов у модели %d, без вопроса %d", st.Tools, st.Allowed)
@@ -122,7 +135,10 @@ func (h *Hub) Report() string {
 			b.WriteString("      сервер сообщил, что список инструментов устарел\n")
 		}
 		if st.Err != "" {
-			fmt.Fprintf(&b, "      %s\n", oneLine(st.Err))
+			fmt.Fprintf(&b, "      %s\n", OneLine(st.Err))
+		}
+		if st.Moved != "" {
+			fmt.Fprintf(&b, "      %s\n", strings.TrimSpace(movedNote(st.Moved)))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -148,7 +164,7 @@ func (h *Hub) Tools(name string) ([]ToolStatus, []string, error) {
 	if s.state != stateUp {
 		why := s.state
 		if s.err != nil {
-			why += ": " + oneLine(s.err.Error())
+			why += ": " + OneLine(s.err.Error()) + movedNote(mcpclient.MovedTo(s.err))
 		}
 		return nil, nil, fmt.Errorf("сервер MCP %s: %s", name, why)
 	}
@@ -195,7 +211,7 @@ func (h *Hub) ToolsReport(name string) (string, error) {
 	if len(skipped) > 0 {
 		fmt.Fprintf(&b, "Отброшено (%d):\n", len(skipped))
 		for _, sk := range skipped {
-			fmt.Fprintf(&b, "  %s\n", oneLine(sk))
+			fmt.Fprintf(&b, "  %s\n", OneLine(sk))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
@@ -204,14 +220,20 @@ func (h *Hub) ToolsReport(name string) (string, error) {
 // PingReport — итог рукопожатия строкой: время, ревизия, имя и версия сервера.
 func PingReport(name string, info mcpclient.Info) string {
 	return fmt.Sprintf("сервер MCP %s: рукопожатие за %d мс, ревизия %s, сервер %s %s",
-		name, info.Took.Milliseconds(), info.Protocol, oneLine(info.ServerName), oneLine(info.ServerVersion))
+		name, info.Took.Milliseconds(), info.Protocol, OneLine(info.ServerName), OneLine(info.ServerVersion))
 }
 
-// oneLine — чужой текст в одну строку, без управляющих знаков, не длиннее 300.
-func oneLine(s string) string {
+// OneLine — чужой текст в одну строку для ленты, отчётов и ошибок: без
+// управляющих знаков C0 и C1 (U+009B — CSI одним знаком: терминал исполнит
+// его, как ESC [; до 23.10.2026 C1 оставались) и без невидимых знаков
+// направления (Cf), не длиннее 300 знаков.
+func OneLine(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		switch {
+		case unicode.IsControl(r):
 			return ' '
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		}
 		return r
 	}, s)

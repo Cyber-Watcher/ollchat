@@ -93,11 +93,14 @@ type Opts struct {
 	// Пусто — имя машины из адреса.
 	Server string
 
-	// URL — вход Streamable HTTP, например https://mcp.example/mcp.
+	// URL — вход Streamable HTTP, например https://mcp.example/mcp. Без
+	// учётных данных и строки запроса: ключ — в Token, New такой адрес
+	// отвергает.
 	URL string
 
 	// Token — ключ доступа, уходит заголовком Authorization: Bearer.
-	// Пусто — без ключа. В текст ошибок не попадает никогда.
+	// Пусто — без ключа. В текст ошибок не попадает никогда. Перевод строки
+	// и другие управляющие знаки — ошибка New, а не отказ при запросе.
 	Token string
 
 	// Timeout — срок одного обмена с сервером. 0 и меньше — 60 с: чужой
@@ -113,11 +116,17 @@ type Opts struct {
 }
 
 // Client — соединение с одним сервером MCP. Безопасен для одновременных
-// вызовов: рукопожатие одно на всех, номер сеанса общий.
+// вызовов: рукопожатие одно на всех, номер сеанса общий. Initialize и Close
+// из другой горутины идущих вызовов не роняют: вызов, получивший 404 на
+// сеанс, который сменил или закрыл другой, догоняет новый сеанс (request).
+// Не спасается одно: поток SSE, который сервер оборвал вместе с закрытым
+// сеансом, — запрос уже ушёл и, может быть, исполнен, и повторять его нельзя.
+//
+// Адреса сервера в текстах ошибок нет (решение владельца 23.10.2026): они
+// уходят модели, а сервер там называется именем из конфига.
 type Client struct {
 	name    string
 	url     string
-	where   string // адрес без строки запроса и учётных данных — для сообщений
 	token   string
 	version string
 	timeout time.Duration
@@ -158,8 +167,19 @@ func New(o Opts) (*Client, error) {
 	if label == "" {
 		label = "MCP"
 	}
+	// Ключ в адресе не поддерживается (решение владельца 23.10.2026): адрес
+	// показывают /mcp, ключи и журналы, а ключу место в token_file, token_env
+	// или token_cmd. Строка запроса для чего-то кроме ключа входу MCP не нужна.
+	// Сами имя, пароль и строка запроса в сообщение не идут.
+	userinfo := fmt.Errorf("сервер %s: в адресе есть учётные данные (…@) — ключ так не передаётся; "+
+		"уберите их из адреса и задайте ключ через token_file, token_env или token_cmd", label)
 	u, err := url.Parse(raw)
 	if err != nil {
+		// Учётные данные не латиницей url.Parse не разбирает вовсе
+		// («invalid userinfo»): подсказка нужна и тогда.
+		if hasUserinfo(raw) {
+			return nil, userinfo
+		}
 		// Сам адрес в сообщение не идёт: в строке запроса бывает ключ.
 		var ue *url.Error
 		if errors.As(err, &ue) {
@@ -173,6 +193,17 @@ func New(o Opts) (*Client, error) {
 	}
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("сервер %s: в адресе нет имени машины", label)
+	}
+	if u.User != nil {
+		return nil, userinfo
+	}
+	if u.RawQuery != "" {
+		return nil, fmt.Errorf("сервер %s: в адресе есть строка запроса (?…) — ключ так не передаётся; "+
+			"уберите её из адреса и задайте ключ через token_file, token_env или token_cmd", label)
+	}
+	token := strings.TrimSpace(o.Token)
+	if err := checkToken(token); err != nil {
+		return nil, fmt.Errorf("сервер %s: %w", label, err)
 	}
 	if name == "" {
 		name = u.Hostname()
@@ -188,8 +219,7 @@ func New(o Opts) (*Client, error) {
 	return &Client{
 		name:    name,
 		url:     raw,
-		where:   u.Scheme + "://" + u.Host + u.EscapedPath(),
-		token:   strings.TrimSpace(o.Token),
+		token:   token,
 		version: version,
 		timeout: timeout,
 		http: &http.Client{
@@ -200,6 +230,19 @@ func New(o Opts) (*Client, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}, nil
+}
+
+// hasUserinfo — в части адреса до пути есть «@»: учётные данные, даже если
+// url.Parse их не разобрал.
+func hasUserinfo(raw string) bool {
+	_, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		return false
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.Contains(rest, "@")
 }
 
 // buildVersion — версия для clientInfo: версия выпуска, если сборка её знает,
@@ -360,10 +403,16 @@ func (c *Client) handshake(ctx context.Context) (Info, error) {
 	if !knownRevision(res.ProtocolVersion) {
 		return Info{}, &tagged{tag: ErrRevision, msg: fmt.Sprintf(
 			"сервер %s говорит на ревизии MCP %q, ollchat понимает %s",
-			c.name, res.ProtocolVersion, strings.Join(revisions, ", "))}
+			c.name, serverText(res.ProtocolVersion, 100), strings.Join(revisions, ", "))}
 	}
 	st := state{session: session, proto: res.ProtocolVersion}
 	if _, _, err := c.roundTrip(ctx, st, "notifications/initialized", nil, true); err != nil {
+		if errors.Is(err, errSessionGone) {
+			// Сеанс, выданный только что, сервер уже не узнаёт: здороваться
+			// снова бесполезно, а служебная errSessionGone наружу не выходит.
+			return Info{}, fmt.Errorf("сервер %s: сеанс, выданный на initialize, не найден на "+
+				"notifications/initialized (404)", c.name)
+		}
 		return Info{}, err
 	}
 	now := time.Now()
@@ -383,6 +432,7 @@ func (c *Client) handshake(ctx context.Context) (Info, error) {
 }
 
 // supportedOf — список ревизий из data.supported отказа, если он там есть.
+// Строки чужие: для текста ошибки их чистит и обрезает supportedText.
 func supportedOf(e *RPCError) []string {
 	var d struct {
 		Supported []string `json:"supported"`
@@ -435,43 +485,74 @@ func (c *Client) revisionRefusal(e *RPCError) error {
 	if modern {
 		named := "2026-07-28 или новее"
 		if len(sup) > 0 {
-			named = "сервер называет: " + strings.Join(sup, ", ")
+			named = "сервер называет: " + supportedText(sup)
 		}
 		return &tagged{tag: ErrRevision, msg: fmt.Sprintf(
 			"сервер %s говорит на ревизии MCP без рукопожатия (%s); ревизия 2026-07-28 "+
 				"ollchat пока не поддерживается — он понимает %s (отказ сервера: %d %s)",
-			c.name, named, ours, e.Code, clip(e.Message, 200))}
+			c.name, named, ours, e.Code, serverText(e.Message, 200))}
 	}
 	if len(sup) > 0 {
 		return &tagged{tag: ErrRevision, msg: fmt.Sprintf(
 			"сервер %s поддерживает ревизии MCP %s, ollchat понимает %s",
-			c.name, strings.Join(sup, ", "), ours)}
+			c.name, supportedText(sup), ours)}
 	}
 	return nil
+}
+
+// supportedText — ревизии из отказа сервера для текста ошибки: каждая не
+// длиннее 40 знаков, все вместе — 200, без управляющих знаков.
+func supportedText(sup []string) string {
+	parts := make([]string, 0, len(sup))
+	for _, s := range sup {
+		parts = append(parts, serverText(s, 40))
+	}
+	return serverText(strings.Join(parts, ", "), 200)
 }
 
 // request — вызов метода в готовом сеансе.
 //
 // 404 на запрос с номером сеанса — сеанс истёк: спецификация велит начать
-// новый, и запрос повторяется один раз. Повтор здесь безопасен: сервер
-// отказал, не исполнив, — сеанса, в котором исполнять, у него нет.
+// новый, и запрос повторяется. Повтор здесь безопасен: сервер отказал, не
+// исполнив, — сеанса, в котором исполнять, у него нет (а 404 с ответом на
+// сам запрос сюда не доходит, см. notFound). Второй 404 подряд на сеанс,
+// который никто не сменил, — сервер теряет сеанс сразу после рукопожатия:
+// здороваться снова бесполезно. Сеанс, который тем временем сменил или
+// закрыл другой вызов, — не отказ сервера: вызов догоняет новый (аудит
+// 23.10.2026: Initialize и Close из другой горутины роняли 11 вызовов из 300).
+//
+// Числом попыток догонялки не ограничены: каждая смена сеанса — чьё-то
+// настоящее рукопожатие или Close, сами по себе они не крутятся (под пробой
+// аудитора один вызов получил 404 шесть раз подряд). Предел — срок одного
+// обмена на все догонялки вместе: дольше модель ждать не должна.
 func (c *Client) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	st, err := c.ready(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res, _, err := c.roundTrip(ctx, st, method, params, false)
-	if !errors.Is(err, errSessionGone) {
-		return res, err
+	started := time.Now()
+	for try := 0; ; try++ {
+		res, _, err := c.roundTrip(ctx, st, method, params, false)
+		if !errors.Is(err, errSessionGone) {
+			return res, err
+		}
+		switch {
+		case try > 0 && !c.replaced(st):
+			return nil, fmt.Errorf("сервер %s: сеанс не найден и сразу после нового рукопожатия (404)", c.name)
+		case try > 0 && time.Since(started) > c.timeout:
+			return nil, fmt.Errorf("сервер %s: сеанс сменялся %d раз за %s, пока шёл вызов (404)",
+				c.name, try, c.timeout)
+		}
+		if st, err = c.renew(ctx, st); err != nil {
+			return nil, err
+		}
 	}
-	if st, err = c.renew(ctx, st); err != nil {
-		return nil, err
-	}
-	res, _, err = c.roundTrip(ctx, st, method, params, false)
-	if errors.Is(err, errSessionGone) {
-		return nil, fmt.Errorf("сервер %s: сеанс не найден и сразу после нового рукопожатия (404)", c.name)
-	}
-	return res, err
+}
+
+// replaced — сеанс st уже не текущий: его сменил или закрыл другой вызов.
+func (c *Client) replaced(st state) bool {
+	cur, ok := c.current()
+	return !ok || cur.session != st.session
 }
 
 // Tool — инструмент сервера, как он его описал.
@@ -496,12 +577,26 @@ const maxPages = 100
 // Признак Stale снимается в начале: уведомление, пришедшее, пока список
 // читается, выставит его снова, и вызывающий перечитает. У ollmcp после
 // перезапуска уведомление приходит потоком перед самим ответом — одно лишнее
-// перечитывание на перезапуск службы, зато без промаха.
+// перечитывание на перезапуск службы, зато без промаха. Список не прочитан —
+// признак возвращается, каким был: иначе сигнал «набор сменился» терялся бы
+// с неудачным перечитыванием (аудит 23.10.2026).
+//
+// Весь список, по всем страницам, — не больше maxListBytes и maxListTools.
 func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
-	c.stale.Store(false)
+	was := c.stale.Swap(false)
+	out, err := c.listTools(ctx)
+	if err != nil && was {
+		c.stale.Store(true)
+	}
+	return out, err
+}
+
+// listTools — страницы tools/list подряд, с пределами на весь список.
+func (c *Client) listTools(ctx context.Context) ([]Tool, error) {
 	var out []Tool
 	cursor := ""
 	seen := map[string]bool{}
+	total := 0
 	for page := 0; ; page++ {
 		if page >= maxPages {
 			return nil, fmt.Errorf("сервер %s: список инструментов длиннее %d страниц", c.name, maxPages)
@@ -513,6 +608,10 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 		raw, err := c.request(ctx, "tools/list", params)
 		if err != nil {
 			return nil, err
+		}
+		if total += len(raw); total > maxListBytes {
+			return nil, fmt.Errorf("сервер %s: список инструментов больше %d МиБ (прочитано страниц: %d)",
+				c.name, maxListBytes>>20, page+1)
 		}
 		var r struct {
 			Tools      []Tool `json:"tools"`
@@ -531,6 +630,10 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 				t.InputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 			}
 			out = append(out, t)
+		}
+		if len(out) > maxListTools {
+			return nil, fmt.Errorf("сервер %s: инструментов больше %d — такой список клиент не принимает",
+				c.name, maxListTools)
 		}
 		if r.NextCursor == "" {
 			return out, nil

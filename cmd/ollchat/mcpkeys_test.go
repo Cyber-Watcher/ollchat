@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/kbserve"
@@ -203,6 +207,203 @@ func TestMCPRegistryKey(t *testing.T) {
 	}
 	if !seen[tools.NameWebSearch] || !seen["mcp__wiki__echo"] || !seen["mcp__wiki__fail"] {
 		t.Errorf("набор: %v", seen)
+	}
+}
+
+// Ответ и ошибка стороннего сервера в --mcp-call — чужой текст для терминала
+// (аудит 23.10.2026): ESC-последовательности (CSI, OSC — заголовок окна),
+// C1 и возврат каретки печатаются видимо, перевод строки и табуляция — как есть.
+func TestMCPCallOutputEscaped(t *testing.T) {
+	const tok = "ключ-эскейпов-5c1e"
+	esc := "\x1b]0;PWNED\x07\x1b[2J\u009b31m\rстрока\tстолбец\nвторая"
+	mux := http.NewServeMux()
+	mcp.MountHTTP(mux, mcp.NewServer(nil, mcp.Tool{
+		Spec: ollama.ToolSpec{Name: "esc", Description: "e", Parameters: ollama.ToolParams{Type: "object"}},
+		Run:  func(context.Context, map[string]any) (string, error) { return esc, nil },
+	}, mcp.Tool{
+		Spec: ollama.ToolSpec{Name: "boom", Description: "b", Parameters: ollama.ToolParams{Type: "object"}},
+		Run:  func(context.Context, map[string]any) (string, error) { return "", errors.New(esc) },
+	}), tok, false)
+	ts := httptest.NewServer(kbserve.Protect(mux, true))
+	defer ts.Close()
+	t.Setenv("OLLCHAT_TEST_ESC_TOKEN", tok)
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServer{"wiki": {URL: ts.URL + "/mcp", TokenEnv: "OLLCHAT_TEST_ESC_TOKEN",
+		Allow: []string{"esc", "boom"}}}
+	hub := mcphub.New(cfg, "test")
+	sb, err := permissions.NewSandbox(t.TempDir(), false, false, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := permissions.Compile(nil, []string{"Fetch(*)"}, nil, sb.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range hub.AllowRules() {
+		rule, err := permissions.ParseRule(r, sb.Root())
+		if err != nil {
+			t.Fatal(err)
+		}
+		set.AddAllow(rule)
+	}
+	guard := permissions.NewGuard(set, sb, permissions.ModeNoAsk)
+	raw := func(s string) bool { return strings.ContainsAny(s, "\x1b\x07\r\u009b") }
+
+	var out, errOut bytes.Buffer
+	if err := runMCPKey(newFlags(t, "--mcp-call", "wiki", "esc"), hub, guard, false, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if raw(out.String()) || raw(errOut.String()) {
+		t.Errorf("управляющие знаки в выводе: %q / %q", out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), `\x1b]0;PWNED`) || !strings.Contains(out.String(), "строка\tстолбец\nвторая") {
+		t.Errorf("текст сервера искажён сверх нужного: %q", out.String())
+	}
+	out.Reset()
+	err = runMCPKey(newFlags(t, "--mcp-call", "wiki", "boom"), hub, guard, false, &out, &errOut)
+	if err == nil || raw(err.Error()) || raw(out.String()) {
+		t.Errorf("ошибка сервера с управляющими знаками: %q", fmt.Sprint(err))
+	}
+}
+
+// Ключи --mcp-* и шаги MCP в --kb-remote-check ждут ключ доступа
+// (token_cmd) и подключение не дольше срока (аудит 23.10.2026): с
+// context.Background() зависшая команда держала ключ бесконечно.
+func TestMCPKeysBoundedTokenCmd(t *testing.T) {
+	old := mcpKeyTimeout
+	mcpKeyTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { mcpKeyTimeout = old })
+	ts := keysServer(t)
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServer{"wiki": {URL: ts.URL + "/mcp", TokenCmd: "exec sleep 5"}}
+	cfg.KB.ServerURL, cfg.KB.ServerTokenCmd, cfg.KB.Default = ts.URL, "exec sleep 5", "books"
+	hub := mcphub.New(cfg, "test")
+	sb, err := permissions.NewSandbox(t.TempDir(), false, false, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := permissions.Compile(nil, []string{"Fetch(*)"}, nil, sb.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := permissions.NewGuard(set, sb, permissions.ModeNoAsk)
+	for _, args := range [][]string{{"--mcp-ping", "wiki"}, {"--mcp-tools", "wiki"}, {"--mcp-call", "wiki", "echo"}} {
+		start := time.Now()
+		var out, errOut bytes.Buffer
+		err := runMCPKey(newFlags(t, args...), hub, guard, false, &out, &errOut)
+		if took := time.Since(start); err == nil || took > 3*time.Second {
+			t.Errorf("%q: %v за %s — срок на ключ доступа не действует", args, err, took)
+		}
+	}
+	start := time.Now()
+	var out bytes.Buffer
+	svc := &checkService{askService: askChainService(t)}
+	if err := runKBRemoteCheck(cfg, svc, hub, nil, &out); err == nil {
+		t.Errorf("шаги MCP без ключа прошли:\n%s", out.String())
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("--kb-remote-check шёл %s — срок на kb.server_token_cmd не действует:\n%s", took, out.String())
+	}
+}
+
+// Служба библиотеки при занятом имени kb (аудит 23.10.2026, находка 9):
+// --kb-remote-check не находит её среди серверов и отказывает на шагах MCP,
+// а не подключает вместо неё ВСЕ сторонние серверы (Reconnect с пустым
+// именем). Конфиг из файла такое уже не пропускает (config.TestLibraryNameReserved);
+// здесь — конфиг, собранный кодом.
+func TestKBRemoteCheckLibraryNameTaken(t *testing.T) {
+	ts := keysServer(t)
+	t.Setenv("OLLCHAT_TEST_KEYS_KB", keysToken)
+	var hits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "не сюда", http.StatusInternalServerError)
+	}))
+	defer other.Close()
+	cfg := config.Default()
+	cfg.KB.ServerURL, cfg.KB.ServerTokenEnv, cfg.KB.Default = ts.URL, "OLLCHAT_TEST_KEYS_KB", "books"
+	cfg.MCP.Servers = map[string]config.MCPServer{
+		"kb":   {URL: other.URL + "/kb/mcp"},
+		"wiki": {URL: other.URL + "/mcp"},
+	}
+	hub := mcphub.New(cfg, "test")
+	svc := &checkService{askService: askChainService(t)}
+	var out bytes.Buffer
+	err := runKBRemoteCheck(cfg, svc, hub, nil, &out)
+	if err == nil || !strings.Contains(err.Error(), "отказов 2") {
+		t.Errorf("итог: %v\n%s", err, out.String())
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("при занятом имени kb ключ ходил к сторонним серверам: запросов %d\n%s", n, out.String())
+	}
+	if !strings.Contains(out.String(), "[mcp.servers.kb]") {
+		t.Errorf("причина отказа не названа:\n%s", out.String())
+	}
+}
+
+// closeHub на выходе заканчивает сеанс подключённого сервера (DELETE) и не
+// ждёт дольше своего срока.
+func TestCloseHubEndsSessions(t *testing.T) {
+	var deletes atomic.Int32
+	target, err := url.Parse(keysServer(t).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+	t.Setenv("OLLCHAT_TEST_CLOSE_TOKEN", keysToken)
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServer{"wiki": {URL: front.URL + "/mcp", TokenEnv: "OLLCHAT_TEST_CLOSE_TOKEN"}}
+	hub := mcphub.New(cfg, "test")
+	if err := hub.Reconnect(context.Background(), "wiki"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	closeHub(hub)
+	if took := time.Since(start); took > hubCloseTimeout+time.Second {
+		t.Errorf("closeHub шёл %s", took)
+	}
+	if n := deletes.Load(); n != 1 {
+		t.Errorf("DELETE сеанса: %d, ждали 1", n)
+	}
+}
+
+// Имя службы библиотеки у хаба и у проверки конфига — одно: иначе конфиг
+// резервировал бы одно имя, а ключи искали бы службу под другим.
+func TestLibraryNameAgrees(t *testing.T) {
+	if mcphub.LibraryServer != config.LibraryMCPName {
+		t.Errorf("mcphub.LibraryServer = %q, config.LibraryMCPName = %q", mcphub.LibraryServer, config.LibraryMCPName)
+	}
+}
+
+// Службу библиотеки среди [mcp.servers] хаб и проверка имени kb в конфиге
+// узнают одинаково: иначе конфиг отверг бы раздел kb, который хаб счёл бы
+// службой, или пропустил бы тот, что спрячет службу от ключей.
+func TestLibraryEndpointAgrees(t *testing.T) {
+	for _, lib := range []string{"http://mcp.example:8377", "http://mcp.example", "https://mcp.example"} {
+		for _, u := range []string{
+			lib + "/mcp", lib + "/mcp/", strings.ToUpper(lib) + "/mcp", lib + "/mcp?x=1",
+			"http://mcp.example/mcp", "http://mcp.example:80/mcp", "https://mcp.example:443/mcp",
+			"https://mcp.example:8377/mcp", lib, lib + "/other", "http://198.51.100.10:8377/mcp",
+		} {
+			cfg := config.Default()
+			cfg.KB.ServerURL = lib
+			cfg.MCP.Servers = map[string]config.MCPServer{config.LibraryMCPName: {URL: u}}
+			hubSays := mcphub.New(cfg, "test").LibraryName() == config.LibraryMCPName
+			if cfgSays := config.SameEndpoint(u, cfg.KB.LibraryMCPURL()); hubSays != cfgSays {
+				t.Errorf("kb.server_url %s, url %s: хаб считает службой — %v, конфиг — %v", lib, u, hubSays, cfgSays)
+			}
+		}
+	}
+	// Порт по умолчанию — тот же вход, что пропущенный.
+	if !config.SameEndpoint("http://mcp.example:80/mcp", "http://mcp.example/mcp/") {
+		t.Error("http://mcp.example:80/mcp и http://mcp.example/mcp — разные входы")
 	}
 }
 

@@ -31,13 +31,20 @@ func Token(ctx context.Context, file, env, cmd string) (string, error) {
 		if t == "" {
 			return "", fmt.Errorf("token_file: файл %s пуст", p)
 		}
+		if err := checkToken(t); err != nil {
+			return "", fmt.Errorf("token_file: файл %s: %w", p, err)
+		}
 		return t, nil
 	}
 	if name := strings.TrimSpace(env); name != "" {
-		if t := strings.TrimSpace(os.Getenv(name)); t != "" {
-			return t, nil
+		t := strings.TrimSpace(os.Getenv(name))
+		if t == "" {
+			return "", fmt.Errorf("token_env: переменная %s пуста", name)
 		}
-		return "", fmt.Errorf("token_env: переменная %s пуста", name)
+		if err := checkToken(t); err != nil {
+			return "", fmt.Errorf("token_env: переменная %s: %w", name, err)
+		}
+		return t, nil
 	}
 	if line := strings.TrimSpace(cmd); line != "" {
 		t, err := confluence.TokenFromCmd(ctx, line)
@@ -47,7 +54,30 @@ func Token(ctx context.Context, file, env, cmd string) (string, error) {
 		if t == "" {
 			return "", fmt.Errorf("token_cmd: команда ничего не напечатала")
 		}
+		if err := checkToken(t); err != nil {
+			return "", fmt.Errorf("token_cmd: вывод команды: %w", err)
+		}
 		return t, nil
 	}
 	return "", nil
+}
+
+// checkToken — ключ годится в заголовок Authorization: в нём нет управляющих
+// знаков (табуляцию заголовок HTTP допускает).
+//
+// Перевод строки внутри ключа (две строки в token_file, многострочный вывод
+// token_cmd) иначе всплыл бы только при запросе — отказом net/http, который
+// выглядит как «сервер недоступен» с меткой ErrUnavailable и молча уводит
+// поиск на свои файлы вместо ошибки настройки (аудит 23.10.2026). Ни сам
+// ключ, ни его длина в сообщение не попадают.
+func checkToken(t string) error {
+	for i := 0; i < len(t); i++ {
+		if b := t[i]; (b < 0x20 && b != '\t') || b == 0x7f {
+			if b == '\n' || b == '\r' {
+				return fmt.Errorf("в ключе доступа перевод строки — ключ должен быть одной строкой")
+			}
+			return fmt.Errorf("в ключе доступа управляющий знак — в заголовок HTTP его не поставить")
+		}
+	}
+	return nil
 }

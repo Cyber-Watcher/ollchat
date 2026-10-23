@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"hash/fnv"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
@@ -69,6 +71,57 @@ type SearchResponse struct {
 	Note       string      `json:"note,omitempty"`
 	Generation string      `json:"generation"`
 	Collection string      `json:"collection"`
+	// QueuedMS — сколько запрос ждал места в очереди тяжёлых запросов, мс;
+	// нет поля — не ждал. Клиент говорит об этом строкой в выводе (решение
+	// владельца 23.10.2026). Есть у всех ответов тяжёлых входов.
+	QueuedMS int64 `json:"queued_ms,omitempty"`
+}
+
+// BusyResponse — тело ответа 503, когда места в очереди тяжёлых запросов за
+// предел ожидания не нашлось. Busy — признак «служба занята, но жива»: по нему
+// клиент отличает очередь от недоступности и на свои файлы не переходит.
+type BusyResponse struct {
+	Error    string `json:"error"`
+	Busy     bool   `json:"busy"`
+	QueuedMS int64  `json:"queued_ms"`
+}
+
+// QueueWaitHeader — заголовок, которым клиент говорит, сколько он готов ждать
+// места в очереди, в миллисекундах. Служба ждёт меньшее из этого и своего
+// предела (Opts.QueueWait) и отвечает 503 «занята» раньше, чем у клиента
+// истечёт срок: иначе очередь выглядела бы для него недоступностью службы.
+const QueueWaitHeader = "X-Ollchat-Queue-Wait-Ms"
+
+// FindRequest — поиск по графу и книгам одной выдачей: то, что показывает
+// команда /search (find.Search) и /kb search (без графа). Числа отбора —
+// живые числа клиента; ноль — как настроено у службы.
+type FindRequest struct {
+	Collection     string  `json:"collection"`
+	Query          string  `json:"query"`
+	TopK           int     `json:"top_k,omitempty"`
+	MaxPerBook     int     `json:"max_per_book,omitempty"`
+	MinCosine      float64 `json:"min_cosine,omitempty"`
+	SemanticWeight float64 `json:"semantic_weight,omitempty"`
+	Entities       int     `json:"entities,omitempty"`
+	Neighbors      int     `json:"neighbors,omitempty"`
+	// Graph — входить ли в граф: /search — да, /kb search — нет.
+	Graph bool `json:"graph,omitempty"`
+	// Rerank — вторая ступень отбора (ключ -r), если она настроена у службы.
+	Rerank bool `json:"rerank,omitempty"`
+	// Full — куски целиком, а не выдержками (ключ -f).
+	Full bool `json:"full,omitempty"`
+}
+
+// FindResponse — выдача /search службы: разобранная (Result — для /read N
+// и списка Ctrl+F у клиента) и напечатанная (Text — find.Render по файлам
+// службы: выдержки под связями и годы связей клиенту взять неоткуда).
+type FindResponse struct {
+	Result     find.Result `json:"result"`
+	Text       string      `json:"text"`
+	Note       string      `json:"note,omitempty"`
+	Generation string      `json:"generation"`
+	Collection string      `json:"collection"`
+	QueuedMS   int64       `json:"queued_ms,omitempty"`
 }
 
 // AroundRequest — запрос куска целиком с соседями.
@@ -130,6 +183,12 @@ type Opts struct {
 	// 0 — heavySlots.
 	HeavySlots int
 
+	// QueueWait — сколько запрос ждёт места среди HeavySlots, прежде чем
+	// служба ответит 503 «занята»; 0 — queueWait, отрицательное — ждать, пока
+	// ждёт клиент (как до 23.10.2026). Клиент может попросить меньше
+	// заголовком QueueWaitHeader.
+	QueueWait time.Duration
+
 	Verbose bool
 }
 
@@ -151,7 +210,43 @@ const (
 	// одновременных векторов и переранжирований не ускоряют, а копят очередь
 	// в Ollama.
 	heavySlots = 4
+
+	// queueWait — предел ожидания места в очереди. Меньше умолчания
+	// kb.server_timeout клиента (30 с): занятая служба успевает сказать
+	// «занята» прежде, чем клиент сочтёт её недоступной и откроет свой граф.
+	queueWait = 10 * time.Second
 )
+
+// queueLimit — сколько ждать места для запроса r: предел службы, а если
+// клиент просит меньше (QueueWaitHeader) — его. 0 — без предела.
+func queueLimit(own time.Duration, r *http.Request) time.Duration {
+	limit := own
+	switch {
+	case own == 0:
+		limit = queueWait
+	case own < 0:
+		limit = 0
+	}
+	if ms, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get(QueueWaitHeader)), 10, 64); err == nil && ms > 0 {
+		if asked := time.Duration(ms) * time.Millisecond; limit == 0 || asked < limit {
+			limit = asked
+		}
+	}
+	return limit
+}
+
+// busyError отвечает 503 с признаком «занята»: места за предел ожидания
+// не нашлось, но служба жива.
+func busyError(w http.ResponseWriter, slots int, waited time.Duration) {
+	ms := waited.Milliseconds()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(BusyResponse{
+		Error: fmt.Sprintf("служба занята: все %d мест тяжёлых запросов заняты, ждал в очереди %d мс",
+			slots, ms),
+		Busy: true, QueuedMS: ms,
+	})
+}
 
 // searchOpts переводит запрос в числа поиска, приводя их к пределам службы.
 //
@@ -195,6 +290,12 @@ type GraphServer interface {
 	// подмешиванию карты понятий к вопросу. Размер карты — из запроса
 	// (req.Entities, req.Neighbors), ноль — по настройкам службы.
 	Search(ctx context.Context, req GraphSearchRequest) (GraphSearchResponse, error)
+
+	// Graph отдаёт граф коллекции и ранжирование соседей службы для поиска
+	// по графу и книгам одной выдачей (вход /api/v1/find — команда /search
+	// клиента). release отпускает граф. Ошибка — графа нет: выдача будет
+	// из одних книг со строкой об этом, как у /search без графа.
+	Graph(collection string) (g *graph.Graph, rank graph.NeighborRank, release func(), err error)
 }
 
 // Handler собирает маршрутизатор службы.
@@ -230,21 +331,38 @@ func Mount(mux *http.ServeMux, o Opts) {
 	}
 
 	// enter занимает место тяжёлого запроса, когда запрос уже разобран: тело
-	// читается до очереди, и медленный клиент места не держит. Ждёт, пока
-	// ждёт клиент, — ушедший клиент из очереди уходит.
+	// читается до очереди, и медленный клиент места не держит. Ушедший клиент
+	// из очереди уходит; не дождавшийся места за queueLimit получает 503
+	// «занята» (решение владельца 23.10.2026: очередь — не недоступность).
+	// queued — сколько ждал; оно уходит клиенту в ответе.
 	slots := o.HeavySlots
 	if slots <= 0 {
 		slots = heavySlots
 	}
 	heavy := make(chan struct{}, slots)
-	enter := func(w http.ResponseWriter, r *http.Request) (leave func(), ok bool) {
+	enter := func(w http.ResponseWriter, r *http.Request) (leave func(), queued time.Duration, ok bool) {
 		select {
 		case heavy <- struct{}{}:
-			return func() { <-heavy }, true
+			return func() { <-heavy }, 0, true
+		default:
+		}
+		start := time.Now()
+		var expired <-chan time.Time
+		if limit := queueLimit(o.QueueWait, r); limit > 0 {
+			t := time.NewTimer(limit)
+			defer t.Stop()
+			expired = t.C
+		}
+		select {
+		case heavy <- struct{}{}:
+			return func() { <-heavy }, time.Since(start), true
+		case <-expired:
+			busyError(w, slots, time.Since(start))
+			return nil, 0, false
 		case <-r.Context().Done():
 			apiError(w, http.StatusServiceUnavailable,
 				errors.New("служба занята другими запросами, а клиент перестал ждать"))
-			return nil, false
+			return nil, 0, false
 		}
 	}
 
@@ -280,7 +398,7 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusNotFound, err)
 			return
 		}
-		leave, ok := enter(w, r)
+		leave, queued, ok := enter(w, r)
 		if !ok {
 			return
 		}
@@ -296,6 +414,74 @@ func Mount(mux *http.ServeMux, o Opts) {
 		writeJSON(w, SearchResponse{
 			Results: hits, Note: note,
 			Generation: Generation(coll.Stats()), Collection: name,
+			QueuedMS: queued.Milliseconds(),
+		})
+	}))
+
+	// Поиск по графу и книгам одной выдачей — команды человека /search и
+	// /kb search у клиента с kb.server_url (решение владельца 23.10.2026:
+	// «Команды в службу»). То же ядро find.Search и та же печать find.Render,
+	// что у /search на файлах и у инструмента search службы: клиент видит ту
+	// выдачу, которую увидел бы, держа библиотеку у себя.
+	mux.HandleFunc("/api/v1/find", guard(func(w http.ResponseWriter, r *http.Request) {
+		var req FindRequest
+		if !readJSON(w, r, &req) {
+			return
+		}
+		if strings.TrimSpace(req.Query) == "" {
+			apiError(w, http.StatusBadRequest, errors.New("пустой запрос"))
+			return
+		}
+		coll, name, err := pick(base, req.Collection, def)
+		if err != nil {
+			apiError(w, http.StatusNotFound, err)
+			return
+		}
+		leave, queued, ok := enter(w, r)
+		if !ok {
+			return
+		}
+		defer leave()
+		deps := find.Deps{Coll: coll, Source: coll, Embedder: o.Emb, Translator: o.Translator}
+		opts := find.Opts{
+			Mode: "serve", Collection: name, TableBoost: o.TableBoost,
+			TopK:       clampPositive(req.TopK, maxTopK),
+			MaxPerBook: clampPositive(req.MaxPerBook, maxTopK),
+			MinCosine:  req.MinCosine, SemanticWeight: req.SemanticWeight,
+			Entities:  clampPositive(req.Entities, maxTopK),
+			Neighbors: clampPositive(req.Neighbors, maxTopK),
+			Semantic:  true, QueryTimeout: kb.DefaultQueryTimeout,
+			Full: req.Full, RerankOpts: o.RerankOpts,
+		}
+		note := ""
+		if req.Rerank {
+			// Молчать о несработавшем ключе нельзя: человек сравнит несравнимое.
+			if o.Reranker != nil {
+				deps.Reranker, opts.Rerank = o.Reranker, true
+			} else {
+				note = "переранжирование у службы не настроено — искал одной ступенью"
+			}
+		}
+		if req.Graph && o.Graph != nil {
+			// Графа нет — не ошибка: выдача из книг и строка об этом, как у /search.
+			if g, rank, release, gerr := o.Graph.Graph(name); gerr == nil {
+				defer release()
+				deps.Graph, opts.Rank = g, rank
+			}
+		}
+		res, err := find.Search(r.Context(), deps, req.Query, opts)
+		if err != nil {
+			apiError(w, http.StatusInternalServerError, err)
+			return
+		}
+		text := find.Render(res, req.Full, coll)
+		// Сырая выдача книг (Hits) клиенту не нужна: выдержки, сигналы
+		// и напечатанный текст уже есть, а куски целиком утяжелили бы ответ вдвое.
+		res.Hits = nil
+		writeJSON(w, FindResponse{
+			Result: res, Text: text, Note: note,
+			Generation: Generation(coll.Stats()), Collection: name,
+			QueuedMS: queued.Milliseconds(),
 		})
 	}))
 
@@ -337,7 +523,7 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusNotImplemented, errNoGraph)
 			return
 		}
-		leave, ok := enter(w, r)
+		leave, queued, ok := enter(w, r)
 		if !ok {
 			return
 		}
@@ -354,7 +540,7 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, GraphToolResponse{Text: text})
+		writeJSON(w, GraphToolResponse{Text: text, QueuedMS: queued.Milliseconds()})
 	}))
 
 	mux.HandleFunc("/api/v1/graph/search", guard(func(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +552,7 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusNotImplemented, errNoGraph)
 			return
 		}
-		leave, ok := enter(w, r)
+		leave, queued, ok := enter(w, r)
 		if !ok {
 			return
 		}
@@ -380,6 +566,7 @@ func Mount(mux *http.ServeMux, o Opts) {
 			apiError(w, http.StatusBadRequest, err)
 			return
 		}
+		res.QueuedMS = queued.Milliseconds()
 		writeJSON(w, res)
 	}))
 
@@ -488,7 +675,8 @@ type GraphToolRequest struct {
 
 // GraphToolResponse — тот же текст, что увидела бы модель локально.
 type GraphToolResponse struct {
-	Text string `json:"text"`
+	Text     string `json:"text"`
+	QueuedMS int64  `json:"queued_ms,omitempty"` // ожидание в очереди, мс
 }
 
 // GraphSearchRequest — разбираемый поиск по графу.
@@ -506,9 +694,18 @@ type GraphSearchRequest struct {
 // GraphSearchResponse — карта понятий по вопросу и цепочка между двумя его
 // понятиями (find.Chain по графу службы, этап 121, А6). Клиент прежней сборки
 // поле chain не читает — ответ совместим.
+//
+// RelationYears — год самой свежей книги, подтвердившей связь, по связям
+// Result.Relations в том же порядке; 0 — года нет. Прямой режим берёт его
+// у своей коллекции (ChunkByRef), а у клиента службы кусков нет: без поля
+// карта через службу теряла «свежайшее N г.» (аудит 23.10.2026, находка 11).
+// Клиент прежней сборки поле не читает, служба прежней сборки его не шлёт —
+// у связей тогда нет года, остальное то же.
 type GraphSearchResponse struct {
-	Result graph.SearchResult `json:"result"`
-	Chain  []graph.PathStep   `json:"chain,omitempty"`
+	Result        graph.SearchResult `json:"result"`
+	Chain         []graph.PathStep   `json:"chain,omitempty"`
+	RelationYears []int              `json:"relation_years,omitempty"`
+	QueuedMS      int64              `json:"queued_ms,omitempty"` // ожидание в очереди, мс
 }
 
 // ErrToolNotServed — служба этот инструмент не исполняет и исполнять не будет.

@@ -8,10 +8,13 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/graphex"
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -656,8 +659,10 @@ type KB struct {
 	ServerTokenEnv  string `toml:"server_token_env"`
 	ServerTokenCmd  string `toml:"server_token_cmd"`
 
-	// ServerTimeout — сколько ждать ответа общей библиотеки. Пусто — 30 с:
-	// поиск по сети идёт дольше местного, но не минутами.
+	// ServerTimeout — сколько ждать ответа общей библиотеки. Пусто или 0 —
+	// 30 с: поиск по сети идёт дольше местного, но не минутами. Отрицательное —
+	// отказ запуска. finalize записывает сюда умолчание явно: из этой строки
+	// заводится и сервер kb для ключей --mcp-* и /mcp, а пустое там — 60 с.
 	ServerTimeout string `toml:"server_timeout"`
 
 	// RerankURL — адрес службы переранжирования (llama-server с --reranking).
@@ -1189,12 +1194,79 @@ func (g Graph) ArchiveEveryDuration() (time.Duration, error) {
 	return d, nil
 }
 
+// defaultServerTimeout — срок общей библиотеки, когда kb.server_timeout пуст
+// или ноль.
+const defaultServerTimeout = 30 * time.Second
+
 // ServerTimeoutDuration — предел ожидания общей библиотеки.
 func (k KB) ServerTimeoutDuration() time.Duration {
 	if d, err := time.ParseDuration(k.ServerTimeout); err == nil && d > 0 {
 		return d
 	}
-	return 30 * time.Second
+	return defaultServerTimeout
+}
+
+// LibraryMCPName — имя, под которым ключам --mcp-* и команде /mcp видна служба
+// общей библиотеки (kb.server_url). При заданном kb.server_url оно занято ею:
+// раздел [mcp.servers.kb] с другим адресом — отказ запуска (finalize).
+// mcphub.LibraryServer обязан совпадать с ним (TestLibraryNameAgrees).
+const LibraryMCPName = "kb"
+
+// LibraryMCPURL — вход MCP службы общей библиотеки, <kb.server_url>/mcp;
+// пусто — служба не настроена.
+func (k KB) LibraryMCPURL() string {
+	u := strings.TrimRight(strings.TrimSpace(k.ServerURL), "/")
+	if u == "" {
+		return ""
+	}
+	return u + "/mcp"
+}
+
+// SameEndpoint — один и тот же вход: схема и машина без учёта регистра, порт
+// по умолчанию для схемы (http — 80, https — 443) равен пропущенному, путь без
+// конечной косой черты. Так хаб узнаёт службу библиотеки среди [mcp.servers]
+// (mcphub sameURL), и так же её обязана узнавать проверка имени kb: иначе
+// конфиг отверг бы раздел, который хаб счёл службой, или наоборот
+// (TestLibraryEndpointAgrees в cmd/ollchat сверяет оба).
+func SameEndpoint(a, b string) bool {
+	ka, oka := endpointKey(a)
+	kb, okb := endpointKey(b)
+	return oka && okb && ka == kb
+}
+
+// endpointKey — адрес в одном виде для SameEndpoint; false — не разобрался
+// или без машины.
+func endpointKey(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	scheme, port := strings.ToLower(u.Scheme), u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port) +
+		strings.TrimRight(u.EscapedPath(), "/"), true
+}
+
+// checkServiceURL — в адресе службы нет ключа (решение владельца 23.10.2026:
+// ключ в адресе не поддерживается): ни учётных данных user:pass@, ни строки
+// запроса, ни якоря. Адрес показывается в /mcp и --mcp-servers, пишется
+// в журналы и входит в тексты ошибок, а ключ живёт только в источниках
+// tokenKeys. Сам адрес в отказ не попадает: в нём и может быть ключ.
+func checkServiceURL(where, raw string, u *url.URL, tokenKeys string) error {
+	if u.User != nil {
+		return fmt.Errorf("%s: учётные данные в адресе (user:pass@) не поддерживаются — ключ задаётся %s", where, tokenKeys)
+	}
+	if strings.ContainsAny(raw, "?#") {
+		return fmt.Errorf("%s: строка запроса и якорь (?… и #…) в адресе не поддерживаются — ключ задаётся %s", where, tokenKeys)
+	}
+	return nil
 }
 
 // HintsAtStartup — показывать ли советы при запуске.
@@ -1341,8 +1413,14 @@ func (c Confluence) TimeoutDuration() time.Duration {
 // командой — отдельный этап. Инструменты приходят под именами
 // mcp__<сервер>__<инструмент>, встроенных не заменяют, и каждый вызов идёт
 // через подтверждение (вид Fetch, цель mcp://<сервер>/<инструмент>) — даже
-// в noask; без вопроса — только перечисленные в allow и режим yolo
-// (решения владельца 22.10.2026).
+// в noask; без вопроса — перечисленные в allow (и любое правило
+// Fetch(mcp://…) в permissions.allow), разрешённые человеком на сеанс и режим
+// yolo; общее Fetch(**) их не разрешает (решения владельца 22.10.2026,
+// permissions.Guard.checkExternal).
+//
+// Имя kb при заданном kb.server_url занято службой общей библиотеки
+// (LibraryMCPName). Конфиг проекта складывает серверы с общими по имени
+// (ApplyProject).
 type MCP struct {
 	Servers map[string]MCPServer `toml:"servers"`
 }
@@ -1350,7 +1428,9 @@ type MCP struct {
 // MCPServer — один сторонний сервер, раздел [mcp.servers.<имя>].
 //
 // Ключа здесь нет, как и у Confluence: только откуда его взять — файл,
-// переменная окружения или команда (первое заданное).
+// переменная окружения или команда (первое заданное). В url его тоже быть
+// не может: адрес с user:pass@, строкой запроса или якорем — отказ запуска
+// (checkServiceURL).
 type MCPServer struct {
 	URL       string `toml:"url"`
 	TokenFile string `toml:"token_file"`
@@ -1412,6 +1492,9 @@ func (m *MCP) validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("%s.url: нужен адрес http:// или https:// с именем машины, например http://mcp.example:8377/mcp "+
 				"(другие транспорты не поддержаны)", where)
+		}
+		if err := checkServiceURL(where+".url", strings.TrimSpace(s.URL), u, where+".token_file, token_env или token_cmd"); err != nil {
+			return err
 		}
 		if s.Timeout != "" {
 			if d, err := time.ParseDuration(s.Timeout); err != nil || d <= 0 {
@@ -1636,6 +1719,9 @@ func Default() *Config {
 			SemanticWeight: 1.5,
 			EmbedKeepAlive: "5m",
 			EmbedTimeout:   "15m",
+			// Тот же срок, что подставляет ServerTimeoutDuration: из этой
+			// строки хаб заводит сервер kb, а у сервера MCP пустое — 60 с.
+			ServerTimeout: defaultServerTimeout.String(),
 		},
 		Graph: Graph{
 			// Модель не задана: сборка графа включается сознательно, потому
@@ -1892,10 +1978,147 @@ func unknownKeys(undecoded []toml.Key, named map[string]Graph, namedUnknown []st
 	keys = append(keys, namedUnknown...)
 	sort.Strings(keys)
 	out := make([]string, 0, len(keys))
+	// Ключи прямо в словаре разделов ([[mcp.servers]] или [mcp.servers]
+	// с url внутри) — одно предупреждение на словарь, а не по ключу.
+	tables := map[string][]string{}
+	var tableOrder []string
 	for _, k := range keys {
-		out = append(out, fmt.Sprintf("неизвестный ключ %s не действует — опечатка или устаревшая настройка?", k))
+		path := strings.Split(k, ".")
+		if len(path) >= 3 && path[0] == "graph" {
+			if _, ok := named[path[1]]; ok {
+				// [graph.<имя>] — те же ключи, что у [graph]
+				path = append([]string{"graph"}, path[2:]...)
+			}
+		}
+		near, table := keyHint(path)
+		switch {
+		case table != "":
+			if _, seen := tables[table]; !seen {
+				tableOrder = append(tableOrder, table)
+			}
+			tables[table] = append(tables[table], k)
+		case len(near) > 0:
+			// Подсказка — тем же путём, что написан: graph.lab.modle → graph.lab.model.
+			full := strings.Split(k, ".")
+			at := len(full) - len(path) + len(near) - 1 // где в написанном опечатка
+			fixed := append(slices.Clone(full[:at]), near[len(near)-1])
+			out = append(out, fmt.Sprintf("неизвестный ключ %s не действует — возможно, имелось в виду %s?",
+				k, strings.Join(fixed, ".")))
+		default:
+			out = append(out, fmt.Sprintf("неизвестный ключ %s не действует — опечатка или устаревшая настройка?", k))
+		}
+	}
+	for _, table := range tableOrder {
+		out = append(out, fmt.Sprintf("ключи %s не действуют: здесь ждут разделы [%s.<имя>], по одному на каждый "+
+			"(например [%s.wiki]), а не [[%s]] и не ключи прямо в [%s]",
+			strings.Join(tables[table], ", "), table, table, table, table))
 	}
 	return out
+}
+
+// keyHint — подсказка к неизвестному ключу path по устройству Config (теги
+// toml): near — путь к близкому по написанию настоящему ключу (опечатка
+// в последнем неизвестном звене: enable → enabled, mcp.server → mcp.servers);
+// table — словарь разделов вида [mcp.servers.<имя>], в который ключ записан
+// напрямую (так выходит у [[mcp.servers]]: ноль серверов и ни слова, почему).
+// Свободные словари (options, tokens) подсказок не дают.
+func keyHint(path []string) (near []string, table string) {
+	t := reflect.TypeOf(Config{})
+	for i := 0; i < len(path); {
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice:
+			t = t.Elem() // [[servers]]: ключи элемента пишутся без номера
+		case reflect.Map:
+			if t.Elem().Kind() != reflect.Struct {
+				return nil, ""
+			}
+			if i == len(path)-1 {
+				return nil, strings.Join(path[:i], ".")
+			}
+			t = t.Elem()
+			i++ // имя раздела
+		case reflect.Struct:
+			f, ok := fieldByKey(t, path[i])
+			if !ok {
+				if k := closestKey(t, path[i]); k != "" {
+					return append(slices.Clone(path[:i]), k), ""
+				}
+				return nil, ""
+			}
+			t = f.Type
+			i++
+		default:
+			return nil, ""
+		}
+	}
+	return nil, ""
+}
+
+// fieldByKey — поле структуры по имени ключа toml.
+func fieldByKey(t reflect.Type, key string) (reflect.StructField, bool) {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if name, _, _ := strings.Cut(f.Tag.Get("toml"), ","); f.IsExported() && name == key {
+			return f, true
+		}
+	}
+	return reflect.StructField{}, false
+}
+
+// closestKey — ключ структуры t, ближайший к опечатке key: не дальше двух
+// правок (одной — у ключей до четырёх знаков), единственный на этом
+// расстоянии. Нет такого — пусто: подсказка наугад хуже никакой.
+func closestKey(t reflect.Type, key string) string {
+	limit := 2
+	if len([]rune(key)) <= 4 {
+		limit = 1
+	}
+	best, bestD, ties := "", limit+1, 0
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("toml"), ",")
+		if name == "" || name == "-" || !t.Field(i).IsExported() {
+			continue
+		}
+		switch d := typoDistance(key, name); {
+		case d < bestD:
+			best, bestD, ties = name, d, 1
+		case d == bestD:
+			ties++
+		}
+	}
+	if ties != 1 {
+		return ""
+	}
+	return best
+}
+
+// typoDistance — число правок (вставка, удаление, замена, перестановка
+// соседних знаков) от a до b: «modle» и «model» — одна правка, а не две.
+// Своя, а не redact.near: та знает только одну правку и не знает
+// перестановок, а тянуть пакет обезличивания в конфиг незачем.
+func typoDistance(a, b string) int {
+	x, y := []rune(a), []rune(b)
+	d := make([][]int, len(x)+1)
+	for i := range d {
+		d[i] = make([]int, len(y)+1)
+		d[i][0] = i
+	}
+	for j := range d[0] {
+		d[0][j] = j
+	}
+	for i := 1; i <= len(x); i++ {
+		for j := 1; j <= len(y); j++ {
+			cost := 1
+			if x[i-1] == y[j-1] {
+				cost = 0
+			}
+			d[i][j] = min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+cost)
+			if i > 1 && j > 1 && x[i-1] == y[j-2] && x[i-2] == y[j-1] {
+				d[i][j] = min(d[i][j], d[i-2][j-2]+1)
+			}
+		}
+	}
+	return d[len(x)][len(y)]
 }
 
 // GraphFor отдаёт настройки для названного графа: раздел графа поверх общего.
@@ -2349,15 +2572,39 @@ func (c *Config) finalize() error {
 	// «kb.corp.local:8377» без схемы — самая частая опечатка, и узнавать о ней
 	// посреди работы дороже, чем на старте.
 	if u := strings.TrimSpace(c.KB.ServerURL); u != "" {
+		const tokenKeys = "kb.server_token_file, _env или _cmd"
+		pu, perr := url.Parse(u)
+		if perr == nil {
+			if err := checkServiceURL("kb.server_url", u, pu, tokenKeys); err != nil {
+				return err
+			}
+		}
 		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			if strings.Contains(u, "@") {
+				// Без схемы user:pass@ не разбирается как учётные данные —
+				// и всё равно не печатается.
+				return fmt.Errorf("kb.server_url: нужен адрес со схемой, например http://kb.example:8377; ключ задаётся %s", tokenKeys)
+			}
 			return fmt.Errorf("kb.server_url = %q: нужен адрес со схемой, например http://%s", u, u)
+		}
+		if perr != nil || pu.Host == "" {
+			return fmt.Errorf("kb.server_url: адрес не разбирается или без имени машины — нужен вид http://kb.example:8377")
 		}
 		c.KB.ServerURL = strings.TrimRight(u, "/")
 	}
-	if c.KB.ServerTimeout != "" {
-		if _, err := time.ParseDuration(c.KB.ServerTimeout); err != nil {
+	if v := strings.TrimSpace(c.KB.ServerTimeout); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
 			return fmt.Errorf("kb.server_timeout: %w", err)
 		}
+		if d < 0 {
+			return fmt.Errorf("kb.server_timeout = %q: срок не бывает отрицательным (пусто или 0 — 30 с)", v)
+		}
+	}
+	// Срок службы один на все пути (аудит 23.10.2026, находка 10): хаб заводит
+	// сервер kb из этой строки как MCPServer.Timeout, а там пустое и ноль — 60 с.
+	if c.KB.ServerTimeoutDuration() == defaultServerTimeout {
+		c.KB.ServerTimeout = defaultServerTimeout.String()
 	}
 	c.KB.ServerTokenFile = ExpandPath(c.KB.ServerTokenFile)
 
@@ -2365,6 +2612,16 @@ func (c *Config) finalize() error {
 	// при запуске, а не на первом вызове модели.
 	if err := c.MCP.validate(); err != nil {
 		return err
+	}
+	// Имя kb при общей библиотеке занято ею (аудит 23.10.2026, находка 9):
+	// раздел с этим именем и другим адресом прятал службу от --mcp-*
+	// и --kb-remote-check. Тот же вход — законно: служба, описанная сама.
+	if lib := c.KB.LibraryMCPURL(); lib != "" {
+		if s, ok := c.MCP.Servers[LibraryMCPName]; ok && !SameEndpoint(s.URL, lib) {
+			return fmt.Errorf("mcp.servers.%s: имя %q зарезервировано за службой общей библиотеки (kb.server_url) — "+
+				"под ним её видят --mcp-*, --kb-remote-check и /mcp. Назовите этот сервер иначе или укажите в url "+
+				"вход службы: адрес kb.server_url и /mcp на конце", LibraryMCPName, LibraryMCPName)
+		}
 	}
 
 	// Ранжирование связей графа. Отрицательный вес — не «выключено наоборот»,

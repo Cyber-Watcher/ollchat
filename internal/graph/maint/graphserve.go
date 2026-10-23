@@ -84,12 +84,21 @@ func (g *GraphService) Tool(ctx context.Context, collection, name string, args m
 // Цепочка — тот же find.Chain, которым подмешивание считает её у себя
 // (mixer.Build): у клиента, берущего карту у службы, своего графа нет,
 // и без цепочки отсюда вопрос «как связаны X и Y» терял бы её (этап 121, А6).
+//
+// Годы связей (RelationYears) — тот же «свежайшее N г.», что прямой режим
+// печатает по своей коллекции: у клиента службы кусков нет (находка 11 аудита
+// 23.10.2026). ctx — запрос клиента: ушёл клиент — ни граф, ни эмбеддер его
+// больше не ждут, и место в очереди службы освобождается (находка 12).
 func (g *GraphService) Search(ctx context.Context, req kbserve.GraphSearchRequest) (kbserve.GraphSearchResponse, error) {
 	coll, gr, _, release, err := g.open(req.Collection)
 	if err != nil {
 		return kbserve.GraphSearchResponse{}, err
 	}
 	defer release()
+	// Холодный граф открывается десятки секунд: клиент мог уже уйти.
+	if err := ctx.Err(); err != nil {
+		return kbserve.GraphSearchResponse{}, err
+	}
 
 	entities, neighbors := g.Cfg.Mix.Entities, g.Cfg.Mix.Neighbors
 	if req.Entities > 0 {
@@ -98,6 +107,10 @@ func (g *GraphService) Search(ctx context.Context, req kbserve.GraphSearchReques
 	if req.Neighbors > 0 {
 		neighbors = req.Neighbors
 	}
+	qv := QueryVector(ctx, gr, g.Cfg, req.Query)
+	if err := ctx.Err(); err != nil {
+		return kbserve.GraphSearchResponse{}, err
+	}
 	res := gr.Search(req.Query, graph.SearchOpts{
 		TopEntities:  entities,
 		TopNeighbors: neighbors,
@@ -105,10 +118,52 @@ func (g *GraphService) Search(ctx context.Context, req kbserve.GraphSearchReques
 		MinMentions:  2,
 		Neighbors:    NeighborRank(g.Cfg),
 		Rank:         graph.RankWith(coll),
-		QueryVector:  QueryVector(gr, g.Cfg, req.Query),
+		QueryVector:  qv,
 	})
 	chain := find.Chain(gr, res.Entities, res.Relations, find.Opts{})
-	return kbserve.GraphSearchResponse{Result: res, Chain: chain}, nil
+	return kbserve.GraphSearchResponse{Result: res, Chain: chain,
+		RelationYears: RelationYears(coll, res.Relations)}, nil
+}
+
+// RelationYears — год самой свежей книги, подтвердившей каждую связь, в порядке
+// связей; nil — ни у одной связи года нет.
+//
+// Счёт тот же, что у отрисовки карты (graph.Render, newestYear): по книгам
+// связи (Books), а без них — по подтверждениям (Evidences). Служба отдаёт его
+// клиенту, у которого своих кусков нет, и карта через службу печатает тот же
+// «свежайшее N г.», что карта по своим файлам.
+func RelationYears(src graph.Chunks, rels []graph.FoundRelation) []int {
+	if src == nil || len(rels) == 0 {
+		return nil
+	}
+	years := make([]int, len(rels))
+	dated := false
+	for i, r := range rels {
+		keys := r.Books
+		if len(keys) == 0 {
+			keys = r.Evidences
+		}
+		for _, k := range keys {
+			if info, ok := src.ChunkByRef(k.Doc, k.Ord); ok && info.Book.Year > years[i] {
+				years[i] = info.Book.Year
+			}
+		}
+		dated = dated || years[i] > 0
+	}
+	if !dated {
+		return nil
+	}
+	return years
+}
+
+// Graph отдаёт граф коллекции службы и её ранжирование соседей — входу
+// /api/v1/find (команды /search и /kb search клиента с kb.server_url).
+func (g *GraphService) Graph(collection string) (*graph.Graph, graph.NeighborRank, func(), error) {
+	_, gr, _, release, err := g.open(collection)
+	if err != nil {
+		return nil, graph.NeighborRank{}, nil, err
+	}
+	return gr, NeighborRank(g.Cfg), release, nil
 }
 
 // open открывает граф коллекции службы.

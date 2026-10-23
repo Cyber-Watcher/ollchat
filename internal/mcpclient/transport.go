@@ -4,17 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -29,6 +34,19 @@ import (
 // большой, но не больше этого. Поток SSE считается целиком, со всеми
 // переподключениями.
 const maxBody = 32 << 20
+
+// Пределы всего списка инструментов, по всем страницам tools/list вместе.
+// maxBody стоит на один ответ, а страниц до maxPages: без общего предела
+// чужой сервер держал бы в памяти клиента до maxPages×maxBody (3,2 ГБ)
+// и сотни тысяч инструментов (аудит 23.10.2026, находка 5).
+const (
+	// maxListBytes — байт result всех страниц вместе: столько же, сколько
+	// разрешено одному ответу.
+	maxListBytes = maxBody
+	// maxListTools — инструментов в списке, с запасом: модели всё равно
+	// уходит только то, что влезло в предел схем реестра (mcphub).
+	maxListTools = 1000
+)
 
 // Паузы — переменные, а не постоянные, только ради тестов: ждать секунду
 // в каждом из них незачем.
@@ -101,16 +119,30 @@ func (e *tagged) Unwrap() []error {
 }
 
 // errSessionGone — 404 на запрос с номером сеанса. Наружу не выходит:
-// request начинает сеанс заново.
+// request начинает сеанс заново, handshake заменяет своей ошибкой.
 var errSessionGone = errors.New("сеанс MCP истёк")
 
 // httpError — не-2xx без ошибки JSON-RPC в теле.
 type httpError struct {
 	msg    string
 	status int
+	moved  string // новый адрес из Location (3xx) — для MovedTo, не для текста
 }
 
 func (e *httpError) Error() string { return e.msg }
+
+// MovedTo — адрес, на который сервер перенаправлял, если err — такой отказ;
+// пусто — нет. В текст ошибки адрес не входит: текст уходит модели, а адрес
+// нужен человеку, чтобы поправить настройки (решение владельца 23.10.2026:
+// адрес показывают /mcp и ключи --mcp-*, а не ошибки). Без строки запроса
+// и учётных данных.
+func MovedTo(err error) string {
+	var he *httpError
+	if errors.As(err, &he) {
+		return he.moved
+	}
+	return ""
+}
 
 // roundTrip — одно сообщение и, для запроса, ответ на него. Возвращает
 // result ответа и номер сеанса из заголовков (его выдаёт initialize).
@@ -223,13 +255,71 @@ func (c *Client) transportError(parent, tctx context.Context, err error) error {
 		return &tagged{tag: ErrUnavailable, err: context.DeadlineExceeded,
 			msg: fmt.Sprintf("сервер %s не ответил за %s", c.name, c.timeout)}
 	}
-	// url.Error повторяет адрес целиком, а в строке запроса бывает ключ.
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		err = ue.Err
-	}
 	return &tagged{tag: ErrUnavailable, err: err,
-		msg: fmt.Sprintf("сервер %s (%s) недоступен: %v", c.name, c.where, err)}
+		msg: fmt.Sprintf("сервер %s недоступен: %s", c.name, reason(err))}
+}
+
+// reason — причина сбоя соединения или чтения словами, без адреса.
+//
+// Текст ошибки уходит модели выводом инструмента, в ленту и в журнал шагов,
+// а адрес там не нужен (решение владельца 23.10.2026; аудит 23.10, находки
+// 7 и 8, тот же класс, что находка 9 аудита 16.10): сервер называется именем
+// из конфига, адрес показывают /mcp и ключи --mcp-*. Ошибки net/http несут
+// адрес сами: *url.Error — весь адрес со строкой запроса, *net.OpError —
+// машину, порт и IP, который вернул DNS, *net.DNSError — имя машины,
+// *net.AddrError — адрес, x509.HostnameError — имена из сертификата. Знакомые причины — словами;
+// прочее — текстом самой внутренней ошибки, с которой сняты эти обёртки.
+//
+// Причина цепочки не теряется: вызывающий кладёт err в tagged, и errors.Is
+// (ECONNREFUSED, DeadlineExceeded) по-прежнему работает.
+func reason(err error) string {
+	var (
+		dns  *net.DNSError
+		addr *net.AddrError
+		name x509.HostnameError
+		cert *tls.CertificateVerificationError
+		auth x509.UnknownAuthorityError
+		bad  x509.CertificateInvalidError
+		ne   net.Error
+	)
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "отказ в соединении"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "соединение сброшено"
+	case errors.Is(err, syscall.EHOSTUNREACH):
+		return "машина недоступна"
+	case errors.Is(err, syscall.ENETUNREACH):
+		return "сеть недоступна"
+	case errors.As(err, &dns):
+		if dns.IsNotFound {
+			return "имя машины не найдено в DNS"
+		}
+		return "DNS не ответил"
+	case errors.As(err, &addr):
+		return "адрес машины не разобрался"
+	case errors.As(err, &name), errors.As(err, &cert), errors.As(err, &auth), errors.As(err, &bad):
+		return "сертификат сервера не принят"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded),
+		errors.As(err, &ne) && ne.Timeout():
+		return "срок истёк"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "соединение оборвалось"
+	}
+	for {
+		var (
+			ue *url.Error
+			oe *net.OpError
+		)
+		switch {
+		case errors.As(err, &ue) && ue.Err != nil:
+			err = ue.Err
+		case errors.As(err, &oe) && oe.Err != nil:
+			err = oe.Err
+		default:
+			return serverText(err.Error(), 200)
+		}
+	}
 }
 
 // readReply разбирает ответ HTTP: статус, тип тела, само тело.
@@ -243,15 +333,15 @@ func (c *Client) readReply(ctx context.Context, resp *http.Response, id int64, n
 		}
 		return nil, &tagged{tag: ErrUnauthorized, msg: fmt.Sprintf("сервер %s: нужен ключ доступа%s", c.name, hint)}
 	case status == http.StatusNotFound && st.session != "":
-		return nil, errSessionGone
+		return nil, c.notFound(resp, id, notify)
 	case status >= 300 && status < 400:
-		where := ""
+		he := &httpError{status: status}
 		if loc, err := url.Parse(resp.Header.Get("Location")); err == nil && loc.Host != "" {
-			where = ": новый адрес " + loc.Scheme + "://" + loc.Host + loc.EscapedPath()
+			he.moved = loc.Scheme + "://" + loc.Host + loc.EscapedPath()
 		}
-		return nil, &httpError{status: status, msg: fmt.Sprintf(
-			"сервер %s ответил %s — перенаправлений клиент не выполняет, поправьте адрес в настройках%s",
-			c.name, resp.Status, where)}
+		he.msg = fmt.Sprintf("сервер %s ответил %s — перенаправлений клиент не выполняет, поправьте адрес в настройках",
+			c.name, c.status(resp))
+		return nil, he
 	case status < 200 || status >= 300:
 		return nil, c.statusError(resp)
 	}
@@ -273,7 +363,7 @@ func (c *Client) readReply(ctx context.Context, resp *http.Response, id int64, n
 		return c.pickJSON(ctx, body, id, st)
 	default:
 		return nil, fmt.Errorf("сервер %s прислал ответ типа %q, а ждали application/json или text/event-stream",
-			c.name, mt)
+			c.name, serverText(mt, 100))
 	}
 }
 
@@ -285,15 +375,46 @@ func (c *Client) statusError(resp *http.Response) error {
 	if json.Unmarshal(bytes.TrimSpace(body), &m) == nil && m.Error != nil {
 		m.Error.Server = c.name
 		m.Error.status = resp.StatusCode
-		m.Error.Message = c.redact(m.Error.Message)
+		m.Error.Message = serverText(c.redact(m.Error.Message), 500)
 		return m.Error
 	}
-	text := strings.Join(strings.Fields(c.redact(string(body))), " ")
-	msg := fmt.Sprintf("сервер %s ответил %s", c.name, resp.Status)
+	text := serverText(c.redact(string(body)), 200)
+	msg := fmt.Sprintf("сервер %s ответил %s", c.name, c.status(resp))
 	if text != "" {
-		msg += ": " + clip(text, 200)
+		msg += ": " + text
 	}
 	return &httpError{status: resp.StatusCode, msg: msg}
+}
+
+// notFound — 404 на запрос с номером сеанса.
+//
+// Спецификация велит серверу отвечать 404 на номер завершённого сеанса,
+// и тогда клиент здоровается заново и повторяет запрос: сервер его не
+// исполнял. Но 404 бывает и ответом на сам запрос — ошибкой JSON-RPC с его
+// id («нет такого инструмента»): сервер запрос прочитал, сеанс у него есть,
+// и повтор отправил бы tools/call второй раз (аудит 23.10.2026). Такая
+// ошибка отдаётся как есть. Пустое тело (go-sdk v1.6.0 отвечает текстом
+// «session not found»), не JSON-RPC, отказ с id null или чужим — сервер
+// запроса не прочёл: сеанс истёк. Цена выбора: сервер, который на потерянный
+// сеанс отвечает ошибкой с id нашего запроса, нового рукопожатия не получит,
+// и человек увидит его ошибку, а не молчаливый повтор.
+func (c *Client) notFound(resp *http.Response, id int64, notify bool) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var m rpcMessage
+	if notify || json.Unmarshal(bytes.TrimSpace(body), &m) != nil || m.Error == nil ||
+		strings.TrimSpace(string(m.ID)) != strconv.FormatInt(id, 10) {
+		return errSessionGone
+	}
+	m.Error.Server = c.name
+	m.Error.status = resp.StatusCode
+	m.Error.Message = serverText(c.redact(m.Error.Message), 500)
+	return m.Error
+}
+
+// status — строка статуса ответа: код и причина, которую назвал сервер,
+// без управляющих знаков и не длиннее сотни знаков.
+func (c *Client) status(resp *http.Response) string {
+	return serverText(c.redact(resp.Status), 100)
 }
 
 // redact убирает ключ из текста сервера. Чужой сервер вправе повторить
@@ -303,6 +424,24 @@ func (c *Client) redact(s string) string {
 		return s
 	}
 	return strings.ReplaceAll(s, c.token, "***")
+}
+
+// serverText — чужая строка для текста ошибки: одной строкой, без
+// управляющих знаков (ESC и OSC перекрасили бы ленту или заголовок окна)
+// и невидимых знаков формата, не длиннее n знаков. Ошибка уходит модели,
+// в ленту и в журнал шагов, а сервер вправе прислать что угодно и сколько
+// угодно (аудит 23.10.2026: protocolVersion и data.supported шли как есть).
+func serverText(s string, n int) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.Is(unicode.Cc, r):
+			return ' '
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, s)
+	return clip(strings.Join(strings.Fields(s), " "), n)
 }
 
 // bodyError — тело ответа не дочиталось.
@@ -318,7 +457,7 @@ func (c *Client) bodyError(err error) error {
 		return fmt.Errorf("сервер %s: ответ больше %d МиБ", c.name, maxBody>>20)
 	}
 	return &tagged{tag: ErrUnavailable, err: err,
-		msg: fmt.Sprintf("сервер %s: ответ не дочитался: %v", c.name, err)}
+		msg: fmt.Sprintf("сервер %s: ответ не дочитался: %s", c.name, reason(err))}
 }
 
 // pickJSON — ответ с нашим id из тела JSON (одно сообщение или массив).
@@ -362,7 +501,7 @@ func (c *Client) take(ctx context.Context, raw []byte, id int64, st state) (json
 			// прочитать id, но отказ — наш, другого запроса в этом обмене нет.
 			if m.Error != nil {
 				m.Error.Server = c.name
-				m.Error.Message = c.redact(m.Error.Message)
+				m.Error.Message = serverText(c.redact(m.Error.Message), 500)
 				return nil, true, m.Error
 			}
 			if len(m.Result) == 0 {
@@ -459,17 +598,26 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, id int64, s
 }
 
 // resume — GET с Last-Event-ID: продолжение потока, закрытого сервером.
+//
+// Не вышло соединиться — «ответа нет», метка ErrUnavailable, как у обрыва
+// тела; причина словами, без адреса (reason): *url.Error повторял бы адрес
+// целиком (аудит 23.10.2026, находка 7). Срок и отмену сюда не приносят:
+// их roundTrip отдаёт transportError, пока контекст обмена закрыт.
 func (c *Client) resume(ctx context.Context, st state, lastID string) (io.ReadCloser, error) {
+	gone := func(err error) error {
+		return &tagged{tag: ErrUnavailable, err: err, msg: fmt.Sprintf(
+			"сервер %s закрыл поток до ответа, и переподключиться не вышло: %s", c.name, reason(err))}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
-		return nil, err
+		return nil, gone(err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Last-Event-ID", lastID)
 	c.setHeaders(req, st)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("сервер %s закрыл поток до ответа, и переподключиться не вышло: %w", c.name, err)
+		return nil, gone(err)
 	}
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if resp.StatusCode == http.StatusOK && mt == "text/event-stream" {
@@ -478,7 +626,7 @@ func (c *Client) resume(ctx context.Context, st state, lastID string) (io.ReadCl
 	defer resp.Body.Close()
 	// 404 здесь — не «сеанс истёк, повторите запрос»: запрос уже ушёл и,
 	// может быть, исполнен. Повторять его нельзя, только сказать.
-	return nil, fmt.Errorf("сервер %s закрыл поток до ответа, а продолжить его не дал: %s", c.name, resp.Status)
+	return nil, fmt.Errorf("сервер %s закрыл поток до ответа, а продолжить его не дал: %s", c.name, c.status(resp))
 }
 
 // deleteSession — DELETE с номером сеанса (Close).
@@ -487,7 +635,7 @@ func (c *Client) deleteSession(ctx context.Context, st state) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(tctx, http.MethodDelete, c.url, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("сервер %s: запрос DELETE не собрался: %s", c.name, reason(err))
 	}
 	c.setHeaders(req, st)
 	resp, err := c.http.Do(req)

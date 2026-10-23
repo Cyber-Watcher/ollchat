@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -124,6 +125,41 @@ var ErrUnreachable = errors.New("служба библиотеки не отве
 // на свои файлы.
 const FallbackNote = "служба недоступна — искал по своим файлам"
 
+// ErrBusy — служба ответила, но места в её очереди тяжёлых запросов за свой
+// предел ожидания не нашлось (ответ 503 с признаком «занята»).
+//
+// **Это не ErrUnreachable** (решение владельца 23.10.2026: «не считать очередь
+// недоступностью, но сообщать в выводе об очереди»). Служба жива и отвечает,
+// просто занята: свои файлы открыли бы гигабайт графа на каждый вопрос, пока
+// служба разбирает очередь, и спрятали бы занятость за ответом. Клиент говорит
+// о занятости строкой в выводе и на свои файлы не переходит.
+var ErrBusy = errors.New("служба библиотеки занята")
+
+// QueueNote — строка о том, сколько вызов ждал места в очереди службы; пусто —
+// не ждал. Одна на все входы: подмес, инструменты модели, команды человека.
+func QueueNote(wait time.Duration) string {
+	if ms := wait.Milliseconds(); ms > 0 {
+		return fmt.Sprintf("служба занята: ждал в очереди %d мс", ms)
+	}
+	return ""
+}
+
+// queuedSource — источник, который знает, сколько его вызовы ждали места
+// в очереди службы (kbremote).
+type queuedSource interface {
+	Queued() time.Duration
+}
+
+// Queued — сколько вызовы источника ждали места в очереди службы; 0 — не ждали
+// или источник не сетевой. Источник через Fallback заводится на одно действие,
+// поэтому это время одного подмеса или одного вызова инструмента.
+func Queued(s Source) time.Duration {
+	if q, ok := s.(queuedSource); ok {
+		return q.Queued()
+	}
+	return 0
+}
+
 // fallbackTimeout — срок поиска у себя, когда срок вызывающего съела служба:
 // ожидание ответа и есть одна из причин перехода, и с истёкшим контекстом
 // поиск по своим файлам отказал бы, не начавшись. Тридцать секунд — то же,
@@ -151,13 +187,24 @@ type Fallback struct {
 	// выбирает умолчание у себя, свои файлы — по настройке, а без неё
 	// единственную коллекцию.
 	Default string
+
+	// Mode — положение /kb source (этап 121, Д3); нуль — SourceAuto, как было
+	// до переключателя. SourceService — служба без перехода на свои файлы,
+	// SourceLocal — сразу свои файлы, служба не спрашивается вовсе.
+	Mode SourceMode
 }
 
 // Names — коллекции службы, а если она не отвечает — свои.
 func (f Fallback) Names() ([]string, error) {
+	if f.Mode == SourceLocal {
+		if f.Local == nil {
+			return nil, errNoLocal
+		}
+		return f.Local.Names()
+	}
 	names, err := f.Remote.Names()
-	if err == nil || !errors.Is(err, ErrUnreachable) || f.Local == nil {
-		return names, err
+	if err == nil || !errors.Is(err, ErrUnreachable) || f.Local == nil || f.Mode == SourceService {
+		return names, f.serviceOnly(err)
 	}
 	local, lerr := f.Local.Names()
 	if lerr != nil {
@@ -167,7 +214,19 @@ func (f Fallback) Names() ([]string, error) {
 }
 
 // Source открывает коллекцию у службы, а если она не отвечает — у себя.
+// В положении local — сразу у себя: источник отдаётся как есть, и Fell о нём
+// молчит — это выбор человека, а не переход с недоступной службы.
 func (f Fallback) Source(name string) (Source, error) {
+	if f.Mode == SourceLocal {
+		if f.Local == nil {
+			return nil, errNoLocal
+		}
+		n, err := f.localName(name)
+		if err != nil {
+			return nil, err
+		}
+		return f.Local.Source(n)
+	}
 	rs, err := f.Remote.Source(name)
 	if err == nil {
 		return &fallbackSource{f: f, name: name, cur: rs}, nil
@@ -180,10 +239,11 @@ func (f Fallback) Source(name string) (Source, error) {
 }
 
 // local открывает свою коллекцию вместо службы, ответившей ошибкой cause.
-// Отказ по смыслу и отсутствие своих файлов возвращают cause как есть.
+// Отказ по смыслу и отсутствие своих файлов возвращают cause как есть;
+// положение service — тоже, с пометкой, почему своих файлов не брали.
 func (f Fallback) local(name string, cause error) (Source, error) {
-	if !errors.Is(cause, ErrUnreachable) || f.Local == nil {
-		return nil, cause
+	if !errors.Is(cause, ErrUnreachable) || f.Local == nil || f.Mode == SourceService {
+		return nil, f.serviceOnly(cause)
 	}
 	n, err := f.localName(name)
 	if err == nil {
@@ -213,7 +273,18 @@ func (f Fallback) localName(name string) (string, error) {
 	if len(names) == 1 {
 		return names[0], nil
 	}
-	return "", fmt.Errorf("коллекция не выбрана (kb.default), своих коллекций %d", len(names))
+	return "", fmt.Errorf("коллекция не выбрана (kb.default), своих коллекций %d: %s",
+		len(names), strings.Join(names, ", "))
+}
+
+// serviceOnly дописывает к недоступности службы, что в положении service
+// перехода на свои файлы нет: иначе человек искал бы, почему не сработал
+// запасной путь. Прочие ошибки и прочие положения — как есть.
+func (f Fallback) serviceOnly(err error) error {
+	if f.Mode != SourceService || !errors.Is(err, ErrUnreachable) {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, ServiceOnlyNote)
 }
 
 // Fell сообщает, что источник, открытый через Fallback, искал по своим файлам.
@@ -293,6 +364,13 @@ func (s *fallbackSource) ChunkByRef(doc, ord uint32) (ChunkInfo, bool) {
 	return ChunkInfo{}, false
 }
 
+// Queued — ожидание в очереди службы у текущего источника; свои файлы
+// очереди не знают.
+func (s *fallbackSource) Queued() time.Duration {
+	cur, _ := s.now()
+	return Queued(cur)
+}
+
 func (s *fallbackSource) SearchWith(ctx context.Context, query string, opt SearchOpts, emb Embedder) ([]Result, error) {
 	cur, fell := s.now()
 	res, err := cur.SearchWith(ctx, query, opt, emb)
@@ -330,3 +408,77 @@ func afterDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	}
 	return context.WithTimeout(context.WithoutCancel(ctx), fallbackTimeout)
 }
+
+// ── Положение /kb source: кто исполняет поиск (этап 121, Д3) ────────────────
+
+// SourceMode — откуда библиотека берёт книги и граф при заданном
+// kb.server_url. Имена инструментов модели во всех положениях одни и те же,
+// меняется только исполнитель. Нулевое значение — SourceAuto: так было до
+// переключателя.
+type SourceMode int32
+
+const (
+	// SourceAuto — сперва служба; не ответила (ErrUnreachable) — свои файлы
+	// с пометкой FallbackNote (А4).
+	SourceAuto SourceMode = iota
+	// SourceService — только служба: не ответила — честная ошибка, свои файлы
+	// и свой граф не открываются.
+	SourceService
+	// SourceLocal — только свои файлы и свой граф (через кэш графов), даже
+	// когда служба задана и отвечает.
+	SourceLocal
+)
+
+// sourceModeNames — написания положений: в команде и в строке состояния.
+var sourceModeNames = [...]string{SourceAuto: "auto", SourceService: "service", SourceLocal: "local"}
+
+func (s SourceMode) String() string {
+	if s >= 0 && int(s) < len(sourceModeNames) {
+		return sourceModeNames[s]
+	}
+	return fmt.Sprintf("SourceMode(%d)", int32(s))
+}
+
+// ParseSourceMode разбирает положение по написанию: auto, service, local.
+func ParseSourceMode(s string) (SourceMode, error) {
+	want := strings.ToLower(strings.TrimSpace(s))
+	for m, name := range sourceModeNames {
+		if want == name {
+			return SourceMode(m), nil
+		}
+	}
+	return SourceAuto, fmt.Errorf("неизвестное положение %q: auto, service или local", s)
+}
+
+// ServiceOnlyNote — почему при недоступной службе поиск не ушёл на свои файлы.
+const ServiceOnlyNote = "положение service (/kb source): свои файлы не берутся"
+
+// errNoLocal — положение local без своих файлов.
+var errNoLocal = errors.New("своих файлов библиотеки нет (каталог kb.dir не открылся): положение local искать негде")
+
+// SourceSwitch — живое положение, одно на программу.
+//
+// **Почему один экземпляр, а не поле в каждой библиотеке.** Его читают
+// инструменты модели в горутине агента, подмешивание в горутине команды
+// и команды интерфейса, а меняет /kb source в цикле событий. По образцу
+// tools.Live: будь у каждого своя копия, человек переключил бы интерфейс,
+// а модель искала бы по-старому — расхождение, которого не заметишь.
+type SourceSwitch struct{ mode atomic.Int32 }
+
+// NewSourceSwitch заводит переключатель в положении m.
+func NewSourceSwitch(m SourceMode) *SourceSwitch {
+	s := &SourceSwitch{}
+	s.mode.Store(int32(m))
+	return s
+}
+
+// Mode — нынешнее положение; nil — SourceAuto, как без переключателя.
+func (s *SourceSwitch) Mode() SourceMode {
+	if s == nil {
+		return SourceAuto
+	}
+	return SourceMode(s.mode.Load())
+}
+
+// Set ставит положение.
+func (s *SourceSwitch) Set(m SourceMode) { s.mode.Store(int32(m)) }

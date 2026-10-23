@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"strings"
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/find"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
+	"github.com/Cyber-Watcher/ollchat/internal/kbremote"
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 )
 
@@ -89,6 +90,13 @@ type Settings struct {
 
 	// QueryTimeout — сколько ждать вектор вопроса; 0 — умолчание пакета kb.
 	QueryTimeout time.Duration
+
+	// ServiceTimeout — сколько ждать карту и книги от службы общей библиотеки
+	// (kb.server_timeout, тот же срок, что у её клиента); 0 — defaultServiceTimeout.
+	// Прежде срок карты был постоянной в 30 с: при kb.server_timeout больше
+	// него занятая служба выглядела недоступной, и клиент открывал свой граф
+	// (аудит 23.10.2026, находка 12).
+	ServiceTimeout time.Duration
 
 	// QuotesWithoutTools — сколько выдержек добавлять модели без инструментов.
 	QuotesWithoutTools int
@@ -189,20 +197,38 @@ type Deps struct {
 	// nil — своего графа нет, и карты при недоступной службе не будет.
 	LocalGraph func() (*graph.Graph, func(), error)
 
-	probe *searchProbe // первый поиск по книгам за Build — для записи в журнал
+	// ServiceOnly — положение /kb source service (этап 121, Д3): LocalGraph
+	// пуст не потому, что своего графа нет, а потому, что его не берут, —
+	// заметка под вопросом говорит именно это.
+	ServiceOnly bool
+
+	probe *searchProbe  // первый поиск по книгам за Build — для записи в журнал
+	svc   *serviceState // что узнали о службе за Build — для заметки Remote
 }
 
 // MapSource — служба, отдающая карту понятий по вопросу: kbremote.Client.
 //
 // Ноль в entities и neighbors — «как настроено у службы». Ошибка с меткой
 // kb.ErrUnreachable означает «служба не ответила» — по ней Build переходит
-// на свой граф; прочие ошибки — отказ по смыслу, и перехода по ним нет.
+// на свой граф; kb.ErrBusy — служба занята (очередь полна): своего графа
+// не открывают, говорят об очереди в заметке; прочие ошибки — отказ
+// по смыслу, и перехода по ним нет. Годы связей и время в очереди приходят
+// вместе с картой (kbremote.GraphMap).
 type MapSource interface {
-	GraphSearch(ctx context.Context, collection, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error)
+	GraphMap(ctx context.Context, collection, query string, entities, neighbors int) (kbremote.GraphMap, error)
 }
 
-// mapTimeout — сколько ждать карту от службы; столько же Build ждёт книги.
-const mapTimeout = 30 * time.Second
+// defaultServiceTimeout — сколько ждать карту и книги, когда срок не задан
+// (Settings.ServiceTimeout); то же, что умолчание kb.server_timeout.
+const defaultServiceTimeout = 30 * time.Second
+
+// serviceTimeout — срок карты от службы и поиска по книгам за один подмес.
+func serviceTimeout(s Settings) time.Duration {
+	if s.ServiceTimeout > 0 {
+		return s.ServiceTimeout
+	}
+	return defaultServiceTimeout
+}
 
 // searchProbe — сигналы первого поиска по книгам за один Build. Поисков за
 // вопрос бывает два (проба привратника и сами выдержки) по тому же вопросу и
@@ -263,12 +289,18 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 	// Заметка о службе ставится последней — после всех возвратов, но до записи
 	// в журнал (отложенные вызовы идут в обратном порядке): книги могли уйти
 	// на свои файлы в любом месте ниже.
+	//
+	// К ней — занятость службы (решение владельца 23.10.2026): места в очереди
+	// не нашлось (kb.ErrBusy) — что именно не пришло; дождались — сколько ждали,
+	// картой и книгами вместе.
 	var remote string
+	svc := &serviceState{}
+	d.svc = svc
 	defer func() {
 		if remote == "" && kb.Fell(d.Coll) {
 			remote = kb.FallbackNote
 		}
-		mixed.Remote = remote
+		mixed.Remote = joinNotes(remote, svc.busy, kb.QueueNote(svc.queued+kb.Queued(d.Coll)))
 	}()
 	coll := d.Coll
 	if len(s.Pin) > 0 {
@@ -302,10 +334,14 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 
 	var res graph.SearchResult
 	var chain []graph.PathStep
+	var years []int // годы связей от службы (kbremote.GraphMap.Years)
 	served := false // карта и цепочка пришли от службы готовыми
 	if fromService {
 		var release func()
-		res, chain, served, g, release, remote = serviceMap(question, d, s)
+		var sm kbremote.GraphMap
+		sm, served, g, release, remote = serviceMap(question, d, s)
+		res, chain, years = sm.Result, sm.Chain, sm.Years
+		svc.queued += sm.Queued
 		if release != nil {
 			defer release()
 		}
@@ -448,8 +484,16 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 	// отрисовке только ради года (YearsOnly): цитат в карте по-прежнему нет.
 	// Коллекция приходит сюда интерфейсом поиска; год берётся, только если она
 	// умеет отдавать кусок по ссылке (настоящая коллекция умеет, подставная
-	// в тестах — не обязана).
-	if chunks, ok := coll.(graph.Chunks); ok && s.RelationYears {
+	// в тестах — не обязана). Карта от службы приходит с годами связей
+	// (RelationYears службы): кусков у клиента нет, и год берётся оттуда,
+	// а печатает его та же отрисовка (находка 11 аудита 23.10.2026).
+	var chunks graph.Chunks
+	if served {
+		chunks = relationYears(res.Relations, years)
+	} else if c, ok := coll.(graph.Chunks); ok {
+		chunks = c
+	}
+	if chunks != nil && s.RelationYears {
 		renderOpts.YearsOnly = true
 		b.WriteString(graph.Render(chunks, res, renderOpts))
 	} else {
@@ -521,23 +565,31 @@ func queryTimeout(s Settings) time.Duration {
 //
 // served — карта пришла от службы; local, release — свой граф и как его
 // отпустить, когда карту считает он.
-func serviceMap(question string, d Deps, s Settings) (res graph.SearchResult, chain []graph.PathStep,
+//
+// Срок — serviceTimeout (kb.server_timeout клиента). Служба занята настолько,
+// что места в очереди не нашлось (kb.ErrBusy), — это не недоступность: свой
+// граф не открывается, заметка говорит об очереди (решение владельца
+// 23.10.2026).
+func serviceMap(question string, d Deps, s Settings) (m kbremote.GraphMap,
 	served bool, local *graph.Graph, release func(), note string) {
 
 	err := kb.ErrUnreachable
 	if !kb.Fell(d.Coll) {
-		ctx, cancel := context.WithTimeout(context.Background(), mapTimeout)
-		res, chain, err = d.Map.GraphSearch(ctx, d.Coll.Name(), question, s.Entities, s.Neighbors)
+		ctx, cancel := context.WithTimeout(context.Background(), serviceTimeout(s))
+		m, err = d.Map.GraphMap(ctx, d.Coll.Name(), question, s.Entities, s.Neighbors)
 		cancel()
 		if err == nil {
-			return res, chain, true, nil, nil, ""
+			return m, true, nil, nil, ""
 		}
 	}
 	if !errors.Is(err, kb.ErrUnreachable) {
-		return graph.SearchResult{}, nil, false, nil, nil, "карта понятий: " + err.Error()
+		return kbremote.GraphMap{}, false, nil, nil, "карта понятий: " + err.Error()
+	}
+	if d.ServiceOnly {
+		return kbremote.GraphMap{}, false, nil, nil, err.Error() + " — " + kb.ServiceOnlyNote + ", карта не подмешана"
 	}
 	if d.LocalGraph == nil {
-		return graph.SearchResult{}, nil, false, nil, nil, err.Error() + " — своего графа нет, карта не подмешана"
+		return kbremote.GraphMap{}, false, nil, nil, err.Error() + " — своего графа нет, карта не подмешана"
 	}
 	g, rel, lerr := d.LocalGraph()
 	if lerr != nil || g == nil {
@@ -548,9 +600,70 @@ func serviceMap(question string, d Deps, s Settings) (res graph.SearchResult, ch
 		if lerr != nil {
 			why = "свой граф не открылся: " + lerr.Error()
 		}
-		return graph.SearchResult{}, nil, false, nil, nil, kb.FallbackNote + "; " + why + ", карта не подмешана"
+		return kbremote.GraphMap{}, false, nil, nil, kb.FallbackNote + "; " + why + ", карта не подмешана"
 	}
-	return graph.SearchResult{}, nil, false, g, rel, kb.FallbackNote
+	return kbremote.GraphMap{}, false, g, rel, kb.FallbackNote
+}
+
+// serviceState — что подмес узнал о службе за один Build: книги не пришли
+// из-за очереди (busy) и сколько ждала очереди карта (queued; книги считает
+// сам источник, kb.Queued).
+type serviceState struct {
+	busy   string
+	queued time.Duration
+}
+
+// joinNotes склеивает непустые заметки о службе в одну строку.
+func joinNotes(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, "; ")
+}
+
+// relationYears — годы связей от службы в виде источника кусков для
+// graph.Render: у клиента службы кусков нет, а год у связи отрисовка берёт
+// у куска (самый свежий по книгам связи).
+//
+// Каждому куску достаётся наименьший год среди связей, которые он
+// подтверждает. Тогда у каждой связи самый свежий её кусок получает ровно
+// её год, а прочие — не больше: свежайший год книги у связи i не выше года
+// любой другой связи с тем же куском. Отрисовка берёт наибольший — и печатает
+// тот же «свежайшее N г.», что карта по своим файлам. nil — годов нет
+// (служба прежней сборки).
+func relationYears(rels []graph.FoundRelation, years []int) graph.Chunks {
+	if len(years) == 0 || len(years) != len(rels) {
+		return nil
+	}
+	byRef := yearsByRef{}
+	for i, r := range rels {
+		keys := r.Books
+		if len(keys) == 0 {
+			keys = r.Evidences
+		}
+		for _, k := range keys {
+			if y, seen := byRef[k]; !seen || years[i] < y {
+				byRef[k] = years[i]
+			}
+		}
+	}
+	return byRef
+}
+
+// yearsByRef — год книги по ссылке на кусок; только год, текста нет.
+type yearsByRef map[graph.ChunkKey]int
+
+func (m yearsByRef) ChunkByRef(doc, ord uint32) (kb.ChunkInfo, bool) {
+	y, ok := m[graph.ChunkKey{Doc: doc, Ord: ord}]
+	if !ok {
+		return kb.ChunkInfo{}, false
+	}
+	ci := kb.ChunkInfo{Doc: doc, Ord: ord}
+	ci.Book.Year = y
+	return ci, true
 }
 
 // CachedGraph — свой граф для запасного пути (Deps.LocalGraph): коллекция
@@ -624,12 +737,16 @@ func books(coll kb.Source, search, question string, topK int, d Deps, s Settings
 		ExpandLimit:    s.ExpandLimit,
 		DedupeCosine:   s.DedupeCosine,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), serviceTimeout(s))
 	defer cancel()
 	hits, _, err := find.Books(ctx, find.Deps{Source: coll, Embedder: d.Embedder, Reranker: d.Reranker,
 		Translator: d.Translator}, search, question, o)
 	if d.probe != nil && !d.probe.done && err == nil {
 		d.probe.done, d.probe.sig = true, find.SignalsOf(hits)
+	}
+	if err != nil && d.svc != nil && errors.Is(err, kb.ErrBusy) {
+		// Служба занята — книги не пришли, и человек должен знать почему.
+		d.svc.busy = "выдержки: " + err.Error()
 	}
 	if err != nil || len(hits) == 0 {
 		return Result{}, find.Signals{}

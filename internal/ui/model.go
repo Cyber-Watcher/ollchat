@@ -58,6 +58,14 @@ type kbState struct {
 	// понятий считает служба (этап 121, А1–А2), см. SetLibrary.
 	lib kb.Library
 
+	// mode — положение /kb source (этап 121, Д3): тот же экземпляр, что
+	// у инструментов модели (SetLibraryMode); без библиотеки не читается —
+	// положение тогда всегда local (kbMode).
+	mode *kb.SourceSwitch
+	// useGen — поколение /kb use через службу: ответ на прежний выбор,
+	// пришедший после нового, выбрасывается.
+	useGen int
+
 	// tr — перевод вопроса для словесной ветки (kb.translate); trKey —
 	// настройки, под которые он собран: сменились — собирается заново.
 	tr    *qtranslate.Translator
@@ -478,6 +486,9 @@ func (m *Model) SetLive(l *tools.Live) {
 // nil — работаем со своими файлами, как прежде.
 func (m *Model) SetLibrary(l kb.Library) {
 	m.kb.lib = l
+	if l != nil && m.kb.mode == nil {
+		m.kb.mode = kb.NewSourceSwitch(kb.SourceAuto)
+	}
 	if l == nil || m.kb.base != nil {
 		return
 	}
@@ -487,6 +498,29 @@ func (m *Model) SetLibrary(l kb.Library) {
 	m.kb.autoOn = m.cfg.Mix.Books
 	m.gr.autoOn = m.cfg.Mix.Graph
 }
+
+// SetLibraryMode отдаёт интерфейсу переключатель /kb source — тот же
+// экземпляр, что у реестра инструментов (tools.Options.LibraryMode), как
+// SetLive: иначе человек переключил бы интерфейс и подмес, а модель искала
+// бы по-старому. nil — переключатель заводит SetLibrary сам.
+func (m *Model) SetLibraryMode(s *kb.SourceSwitch) {
+	if s != nil {
+		m.kb.mode = s
+	}
+}
+
+// kbMode — действующее положение /kb source. Без общей библиотеки — всегда
+// local: службы нет, и искать, кроме своих файлов, негде.
+func (m *Model) kbMode() kb.SourceMode {
+	if m.kb.lib == nil {
+		return kb.SourceLocal
+	}
+	return m.kb.mode.Mode()
+}
+
+// viaService — команды, подмес и выбор коллекции идут в службу: библиотека
+// задана и положение не local.
+func (m *Model) viaService() bool { return m.kbMode() != kb.SourceLocal }
 
 // SetMCP подключает сторонние серверы MCP — тот же экземпляр, что положил их
 // инструменты в реестр модели (этап 121, В7): /mcp показывает его состояние,

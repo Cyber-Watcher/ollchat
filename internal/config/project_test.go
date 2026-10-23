@@ -89,6 +89,58 @@ name = "чужой"
 	}
 }
 
+// Серверы MCP проекта складываются с общими по имени (аудит 23.10.2026):
+// раньше один [mcp.servers.<имя>] в проекте молча убирал все общие серверы.
+// Раздел проекта с именем общего сервера меняет только заданные в нём ключи,
+// а источник ключа (token_file|token_env|token_cmd) — целиком.
+func TestApplyProjectMergesMCPServers(t *testing.T) {
+	cfg, err := loadText(t, `
+[mcp.servers.wiki]
+url        = "http://mcp.example:8377/mcp"
+token_file = "/run/wiki.token"
+tools      = ["echo", "search"]
+allow      = ["echo"]
+
+[mcp.servers.docs]
+url = "http://mcp.example:8378/mcp"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj := []byte(`
+[mcp.servers.other]
+url   = "http://mcp.example:9000/mcp"
+allow = ["run"]
+
+[mcp.servers.wiki]
+allow     = ["search"]
+token_env = "WIKI_TOKEN"
+
+[mcp.servers.docs]
+enabled = false
+`)
+	if err := cfg.ApplyProject("/p/.ollchat/config.toml", proj); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.MCP.Names(), ","); got != "docs,other,wiki" {
+		t.Fatalf("серверы после проекта: %s", got)
+	}
+	w := cfg.MCP.Servers["wiki"]
+	if w.URL != "http://mcp.example:8377/mcp" || strings.Join(w.Tools, ",") != "echo,search" ||
+		strings.Join(w.Allow, ",") != "search" {
+		t.Errorf("wiki: общие ключи не сохранены или ключ проекта не применён: %+v", w)
+	}
+	if w.TokenFile != "" || w.TokenEnv != "WIKI_TOKEN" {
+		t.Errorf("wiki: источник ключа смешан из общего и проектного: file=%q env=%q", w.TokenFile, w.TokenEnv)
+	}
+	if d := cfg.MCP.Servers["docs"]; d.On() || d.URL != "http://mcp.example:8378/mcp" {
+		t.Errorf("docs: %+v", d)
+	}
+	if o := cfg.MCP.Servers["other"]; o.URL != "http://mcp.example:9000/mcp" || len(o.Allow) != 1 {
+		t.Errorf("other: %+v", o)
+	}
+}
+
 // Доверие помнится по пути и отпечатку: правка файла спрашивает снова.
 func TestProjectTrust(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "state", "trusted.json")

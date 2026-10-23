@@ -522,7 +522,13 @@ func NeighborRank(cfg *config.Config) graph.NeighborRank {
 	}
 }
 
-func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
+// QueryVector — вектор вопроса для смыслового входа в граф службы.
+//
+// ctx — запрос клиента: ушёл клиент — эмбеддер не ждут, и место в очереди
+// тяжёлых запросов службы освобождается сразу. Прежде здесь стоял
+// context.Background(), и брошенный запрос держал место до тридцати секунд
+// (аудит 23.10.2026, находка 12).
+func QueryVector(ctx context.Context, g *graph.Graph, cfg *config.Config, query string) []int8 {
 	// Заголовки — того же сервера, что адрес: без них служба (GraphService.Search)
 	// за прокси с авторизацией молча считала карту без смыслового входа, хотя
 	// её инструменты получали заголовки (ollmcp, рецензия этапа 121).
@@ -531,7 +537,7 @@ func QueryVector(g *graph.Graph, cfg *config.Config, query string) []int8 {
 		return nil
 	}
 	// Тем же ядром, что /search и инструменты (этап 91, R2.5).
-	qv, _, _ := find.QueryVector(context.Background(), find.Deps{Graph: g, Embedder: emb}, query,
+	qv, _, _ := find.QueryVector(ctx, find.Deps{Graph: g, Embedder: emb}, query,
 		find.Opts{Semantic: true, QueryTimeout: 30 * time.Second})
 	return qv
 }

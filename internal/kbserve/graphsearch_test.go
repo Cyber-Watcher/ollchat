@@ -29,6 +29,10 @@ func (g *recordingGraph) Search(_ context.Context, req GraphSearchRequest) (Grap
 	}, nil
 }
 
+func (g *recordingGraph) Graph(string) (*graph.Graph, graph.NeighborRank, func(), error) {
+	return nil, graph.NeighborRank{}, nil, errNoGraph
+}
+
 func postGraphSearch(t *testing.T, mux http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/graph/search", strings.NewReader(body))

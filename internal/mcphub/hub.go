@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -55,12 +56,21 @@ const LibraryServer = "kb"
 const (
 	maxDescription = 1024     // знаков описания вместе с пометкой сервера
 	maxSchemaBytes = 32 << 10 // байт схемы параметров одного инструмента
-	// maxServerSchemas — байт схем всех инструментов одного сервера вместе:
-	// схемы уходят в каждый запрос к модели, и без общего предела сервер
-	// с сотней инструментов по 32 КБ занял бы контекст до вопроса. Две схемы
-	// предельного размера; что не влезло — в отброшенные с причиной.
-	maxServerSchemas = 2 * maxSchemaBytes
+	// maxServerTools и maxServerSpecs — один бюджет сервера на всё, что он
+	// кладёт в каждый запрос к модели: число инструментов и байты описаний
+	// вместе со схемами. Без него сервер с тысячей инструментов занял бы
+	// контекст до вопроса; до 23.10.2026 предел считал одни схемы, и 3 000
+	// инструментов с длинными описаниями проходили все (аудит, находка 4).
+	// Числа выбраны, а не замерены: 64 инструмента и две схемы предельного
+	// размера. Что не влезло — в отброшенные с причиной и подсказкой
+	// перечислить нужные в tools.
+	maxServerTools = 64
+	maxServerSpecs = 2 * maxSchemaBytes
 )
+
+// closeTimeout — срок, за который закрывается брошенный сеанс сервера
+// (DELETE): сервер мог и пропасть, ждать его срок обмена незачем.
+const closeTimeout = 2 * time.Second
 
 // Состояния сервера.
 const (
@@ -74,6 +84,10 @@ const (
 type Hub struct {
 	version  string
 	maxOutKB int
+
+	// pubMu — снимок инструментов сервера и его передача в реестр идут одним
+	// шагом (publish); берётся раньше mu и не держится под ним.
+	pubMu sync.Mutex
 
 	mu      sync.Mutex
 	names   []string // по алфавиту, как в конфиге (config.MCP.Names), служба последней
@@ -109,6 +123,13 @@ type server struct {
 	// спрашивают, даже если перечислены в allow.
 	first   map[string]string
 	changed map[string]bool
+	// busy — сколько вызовов и перечитываний идёт каждым клиентом: прежний
+	// клиент после переподключения закрывается, только когда им никто не
+	// пользуется — DELETE посреди вызова заставил бы клиента поздороваться
+	// заново и послать tools/call второй раз. pending — сколько перечитываний
+	// списка ещё идёт: пока они не кончились, вызовы сервера спрашивают.
+	busy    map[*mcpclient.Client]int
+	pending int
 }
 
 // entry — инструмент сервера, как его увидит модель.
@@ -131,7 +152,7 @@ func New(cfg *config.Config, version string) *Hub {
 	}
 	libURL := ""
 	if u := strings.TrimSpace(cfg.KB.ServerURL); u != "" {
-		libURL = strings.TrimRight(u, "/") + "/mcp"
+		libURL = libraryURL(u)
 	}
 	for _, name := range cfg.MCP.Names() {
 		sc := cfg.MCP.Servers[name]
@@ -145,7 +166,10 @@ func New(cfg *config.Config, version string) *Hub {
 	// описанная в [mcp.servers]: ключ у неё тот же, что у kb.server_url.
 	if libURL != "" && !h.hasLibrary() {
 		if _, taken := h.servers[LibraryServer]; !taken {
-			s := newServer(LibraryServer, config.MCPServer{URL: libURL, Timeout: cfg.KB.ServerTimeout})
+			// Срок — тот же, что у клиента библиотеки (пусто — 30 с, как в
+			// docs/configuration.md); сырую строку конфиг уже проверил, а
+			// готовая длительность не даст MCPServer подставить свои 60 с.
+			s := newServer(LibraryServer, config.MCPServer{URL: libURL, Timeout: cfg.KB.ServerTimeoutDuration().String()})
 			s.library = true
 			kbc := cfg.KB
 			s.token = func(ctx context.Context) (string, error) { return kbremote.Token(ctx, kbc) }
@@ -157,7 +181,7 @@ func New(cfg *config.Config, version string) *Hub {
 
 func newServer(name string, sc config.MCPServer) *server {
 	s := &server{name: name, cfg: sc, where: CleanURL(sc.URL), allow: map[string]bool{},
-		state: stateNever, first: map[string]string{}, changed: map[string]bool{}}
+		state: stateNever, first: map[string]string{}, changed: map[string]bool{}, busy: map[*mcpclient.Client]int{}}
 	if !sc.On() {
 		s.state = stateOff
 	}
@@ -338,7 +362,8 @@ func (h *Hub) Reconnect(ctx context.Context, name string) error {
 }
 
 // Ping — рукопожатие с сервером name: сведения о нём и сколько оно шло.
-// Список инструментов не читает.
+// Список инструментов не читает. Ошибку читает человек (--mcp-ping,
+// --kb-remote-check): если сервер перенаправляет, она называет новый адрес.
 func (h *Hub) Ping(ctx context.Context, name string) (mcpclient.Info, error) {
 	s, err := h.lookup(name)
 	if err != nil {
@@ -351,15 +376,22 @@ func (h *Hub) Ping(ctx context.Context, name string) (mcpclient.Info, error) {
 	}
 	info, err := c.Initialize(ctx)
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if err != nil {
 		s.state, s.err = stateDown, err
+		h.mu.Unlock()
+		closeClient(c)
+		if moved := mcpclient.MovedTo(err); moved != "" {
+			err = fmt.Errorf("%w%s", err, movedNote(moved))
+		}
 		return mcpclient.Info{}, err
 	}
-	s.client, s.info, s.hasInfo, s.err = c, info, true, nil
+	old := s.replaceClient(c)
+	s.info, s.hasInfo, s.err = info, true, nil
 	if s.state != stateUp {
 		s.state = stateUp
 	}
+	h.mu.Unlock()
+	closeClient(old)
 	return info, nil
 }
 
@@ -414,25 +446,108 @@ func (h *Hub) connect(ctx context.Context, s *server) error {
 	}
 	info, err := c.Initialize(ctx)
 	if err != nil {
+		closeClient(c) // сеанс мог успеть начаться — не бросать его серверу
 		return failed(err)
 	}
 	list, err := c.ListTools(ctx)
 	if err != nil {
+		closeClient(c)
 		return failed(err)
 	}
 	h.mu.Lock()
-	s.client, s.info, s.hasInfo, s.err, s.state = c, info, true, nil, stateUp
+	old := s.replaceClient(c)
+	s.info, s.hasInfo, s.err, s.state = info, true, nil, stateUp
 	h.apply(s, list)
 	h.mu.Unlock()
-	return h.publish(s.name)
+	err = h.publish(s.name)
+	closeClient(old)
+	return err
+}
+
+// replaceClient ставит серверу новый клиент и отдаёт прежний, если его пора
+// закрыть сейчас: им никто не пользуется. Занятый прежний закроет последний
+// его вызов (release). Под h.mu.
+func (s *server) replaceClient(c *mcpclient.Client) (idle *mcpclient.Client) {
+	old := s.client
+	s.client = c
+	if old != nil && old != c && s.busy[old] == 0 {
+		return old
+	}
+	return nil
+}
+
+// use — клиент сервера для вызова, отмеченный занятым; nil — не подключён.
+// Каждому use — свой release.
+func (h *Hub) use(s *server) *mcpclient.Client {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := s.client
+	if c != nil {
+		s.busy[c]++
+	}
+	return c
+}
+
+// release — вызов клиентом c кончился. Клиент, которого переподключение уже
+// сменило, закрывается последним вызовом — в стороне: вызов человека не ждёт
+// чужого DELETE.
+func (h *Hub) release(s *server, c *mcpclient.Client) {
+	h.mu.Lock()
+	s.busy[c]--
+	idle := s.busy[c] <= 0
+	if idle {
+		delete(s.busy, c)
+	}
+	retired := idle && c != s.client
+	h.mu.Unlock()
+	if retired {
+		go closeClient(c)
+	}
+}
+
+// closeClient заканчивает сеанс клиента (DELETE) за closeTimeout; ошибка не
+// важна — сервер, который не ответил, сеанс забудет сам.
+func closeClient(c *mcpclient.Client) {
+	if c == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	_ = c.Close(ctx)
+}
+
+// Close заканчивает сеансы серверов (DELETE) — на выходе из программы, чтобы
+// сервер не держал брошенные сеансы до своего срока. Клиент, которым сейчас
+// идёт вызов, не трогается: DELETE посреди вызова заставил бы его послать
+// вызов второй раз. Клиентами после Close можно пользоваться: следующий вызов
+// поздоровается заново.
+func (h *Hub) Close(ctx context.Context) error {
+	h.mu.Lock()
+	var idle []*mcpclient.Client
+	for _, name := range h.names {
+		if s := h.servers[name]; s.client != nil && s.busy[s.client] == 0 {
+			idle = append(idle, s.client)
+		}
+	}
+	h.mu.Unlock()
+	var errs []error
+	for _, c := range idle {
+		if err := c.Close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // refresh перечитывает список инструментов после уведомления сервера
-// (Stale). Неудача списка не трогает: инструменты остаются прежними, а
-// ошибка видна в /mcp.
+// (Stale) и снимает отметку «перечитывается» (pending, refreshAfterCall) под
+// тем же замком, что кладёт новый список: вызов, собранный после, видит либо
+// отметку, либо новый список. Неудача списка не трогает: инструменты
+// остаются прежними, а ошибка видна в /mcp.
 func (h *Hub) refresh(ctx context.Context, s *server, c *mcpclient.Client) {
 	list, err := c.ListTools(ctx)
 	h.mu.Lock()
+	s.pending--
 	if err != nil {
 		s.err = fmt.Errorf("перечитать список инструментов не вышло: %w", err)
 		h.mu.Unlock()
@@ -445,7 +560,7 @@ func (h *Hub) refresh(ctx context.Context, s *server, c *mcpclient.Client) {
 }
 
 // fail — сервер не ответил или отказал: ошибка в состояние, инструменты
-// из реестра долой.
+// из реестра долой (publish).
 func (h *Hub) fail(s *server, err error) {
 	h.mu.Lock()
 	s.state, s.err, s.tools = stateDown, err, nil
@@ -454,11 +569,12 @@ func (h *Hub) fail(s *server, err error) {
 }
 
 // apply принимает список инструментов сервера: отбор по tools, проверка имён
-// и схем, отпечатки для Б5. Под h.mu.
+// и схем, повторы имён, бюджет сервера, отпечатки для Б5. Под h.mu.
 func (h *Hub) apply(s *server, list []mcpclient.Tool) {
 	s.tools, s.skipped, s.listed = nil, nil, time.Now()
 	offered := map[string]bool{}
-	schemas := 0 // байт схем уже принятых инструментов
+	named := map[string]bool{} // имена, уже встреченные в списке
+	specs := 0                 // байт описаний и схем уже принятых инструментов
 	for _, t := range list {
 		offered[t.Name] = true
 		if s.visible != nil && !s.visible[t.Name] {
@@ -473,6 +589,15 @@ func (h *Hub) apply(s *server, list []mcpclient.Tool) {
 			s.skipped = append(s.skipped, fmt.Sprintf("%q — недопустимое имя (латиница, цифры, _ - ., до 128 знаков)", clip(t.Name, 60)))
 			continue
 		}
+		// Повтор имени: реестр отверг бы набор сервера целиком (до 23.10.2026
+		// так и было — аудит, находка 3). Принят первый; повтор — в отброшенные,
+		// даже если первый сам не прошёл: какой из двух исполнит сервер, знает
+		// только он.
+		if named[t.Name] {
+			s.skipped = append(s.skipped, fmt.Sprintf("%s — имя повторяется в списке сервера: повтор отброшен, в счёт идёт первый", t.Name))
+			continue
+		}
+		named[t.Name] = true
 		if len(t.InputSchema) > maxSchemaBytes {
 			s.skipped = append(s.skipped, fmt.Sprintf("%s — схема параметров %d байт, предел %d", t.Name, len(t.InputSchema), maxSchemaBytes))
 			continue
@@ -486,12 +611,19 @@ func (h *Hub) apply(s *server, list []mcpclient.Tool) {
 			s.skipped = append(s.skipped, fmt.Sprintf("%s — %v", t.Name, err))
 			continue
 		}
-		if schemas+len(params.Raw) > maxServerSchemas {
-			s.skipped = append(s.skipped, fmt.Sprintf("%s — схемы инструментов сервера вместе больше %d байт "+
-				"(уже принято %d, у этого %d); нужные перечислите в tools", t.Name, maxServerSchemas, schemas, len(params.Raw)))
+		if len(s.tools) >= maxServerTools {
+			s.skipped = append(s.skipped, fmt.Sprintf("%s — у сервера уже %d инструментов, больше модели не отдаётся; "+
+				"нужные перечислите в tools", t.Name, maxServerTools))
 			continue
 		}
-		schemas += len(params.Raw)
+		desc := describe(s.name, t.Description)
+		cost := len(desc) + len(params.Raw)
+		if specs+cost > maxServerSpecs {
+			s.skipped = append(s.skipped, fmt.Sprintf("%s — описания и схемы инструментов сервера вместе больше %d байт "+
+				"(уже принято %d, у этого %d); нужные перечислите в tools", t.Name, maxServerSpecs, specs, cost))
+			continue
+		}
+		specs += cost
 		fp := fingerprint(t)
 		if prev, seen := s.first[t.Name]; !seen {
 			s.first[t.Name] = fp
@@ -501,7 +633,7 @@ func (h *Hub) apply(s *server, list []mcpclient.Tool) {
 		s.tools = append(s.tools, entry{
 			remote: t.Name,
 			name:   tools.ExternalName(s.name, t.Name),
-			desc:   describe(s.name, t.Description),
+			desc:   desc,
 			params: params,
 		})
 	}
@@ -515,7 +647,16 @@ func (h *Hub) apply(s *server, list []mcpclient.Tool) {
 // publish кладёт инструменты сервера в реестр (или убирает их оттуда).
 // Служба библиотеки — только перечисленные в tools без дублей встроенных
 // (exposed, apply).
+//
+// Снимок и SetExternal идут под одним замком публикации (pubMu): при обрыве
+// и подключении одного сервера разом опоздавший старый снимок иначе ложился
+// поверх нового. Отказ реестра не глотается: сервер переходит в «ошибку» с
+// причиной, видной в /mcp, а его инструменты у модели убираются целиком. До
+// 23.10.2026 отказ глотали Connect, refresh и fail, и /mcp писал «подключён,
+// инструментов N», когда у модели не было ни одного (аудит, находка 3).
 func (h *Hub) publish(name string) error {
+	h.pubMu.Lock()
+	defer h.pubMu.Unlock()
 	h.mu.Lock()
 	reg, s := h.reg, h.servers[name]
 	if reg == nil || s == nil {
@@ -529,7 +670,16 @@ func (h *Hub) publish(name string) error {
 		}
 	}
 	h.mu.Unlock()
-	return reg.SetExternal(name, list)
+	err := reg.SetExternal(name, list)
+	if err == nil {
+		return nil
+	}
+	err = fmt.Errorf("инструменты сервера не переданы модели: %w", err)
+	h.mu.Lock()
+	s.state, s.err, s.tools = stateDown, err, nil
+	h.mu.Unlock()
+	_ = reg.SetExternal(name, nil) // пустой набор реестр не отвергает
+	return err
 }
 
 // validToolName — имя инструмента сервера годится в mcp__<сервер>__<имя>:
@@ -572,17 +722,24 @@ func describe(server, desc string) string {
 	return clip("[внешний сервер "+server+"] "+text, maxDescription)
 }
 
-// cleanText — чужой текст без управляющих и невидимых знаков (Cf): пробелы,
-// переводы строк и табуляции — одним пробелом, по краям — ни одного.
+// cleanText — чужой текст без управляющих и невидимых знаков: Cc, Cf,
+// селекторы вариантов (U+FE00–FE0F, U+E0100–E01EF — ими прячут текст в
+// «пустом» месте) и знаки Mn без базы, то есть в начале или после пробела;
+// Mn после буквы (и + U+0306) — часть буквы и остаётся. Пробелы, переводы
+// строк и табуляции — одним пробелом, по краям — ни одного.
 func cleanText(s string) string {
 	var b strings.Builder
 	space := false
+	base := false // последний записанный знак — видимый, к нему приложится Mn
 	for _, r := range s {
 		switch {
 		case unicode.IsSpace(r): // и перевод строки, и табуляция
 			space = b.Len() > 0
+			base = false
 			continue
-		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r):
+			continue
+		case unicode.Is(unicode.Mn, r) && !base:
 			continue
 		}
 		if space {
@@ -590,14 +747,16 @@ func cleanText(s string) string {
 			space = false
 		}
 		b.WriteRune(r)
+		base = true
 	}
 	return b.String()
 }
 
-// cleanSchema чистит описания параметров внутри схемы тем же правилом, что
-// describe: строки под ключом description на любой глубине — properties,
-// items, anyOf. Схема уходит модели целиком, и невидимый знак во вложенном
-// описании читается ею так же, как в описании инструмента.
+// cleanSchema чистит схему тем же правилом, что describe: всё, что модель
+// читает словами, на любой глубине — описания, title, имена свойств и
+// required, строки внутри items, anyOf и прочих слов схемы. Схема уходит
+// модели целиком, и невидимый знак в имени параметра читается ею так же, как
+// в описании инструмента; до 23.10.2026 чистились одни description (аудит).
 //
 // Порядок ключей и всё прочее остаются как прислал сервер; значения enum,
 // const, default и examples не трогаются — это данные, которые модель
@@ -607,7 +766,7 @@ func cleanSchema(raw json.RawMessage) (json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	w := schemaRewriter{dec: dec}
-	if err := w.value(false, false, false); err != nil {
+	if err := w.value(false, false); err != nil {
 		return nil, err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -626,11 +785,11 @@ type schemaRewriter struct {
 	changed bool
 }
 
-// value переписывает одно значение. desc — это строка описания, её чистить;
-// data — внутри enum/const/default/examples, где не чистится ничего; names —
-// объект, чьи ключи — имена (properties, $defs…), а не слова схемы: свойство
-// по имени default или description — такая же схема, как прочие.
-func (w *schemaRewriter) value(desc, data, names bool) error {
+// value переписывает одно значение. data — внутри enum/const/default/examples,
+// где не чистится ничего; вне данных чистится каждая строка и каждый ключ.
+// names — объект, чьи ключи — имена (properties, $defs…), а не слова схемы:
+// свойство по имени default или description — такая же схема, как прочие.
+func (w *schemaRewriter) value(data, names bool) error {
 	tok, err := w.dec.Token()
 	if err != nil {
 		return err
@@ -646,23 +805,24 @@ func (w *schemaRewriter) value(desc, data, names bool) error {
 					return err
 				}
 				name, _ := key.(string)
+				if !data {
+					name = w.clean(name)
+				}
 				if i > 0 {
 					w.out.WriteByte(',')
 				}
 				w.str(name)
 				w.out.WriteByte(':')
-				childDesc, childData, childNames := false, data, false
+				childData, childNames := data, false
 				if !data && !names {
 					switch name {
-					case "description":
-						childDesc = true
 					case "enum", "const", "default", "examples":
 						childData = true
 					case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
 						childNames = true
 					}
 				}
-				if err := w.value(childDesc, childData, childNames); err != nil {
+				if err := w.value(childData, childNames); err != nil {
 					return err
 				}
 			}
@@ -673,7 +833,7 @@ func (w *schemaRewriter) value(desc, data, names bool) error {
 				if i > 0 {
 					w.out.WriteByte(',')
 				}
-				if err := w.value(false, data, false); err != nil {
+				if err := w.value(data, false); err != nil {
 					return err
 				}
 			}
@@ -682,10 +842,8 @@ func (w *schemaRewriter) value(desc, data, names bool) error {
 		_, err := w.dec.Token() // закрывающая скобка
 		return err
 	case string:
-		if desc {
-			if c := cleanText(v); c != v {
-				v, w.changed = c, true
-			}
+		if !data {
+			v = w.clean(v)
 		}
 		w.str(v)
 	case json.Number:
@@ -696,6 +854,15 @@ func (w *schemaRewriter) value(desc, data, names bool) error {
 		w.out.WriteString("null")
 	}
 	return nil
+}
+
+// clean — строка схемы по правилу cleanText; изменение отмечается.
+func (w *schemaRewriter) clean(s string) string {
+	if c := cleanText(s); c != s {
+		w.changed = true
+		return c
+	}
+	return s
 }
 
 // str пишет строку JSON без замены <, > и & на <: схема — не HTML.
@@ -726,16 +893,51 @@ func CleanURL(raw string) string {
 	return u.Scheme + "://" + u.Host + u.EscapedPath()
 }
 
-// sameURL — один и тот же вход: схема и машина без учёта регистра, путь без
-// конечной косой черты.
-func sameURL(a, b string) bool {
-	ua, ea := url.Parse(strings.TrimSpace(a))
-	ub, eb := url.Parse(strings.TrimSpace(b))
-	if ea != nil || eb != nil {
-		return false
+// libraryURL — вход MCP службы библиотеки: <kb.server_url>/mcp. /mcp
+// дописывается к пути, а не в конец строки: у адреса с якорем вызов иначе
+// ушёл бы в корень службы, у адреса со строкой запроса — по кривому пути.
+// Строка запроса и учётные данные остаются как есть: клиент MCP на них
+// отказывает с понятной причиной (ключ в адресе не поддерживается).
+func libraryURL(serverURL string) string {
+	u, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil {
+		return strings.TrimRight(strings.TrimSpace(serverURL), "/") + "/mcp" // отказ даст клиент
 	}
-	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host) &&
-		strings.TrimRight(ua.EscapedPath(), "/") == strings.TrimRight(ub.EscapedPath(), "/")
+	u.Path = strings.TrimRight(u.Path, "/") + "/mcp"
+	u.RawPath = ""
+	return u.String()
+}
+
+// sameURL — один и тот же вход: схема и машина без учёта регистра, порт по
+// умолчанию — что явный, что подразумеваемый (80 у http, 443 у https), путь
+// без конечной косой черты; строка запроса и учётные данные не в счёт. Так
+// служба библиотеки узнаётся и записанная в [mcp.servers] иначе, чем в
+// kb.server_url, и не уходит модели вторым набором (аудит 23.10.2026). Имя
+// машины и её адрес — разные входы: сравнить их можно только спросив DNS.
+func sameURL(a, b string) bool {
+	keyA, okA := urlKey(a)
+	keyB, okB := urlKey(b)
+	return okA && okB && keyA == keyB
+}
+
+// urlKey — адрес в одном виде для sameURL; false — не разобрался или без машины.
+func urlKey(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	host := net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/"), true
 }
 
 // errNotConnected — у сервера нет живого клиента.

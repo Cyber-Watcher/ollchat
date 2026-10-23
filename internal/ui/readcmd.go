@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/find"
+	"github.com/Cyber-Watcher/ollchat/internal/kb"
 )
 
 // Команда /read — показать найденный кусок целиком, вместе с соседями.
@@ -47,6 +48,9 @@ func (m *Model) readCmd(arg string) tea.Cmd {
 		}
 		id = m.finds[n-1].ID
 	}
+	if m.viaService() {
+		return m.remoteReadCmd(id)
+	}
 
 	coll, err := m.kbCollection(collOfID(id))
 	if err != nil {
@@ -62,7 +66,48 @@ func (m *Model) readCmd(arg string) tea.Cmd {
 		m.addBlock(block{kind: blockNotice, text: "куска " + id + " в коллекции нет"})
 		return nil
 	}
+	// Прочитанное показывается сразу: человек попросил именно это.
+	m.addBlockAndShow(block{kind: blockNotice, text: readText(id, hits)})
+	return nil
+}
 
+// remoteReadCmd — /read через службу общей библиотеки (решение владельца
+// 23.10.2026: «Команды в службу»): кусок с соседями читает служба, своя
+// коллекция не открывается. Служба не ответила — своя коллекция с пометкой,
+// как у модели (kb.Fallback); в положении service — ошибка (/kb source).
+// Запрос по сети — вне цикла событий.
+func (m *Model) remoteReadCmd(id string) tea.Cmd {
+	lib, around := m.library(), m.cfg.KB.ReadAroundCount()
+	name := collOfID(id)
+	if name == "" && !m.kb.picked {
+		name = m.kb.use
+	}
+	return func() tea.Msg {
+		src, err := lib.Source(name)
+		if err != nil {
+			return errorMsg{err: fmt.Errorf("/read: %w", err)}
+		}
+		hits, err := src.Around(id, around)
+		if err != nil {
+			return errorMsg{err: fmt.Errorf("/read: %w", err)}
+		}
+		if len(hits) == 0 {
+			return noticeMsg{text: "куска " + id + " в коллекции нет"}
+		}
+		text := readText(id, hits)
+		note := kb.QueueNote(kb.Queued(src))
+		if kb.Fell(src) {
+			note = kb.FallbackNote
+		}
+		if note != "" {
+			text = "(" + note + ")\n" + text
+		}
+		return noticeMsg{text: text}
+	}
+}
+
+// readText печатает кусок id с соседями; запрошенный отмечен.
+func readText(id string, hits []kb.Result) string {
 	var b strings.Builder
 	for i, h := range hits {
 		e := find.Excerpt{
@@ -80,9 +125,7 @@ func (m *Model) readCmd(arg string) tea.Cmd {
 		}
 		fmt.Fprintf(&b, "%s%s\n%s\n", mark, find.Line(e), strings.TrimSpace(h.Text))
 	}
-	// Прочитанное показывается сразу: человек попросил именно это.
-	m.addBlockAndShow(block{kind: blockNotice, text: strings.TrimRight(b.String(), "\n")})
-	return nil
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // collOfID — имя коллекции из ссылки «books/12#37».

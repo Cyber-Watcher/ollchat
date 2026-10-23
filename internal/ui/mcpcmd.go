@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Cyber-Watcher/ollchat/internal/mcphub"
 )
 
 // mcpReconnectSeconds — срок переподключения по /mcp reconnect: дольше,
@@ -32,7 +34,7 @@ func (m *Model) mcpCmd(arg string) tea.Cmd {
 		}
 		rep, err := m.mcp.ToolsReport(fields[1])
 		if err != nil {
-			m.addBlock(block{kind: blockError, text: err.Error()})
+			m.addBlock(block{kind: blockError, text: mcphub.OneLine(err.Error())})
 			return nil
 		}
 		m.addBlock(block{kind: blockNotice, text: rep})
@@ -50,7 +52,9 @@ func (m *Model) mcpCmd(arg string) tea.Cmd {
 			err := h.Reconnect(ctx, name)
 			text := h.Report()
 			if err != nil {
-				text = "переподключение: " + err.Error() + "\n\n" + text
+				// Текст ошибки несёт слова сервера: ESC, OSC и C1 из него
+				// исполнил бы терминал человека (аудит 23.10.2026).
+				text = "переподключение: " + mcphub.OneLine(err.Error()) + "\n\n" + text
 			}
 			return noticeMsg{text: text}
 		}

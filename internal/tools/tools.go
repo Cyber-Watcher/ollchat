@@ -142,6 +142,12 @@ type Options struct {
 	// nil — search ищет сам, как раньше.
 	RemoteSearch RemoteCaller
 
+	// LibraryMode — положение /kb source (этап 121, Д3): кто исполняет
+	// search, kb_* и graph_* при заданной Library — служба с запасным путём
+	// (auto), только служба (service) или только свои файлы (local). Тот же
+	// экземпляр, что у интерфейса и подмешивания. nil — auto, как было.
+	LibraryMode *kb.SourceSwitch
+
 	// GraphCache — открытые графы, живущие между вызовами. Необязателен:
 	// без него каждый вызов открывает граф заново, как было раньше. Нужен
 	// там, где вызовов много подряд, — в службе ollmcp и в диалоге TUI:
@@ -343,12 +349,14 @@ func NewRegistry(enabled []string, opts Options) (*Registry, error) {
 		// и разрешения остаются местными, уезжает только исполнение.
 		if graphTools[name] {
 			if caller, ok := opts.Library.(GraphCaller); ok {
-				t = &remoteGraphTool{inner: t, caller: caller, collection: opts.KBDefault, local: opts.KB != nil}
+				t = &remoteGraphTool{inner: t, caller: caller, collection: opts.KBDefault,
+					local: opts.KB != nil, mode: opts.LibraryMode}
 			}
 		}
 		// search на общей библиотеке — тоже служба, по MCP (этап 121, А3).
 		if name == NameSearch && opts.RemoteSearch != nil {
-			rs := &remoteSearchTool{inner: t.(*searchTool), caller: opts.RemoteSearch, collection: opts.KBDefault}
+			rs := &remoteSearchTool{inner: t.(*searchTool), caller: opts.RemoteSearch, collection: opts.KBDefault,
+				mode: opts.LibraryMode}
 			if opts.KB != nil {
 				lo := opts
 				lo.Library, lo.RemoteSearch = nil, nil

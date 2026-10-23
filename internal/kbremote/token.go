@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/confluence"
@@ -37,26 +38,50 @@ func Token(ctx context.Context, k config.KB) (string, error) {
 		return "", fmt.Errorf("kb.server_token_env: переменная %s пуста", name)
 	}
 	if line := strings.TrimSpace(k.ServerTokenCmd); line != "" {
+		// Один запуск команды на процесс: при kb.server_url ключ нужен клиенту
+		// библиотеки, инструменту search и серверу kb в хабе MCP, и прежде
+		// команда выполнялась до трёх раз за запуск (аудит 23.10.2026) — у
+		// команды, спрашивающей пароль или ходящей в хранилище секретов, это
+		// три вопроса и три обращения.
+		if t, ok := cmdTokens.Load(line); ok {
+			return t.(string), nil
+		}
 		t, err := confluence.TokenFromCmd(ctx, line)
 		if err != nil {
 			return "", fmt.Errorf("kb.server_token_cmd: %w", err)
+		}
+		if t != "" {
+			cmdTokens.Store(line, t)
 		}
 		return t, nil
 	}
 	return "", nil
 }
 
+// cmdTokens — ключи, выданные kb.server_token_cmd, по строке команды: на
+// процесс. Неудача и пустой ключ не запоминаются — следующий вызов попробует
+// снова.
+var cmdTokens sync.Map
+
 // FromConfig заводит клиента общей библиотеки по настройкам.
 //
 // Пустой адрес — не ошибка: значит работаем с файлами, как раньше. Возвращает
 // nil-клиента, и вызывающий по нему решает, каким путём идти.
+//
+// Адрес проверяется до ключа: адрес с ключом внутри (New отказывает) не должен
+// стоить запуска kb.server_token_cmd.
 func FromConfig(ctx context.Context, k config.KB) (*Client, error) {
 	if strings.TrimSpace(k.ServerURL) == "" {
 		return nil, nil
+	}
+	c, err := New(Opts{URL: k.ServerURL, Timeout: k.ServerTimeoutDuration()})
+	if err != nil {
+		return nil, err
 	}
 	token, err := Token(ctx, k)
 	if err != nil {
 		return nil, err
 	}
-	return New(Opts{URL: k.ServerURL, Token: token, Timeout: k.ServerTimeoutDuration()})
+	c.token = strings.TrimSpace(token)
+	return c, nil
 }

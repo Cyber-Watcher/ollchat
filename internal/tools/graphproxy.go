@@ -42,6 +42,9 @@ type remoteGraphTool struct {
 	// local — свои файлы есть (Options.KB): служба не ответила — тот же вызов
 	// исполняет местный инструмент (этап 121, А4).
 	local bool
+	// mode — положение /kb source (Options.LibraryMode); читается на каждом
+	// вызове: человек переключает его посреди сеанса.
+	mode *kb.SourceSwitch
 }
 
 func (t *remoteGraphTool) Name() string      { return t.inner.Name() }
@@ -60,6 +63,10 @@ func (t *remoteGraphTool) Spec() ollama.Tool { return t.inner.Spec() }
 // Plan.Note. Своих файлов нет — остаётся ошибка службы с её адресом. Отказ
 // по смыслу (ключ, неизвестная коллекция, служба без графа) переходом не
 // лечится: это ошибка.
+//
+// **Положение /kb source** (этап 121, Д3): local — сразу местный инструмент,
+// служба не спрашивается, пометки нет (это выбор человека, а не переход);
+// service — только служба, её недоступность остаётся ошибкой.
 func (t *remoteGraphTool) Plan(args map[string]any) (*Plan, error) {
 	p, err := t.inner.Plan(args)
 	if err != nil {
@@ -67,8 +74,21 @@ func (t *remoteGraphTool) Plan(args map[string]any) (*Plan, error) {
 	}
 	localRun := p.Run
 	p.Run = func(ctx context.Context) (string, error) {
+		mode := t.mode.Mode()
+		if mode == kb.SourceLocal {
+			if !t.local {
+				return "", errNoOwnFiles
+			}
+			return localRun(ctx)
+		}
 		out, err := t.caller.GraphTool(ctx, t.collection, t.inner.Name(), args)
-		if err == nil || !t.local || !errors.Is(err, kb.ErrUnreachable) {
+		if err == nil || !errors.Is(err, kb.ErrUnreachable) {
+			return out, err
+		}
+		if mode == kb.SourceService {
+			return out, fmt.Errorf("%w (%s)", err, kb.ServiceOnlyNote)
+		}
+		if !t.local {
 			return out, err
 		}
 		if ctx.Err() != nil {
@@ -120,7 +140,13 @@ type remoteSearchTool struct {
 	// local — поиск по своим файлам: те же настройки без общей библиотеки.
 	// nil — своих файлов нет, ошибка службы остаётся ошибкой.
 	local *searchTool
+	// mode — положение /kb source, как у remoteGraphTool.
+	mode *kb.SourceSwitch
 }
+
+// errNoOwnFiles — положение local, а своих файлов библиотеки нет.
+var errNoOwnFiles = errors.New("положение local (/kb source), а своих файлов библиотеки нет: " +
+	"каталог kb.dir не открылся")
 
 func (t *remoteSearchTool) Name() string      { return t.inner.Name() }
 func (t *remoteSearchTool) Spec() ollama.Tool { return t.inner.Spec() }
@@ -141,8 +167,27 @@ func (t *remoteSearchTool) Plan(args map[string]any) (*Plan, error) {
 		remote["collection"] = t.collection
 	}
 	p.Run = func(ctx context.Context) (string, error) {
+		mode := t.mode.Mode()
+		if mode == kb.SourceLocal {
+			// Свои файлы по выбору человека: служба не спрашивается, пометки
+			// о переходе нет — перехода не было.
+			if t.local == nil {
+				return "", errNoOwnFiles
+			}
+			lp, err := t.local.Plan(args)
+			if err != nil {
+				return "", err
+			}
+			return lp.Run(ctx)
+		}
 		out, err := t.caller.CallTool(ctx, NameSearch, remote)
-		if err == nil || t.local == nil || !errors.Is(err, kb.ErrUnreachable) {
+		if err == nil || !errors.Is(err, kb.ErrUnreachable) {
+			return out, err
+		}
+		if mode == kb.SourceService {
+			return out, fmt.Errorf("%w (%s)", err, kb.ServiceOnlyNote)
+		}
+		if t.local == nil {
 			return out, err
 		}
 		if ctx.Err() != nil {

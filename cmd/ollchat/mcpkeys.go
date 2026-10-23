@@ -40,39 +40,120 @@ func mcpKeyRequested(f *cliFlags) bool {
 	return *f.mcpServers || *f.mcpPing != "" || *f.mcpTools != "" || *f.mcpCall != ""
 }
 
+// mcpKeyTimeout — срок ключа доступа (token_cmd) и подключения у ключей
+// --mcp-ping, --mcp-tools, --mcp-call и шагов MCP в --kb-remote-check (аудит
+// 23.10.2026: с context.Background() зависшая команда ключа держала ключ
+// бесконечно). Тот же, что у /mcp reconnect в TUI (ui.mcpReconnectSeconds):
+// человек сам попросил и ждёт, а 3 с запуска (mcphub.ConnectTimeout) — для
+// того, кто ничего не просил. Сам вызов инструмента ограничен сроком сервера
+// (mcp.servers.*.timeout), а не этим. Переменная — чтобы тест не ждал 30 с.
+var mcpKeyTimeout = 30 * time.Second
+
+// hubCloseTimeout — сколько выход из программы ждёт конца сеансов MCP.
+const hubCloseTimeout = 2 * time.Second
+
+// closeHub заканчивает сеансы серверов MCP на выходе (DELETE, mcphub.Hub.Close):
+// иначе сервер держит брошенный сеанс до своего срока (аудит 23.10.2026).
+// Зовётся одним defer в run сразу за mcphub.New — так его получают и TUI,
+// и ключи --mcp-*, --mcp-registry, --kb-remote-check. Не дольше
+// hubCloseTimeout: выход не ждёт медленный сервер; ошибку показать некому
+// (TUI уже закрыт, у ключей итог от неё не меняется).
+func closeHub(hub *mcphub.Hub) {
+	ctx, cancel := context.WithTimeout(context.Background(), hubCloseTimeout)
+	defer cancel()
+	_ = hub.Close(ctx)
+}
+
 // runMCPKey исполняет --mcp-servers, --mcp-ping, --mcp-tools или --mcp-call.
 // egressCheck — agent.private_egress_check: для --mcp-call, как для модели.
+//
+// Всё, что ключ печатает, и текст его ошибки проходят через termSafe: имя
+// и версия сервера, описания и ответы инструментов — чужой текст.
 func runMCPKey(f *cliFlags, hub *mcphub.Hub, guard *permissions.Guard, egressCheck bool, out, errOut io.Writer) error {
-	ctx := context.Background()
+	out, errOut = termWriter{out}, termWriter{errOut}
+	connect := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), mcpKeyTimeout)
+	}
 	switch {
 	case *f.mcpServers:
 		fmt.Fprintln(out, hub.Report())
 		return nil
 	case *f.mcpPing != "":
 		name := *f.mcpPing
-		fmt.Fprintf(errOut, "рукопожатие с сервером MCP %s…\n", name)
+		fmt.Fprintf(errOut, "рукопожатие с сервером MCP %s (не дольше %s)…\n", name, mcpKeyTimeout)
+		ctx, cancel := connect()
+		defer cancel()
 		info, err := hub.Ping(ctx, name)
 		if err != nil {
-			return err
+			return termErr(err)
 		}
 		fmt.Fprintln(out, mcphub.PingReport(name, info))
 		return nil
 	case *f.mcpTools != "":
 		name := *f.mcpTools
-		fmt.Fprintf(errOut, "подключаюсь к серверу MCP %s…\n", name)
+		fmt.Fprintf(errOut, "подключаюсь к серверу MCP %s (не дольше %s)…\n", name, mcpKeyTimeout)
+		ctx, cancel := connect()
+		defer cancel()
 		if err := hub.Reconnect(ctx, name); err != nil {
-			return err
+			return termErr(err)
 		}
 		rep, err := hub.ToolsReport(name)
 		if err != nil {
-			return err
+			return termErr(err)
 		}
 		fmt.Fprintln(out, rep)
 		return nil
 	case *f.mcpCall != "":
-		return runMCPCall(ctx, hub, guard, egressCheck, *f.mcpCall, f.args, *f.mcpYes, out, errOut)
+		return runMCPCall(context.Background(), hub, guard, egressCheck, *f.mcpCall, f.args, *f.mcpYes, out, errOut)
 	}
 	return nil
+}
+
+// termSafe — чужой текст для терминала: управляющие знаки C0, DEL и C1
+// печатаются видимо (`\x1b`, `\r`), как в показе конфига проекта (visible);
+// перевод строки и табуляция остаются как есть. ESC-последовательность
+// в ответе сервера иначе чистит экран, перекрашивает вывод или меняет
+// заголовок окна (OSC), а `\r` затирает напечатанное (аудит 23.10.2026).
+func termSafe(s string) string {
+	var b strings.Builder
+	for i, line := range strings.Split(s, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		for j, part := range strings.Split(line, "\t") {
+			if j > 0 {
+				b.WriteByte('\t')
+			}
+			b.WriteString(visible(part))
+		}
+	}
+	return b.String()
+}
+
+// termWriter пропускает всё, что пишут ключи, через termSafe. fmt.Fprint*
+// отдаёт строку одним Write, так что многобайтовый знак не рвётся.
+type termWriter struct{ w io.Writer }
+
+func (t termWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(t.w, termSafe(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// termError — ошибка ключа с текстом через termSafe: её печатает main
+// в stderr, а в ней бывают строки сервера. Цепочка (errors.Is/As) цела.
+type termError struct{ err error }
+
+func (e termError) Error() string { return termSafe(e.err.Error()) }
+func (e termError) Unwrap() error { return e.err }
+
+// termErr оборачивает err в termError; nil — nil.
+func termErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return termError{err}
 }
 
 // runMCPCall — один вызов инструмента через тот же охранник, что в TUI (В4):
@@ -80,7 +161,17 @@ func runMCPKey(f *cliFlags, hub *mcphub.Hub, guard *permissions.Guard, egressChe
 // (спросить некого, как у --ask --tools). При egressCheck
 // (agent.private_egress_check) частный адрес или имя хоста в доводах — запрет,
 // как у модели (agent.PrivateEgress): --mcp-yes его не снимает.
+//
+// Подключение (с ключом доступа) — не дольше mcpKeyTimeout; ответ и ошибка
+// сервера печатаются через termSafe.
 func runMCPCall(ctx context.Context, hub *mcphub.Hub, guard *permissions.Guard, egressCheck bool, server string, args []string,
+	yes bool, out, errOut io.Writer) error {
+	out, errOut = termWriter{out}, termWriter{errOut}
+	return termErr(mcpCall(ctx, hub, guard, egressCheck, server, args, yes, out, errOut))
+}
+
+// mcpCall — тело runMCPCall: писатели уже чистят вывод, ошибку чистит runMCPCall.
+func mcpCall(ctx context.Context, hub *mcphub.Hub, guard *permissions.Guard, egressCheck bool, server string, args []string,
 	yes bool, out, errOut io.Writer) error {
 	if len(args) < 1 || len(args) > 2 {
 		return errors.New("использование: --mcp-call <сервер> <инструмент> ['<доводы JSON>']")
@@ -93,8 +184,11 @@ func runMCPCall(ctx context.Context, hub *mcphub.Hub, guard *permissions.Guard, 
 	if err := json.Unmarshal([]byte(raw), &callArgs); err != nil || callArgs == nil {
 		return fmt.Errorf("--mcp-call: доводы должны быть объектом JSON, например '{\"query\":\"…\"}'")
 	}
-	fmt.Fprintf(errOut, "подключаюсь к серверу MCP %s…\n", server)
-	if err := hub.Reconnect(ctx, server); err != nil {
+	fmt.Fprintf(errOut, "подключаюсь к серверу MCP %s (не дольше %s)…\n", server, mcpKeyTimeout)
+	cctx, cancel := context.WithTimeout(ctx, mcpKeyTimeout)
+	err := hub.Reconnect(cctx, server)
+	cancel()
+	if err != nil {
 		return err
 	}
 	plan, err := hub.Plan(server, tool, callArgs)
@@ -179,6 +273,8 @@ func runKBRemoteCheck(cfg *config.Config, library remoteLibrary, hub *mcphub.Hub
 	if library == nil || strings.TrimSpace(cfg.KB.ServerURL) == "" {
 		return errors.New("--kb-remote-check: kb.server_url не задан — проверять нечего")
 	}
+	// Имена коллекций и книг, ответы службы — чужой текст для терминала.
+	out = termWriter{out}
 	question := strings.TrimSpace(strings.Join(args, " "))
 	if question == "" {
 		question = remoteCheckQuestion
@@ -254,15 +350,32 @@ func runKBRemoteCheck(cfg *config.Config, library remoteLibrary, hub *mcphub.Hub
 		}
 		return fmt.Sprintf("%s — ответ %d байт", name, len(text)), nil
 	})
+	// Шаги MCP: служба — сервер хаба под именем LibraryName. Пустое имя —
+	// служба не видна ключам (имя kb занято другим адресом; конфиг из файла
+	// такого не пропускает, а собранный кодом — может): отказ шага, а не
+	// Ping("") и Reconnect(""), который подключил бы ВСЕ сторонние серверы
+	// с их token_cmd (аудит 23.10.2026, находка 9). Ключ доступа и подключение
+	// — не дольше mcpKeyTimeout.
 	lib := hub.LibraryName()
-	step("MCP: рукопожатие", func() (string, error) {
+	mcpStep := func(name string, run func(ctx context.Context) (string, error)) {
+		step(name, func() (string, error) {
+			if lib == "" {
+				return "", fmt.Errorf("служба не видна ключам MCP: имя %s занято разделом [mcp.servers.%s] с другим адресом — "+
+					"назовите тот сервер иначе", mcphub.LibraryServer, mcphub.LibraryServer)
+			}
+			cctx, cancel := context.WithTimeout(ctx, mcpKeyTimeout)
+			defer cancel()
+			return run(cctx)
+		})
+	}
+	mcpStep("MCP: рукопожатие", func(ctx context.Context) (string, error) {
 		info, err := hub.Ping(ctx, lib)
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("ревизия %s, сервер %s %s", info.Protocol, info.ServerName, info.ServerVersion), nil
 	})
-	step("MCP: tools/list", func() (string, error) {
+	mcpStep("MCP: tools/list", func(ctx context.Context) (string, error) {
 		if err := hub.Reconnect(ctx, lib); err != nil {
 			return "", err
 		}

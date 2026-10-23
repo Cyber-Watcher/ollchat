@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"strings"
 	"testing"
 )
@@ -88,6 +89,60 @@ func TestStrayValuesRefused(t *testing.T) {
 		if err := checkCommandLine(newFlags(t, args...)); err == nil {
 			t.Errorf("%v: лишние значения приняты молча", args)
 		}
+	}
+}
+
+// Ключ команды с пустым значением — отказ, а не запуск интерфейса (аудит
+// 23.10.2026): `--mcp-ping=` не называл сервер, команда не считалась
+// запрошенной, и ollchat молча открывал TUI. Проверяются все команды таблицы,
+// которые берут значение, а не одна --mcp-ping.
+func TestEmptyCommandValueRefused(t *testing.T) {
+	var names []string
+	for _, c := range commands(newFlags(t)) {
+		fl := flag.CommandLine.Lookup(strings.TrimPrefix(c.name, "--"))
+		if fl == nil {
+			t.Errorf("команда %s: такого ключа нет", c.name)
+			continue
+		}
+		if b, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		names = append(names, c.name)
+	}
+	if len(names) < 10 {
+		t.Fatalf("команд со значением %d — таблица не та", len(names))
+	}
+	for _, name := range names {
+		for _, args := range [][]string{{name + "="}, {name, " "}} {
+			err := checkCommandLine(newFlags(t, args...))
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("%q: %v — пустое значение не отклонено", args, err)
+			}
+		}
+	}
+	// Значение, заданное как следует, отказа не даёт.
+	if err := checkCommandLine(newFlags(t, "--mcp-ping=wiki")); err != nil {
+		t.Errorf("--mcp-ping=wiki: %v", err)
+	}
+}
+
+// --mcp-yes подтверждает только вызов --mcp-call (аудит 23.10.2026): с другой
+// командой и без команды он пропускался молча, и человек думал, что
+// подтвердил то, чего не было.
+func TestMCPYesNeedsMCPCall(t *testing.T) {
+	for _, args := range [][]string{
+		{"--mcp-yes"},
+		{"--ask", "вопрос", "--tools", "--mcp-yes"},
+		{"--mcp-servers", "--mcp-yes"},
+		{"--mcp-ping=wiki", "--mcp-yes"},
+	} {
+		err := checkCommandLine(newFlags(t, args...))
+		if err == nil || !strings.Contains(err.Error(), "--mcp-yes") || !strings.Contains(err.Error(), "--mcp-call") {
+			t.Errorf("%q: %v", args, err)
+		}
+	}
+	if err := checkCommandLine(newFlags(t, "--mcp-call=wiki", "echo", "--mcp-yes")); err != nil {
+		t.Errorf("--mcp-call с --mcp-yes отклонён: %v", err)
 	}
 }
 

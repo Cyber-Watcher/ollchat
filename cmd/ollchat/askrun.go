@@ -427,6 +427,7 @@ func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 		SemanticWeight:     cfg.KB.SemanticWeight,
 		Semantic:           cfg.KB.Semantic,
 		QueryTimeout:       cfg.KB.QueryTimeoutDuration(),
+		ServiceTimeout:     cfg.KB.ServerTimeoutDuration(), // срок карты и книг от службы (находка 12 аудита 23.10)
 		AnswerStyle:        cfg.KB.AnswerStyle,
 		QuotesWithoutTools: cfg.Mix.QuotesWithoutTools,
 		RerankOpts: kb.RerankOpts{
@@ -558,13 +559,9 @@ func askOpenKB(cfg *config.Config, o askOpts) (*kb.Collection, *graph.Graph, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("база знаний: %w", err)
 	}
-	name := askCollection(cfg, o)
-	if name == "" {
-		names, err := base.Names()
-		if err != nil || len(names) == 0 {
-			return nil, nil, fmt.Errorf("коллекция не задана: укажите --kb-use или kb.default")
-		}
-		name = names[0]
+	name, err := askLocalName(base, askCollection(cfg, o))
+	if err != nil {
+		return nil, nil, err
 	}
 	coll, err := base.Open(name)
 	if err != nil {
@@ -588,18 +585,16 @@ func askRemoteMix(cfg *config.Config, o askOpts, question string, deps mixer.Dep
 	name := askCollection(cfg, o)
 	lib := kb.Fallback{Remote: o.library}
 	if o.base != nil {
-		// Своя коллекция выбирается так же, как в askOpenKB: названная, иначе первая.
-		local := name
-		if local == "" {
-			if names, err := o.base.Names(); err == nil && len(names) > 0 {
-				local = names[0]
-			}
-		}
+		// Своя коллекция выбирается так же, как в askOpenKB: названная или
+		// единственная. Несколько без kb.default — отказ с перечнем, как в TUI
+		// (localCollection), а не молча первая (аудит 23.10.2026): ответ по чужой
+		// коллекции выглядел бы ответом по нужной.
+		local, lerr := askLocalName(o.base, name)
 		lib.Local, lib.Default = o.base, local
 		base := o.base
 		deps.LocalGraph = mixer.CachedGraph(o.graphCache, cfg.Graph.Rules(), func() (*kb.Collection, error) {
-			if local == "" {
-				return nil, fmt.Errorf("коллекция не задана: укажите --kb-use или kb.default")
+			if lerr != nil {
+				return nil, lerr
 			}
 			return base.Open(local)
 		})
@@ -615,7 +610,33 @@ func askRemoteMix(cfg *config.Config, o askOpts, question string, deps mixer.Dep
 	if set.Collection == "" {
 		set.Collection = src.Name()
 	}
-	return mixer.Build(question, deps, set)
+	out := mixer.Build(question, deps, set)
+	if kb.Fell(src) {
+		// По какой своей коллекции искал — в заметке: в прогоне --ask её видно
+		// только отсюда.
+		out.Remote += "; своя коллекция " + src.Name()
+	}
+	return out
+}
+
+// askLocalName — своя коллекция для --ask: названная (--kb-use, kb.default)
+// или единственная. Несколько без названной — отказ с перечнем, как в TUI.
+func askLocalName(base *kb.Base, name string) (string, error) {
+	if name = strings.TrimSpace(name); name != "" {
+		return name, nil
+	}
+	names, err := base.Names()
+	if err != nil {
+		return "", fmt.Errorf("база знаний: %w", err)
+	}
+	switch len(names) {
+	case 0:
+		return "", fmt.Errorf("коллекция не задана и своих коллекций нет: укажите --kb-use или kb.default")
+	case 1:
+		return names[0], nil
+	}
+	return "", fmt.Errorf("коллекция не задана: укажите --kb-use или kb.default (своих коллекций %d: %s)",
+		len(names), strings.Join(names, ", "))
 }
 
 // askQuestions — откуда брать вопросы: ключ, файл или стандартный ввод.

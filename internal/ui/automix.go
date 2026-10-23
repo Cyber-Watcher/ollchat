@@ -51,6 +51,12 @@ type mixJob struct {
 	// недоступной службы (А4); nil — подмес по своим файлам.
 	lib  kb.Library
 	name string
+
+	// cached — свой граф из общего кэша графов на один подмес: положение
+	// local при общей библиотеке (/kb source, этап 121, Д3). Граф в модель
+	// не ложится, и после возврата на службу его закроет простой кэша. nil —
+	// граф даёт graphOpen или открытие в команде, как без службы.
+	cached func() (*graph.Graph, func(), error)
 }
 
 // needsOpen сообщает, что команде придётся открывать граф — это десятки секунд.
@@ -80,7 +86,7 @@ type mixReadyMsg struct {
 // mixPlan снимает с модели всё, что нужно подмешиванию. Быстрое: чтение полей.
 // Второе значение — есть ли что подмешивать вообще.
 func (m *Model) mixPlan() (mixJob, bool) {
-	remote := m.kb.lib != nil
+	remote := m.viaService()
 	if !remote && (m.kb.use == "" || m.kb.base == nil) {
 		return mixJob{}, false
 	}
@@ -127,6 +133,7 @@ func (m *Model) mixPlan() (mixJob, bool) {
 			SemanticWeight:     semWeight,
 			Semantic:           m.cfg.KB.Semantic,
 			QueryTimeout:       m.cfg.KB.QueryTimeoutDuration(),
+			ServiceTimeout:     m.cfg.KB.ServerTimeoutDuration(), // срок карты и книг от службы (находка 12 аудита 23.10)
 			AnswerStyle:        m.cfg.KB.AnswerStyle,
 			QuotesWithoutTools: m.cfg.Mix.QuotesWithoutTools,
 			RerankOpts: kb.RerankOpts{
@@ -139,6 +146,17 @@ func (m *Model) mixPlan() (mixJob, bool) {
 	}
 	if remote {
 		m.planRemote(&job)
+		return job, true
+	}
+	if m.kb.lib != nil {
+		// Положение local при службе (/kb source): свои файлы, граф — из
+		// общего кэша на один подмес, как на запасном пути; в модель не ложится.
+		job.graphStamp = -1
+		job.deps.Coll = coll
+		if job.deps.GraphOn {
+			job.cached = mixer.CachedGraph(m.gr.cache, m.cfg.Graph.Rules(),
+				func() (*kb.Collection, error) { return coll, nil })
+		}
 		return job, true
 	}
 	dir := coll.Dir()
@@ -173,8 +191,12 @@ func (m *Model) planRemote(job *mixJob) {
 		// единственной (рецензия этапа 121).
 		job.name, job.set.Collection = "", ""
 	}
-	lib := kb.Fallback{Remote: m.kb.lib, Default: m.cfg.KB.Default}
-	if base := m.kb.base; base != nil {
+	// Положение service (/kb source): запасного пути нет — ни своих книг,
+	// ни своего графа, а заметка говорит почему.
+	mode := m.kbMode()
+	job.deps.ServiceOnly = mode == kb.SourceService
+	lib := kb.Fallback{Remote: m.kb.lib, Default: m.cfg.KB.Default, Mode: mode}
+	if base := m.kb.base; base != nil && mode == kb.SourceAuto {
 		lib.Local = base
 		name, def := m.kb.use, m.cfg.KB.Default
 		job.deps.LocalGraph = mixer.CachedGraph(m.gr.cache, m.cfg.Graph.Rules(),
@@ -238,6 +260,17 @@ func runMixCmd(gen int, question string, job mixJob, prog chan<- graph.OpenProgr
 			}
 			// Молча: отсутствие графа не ошибка, а несовпадение с уплотнённой
 			// коллекцией объяснено там, где графом пользуются осознанно.
+		}
+		if g == nil && job.cached != nil {
+			// Свой граф из кэша (положение local) — отпускается после подмеса;
+			// нет графа — молча, как выше.
+			cg, release, err := job.cached()
+			if err == nil && cg != nil {
+				g = cg
+				defer release()
+			} else if release != nil {
+				release()
+			}
 		}
 		job.deps.Graph = g
 		query := question

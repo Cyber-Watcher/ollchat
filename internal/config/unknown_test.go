@@ -77,6 +77,48 @@ nested = { a = 1 }
 	}
 }
 
+// Предупреждение подсказывает, что имелось в виду (аудит 23.10.2026):
+// `enable = false` оставлял сервер включённым, `[[mcp.servers]]` давал ноль
+// серверов, и из «неизвестный ключ» не было видно, как написать верно.
+func TestUnknownKeyHints(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string // что обязано быть в единственном предупреждении
+	}{
+		{"опечатка ключа сервера", "[mcp.servers.wiki]\nurl = \"http://mcp.example/mcp\"\nenable = false\n",
+			[]string{"mcp.servers.wiki.enable ", "имелось в виду mcp.servers.wiki.enabled?"}},
+		{"опечатка раздела", "[mcp.server.wiki]\nurl = \"http://mcp.example/mcp\"\n",
+			[]string{"mcp.server.wiki", "имелось в виду mcp.servers?"}},
+		{"лишняя буква", "[kb]\ntop_kk = 3\n", []string{"kb.top_kk ", "имелось в виду kb.top_k?"}},
+		{"подраздел графа", "[graph.lab]\nmodle = \"x\"\n", []string{"graph.lab.modle ", "имелось в виду graph.lab.model?"}},
+		{"массив вместо разделов", "[[mcp.servers]]\nname = \"wiki\"\nurl = \"http://mcp.example/mcp\"\nallow = [\"echo\"]\n",
+			[]string{"[mcp.servers.<имя>]", "[[mcp.servers]]", "mcp.servers.url"}},
+	}
+	for _, c := range cases {
+		cfg, err := writeConfig(t, c.body)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if len(cfg.Warnings) != 1 {
+			t.Errorf("%s: предупреждений %d, ждали одно: %q", c.name, len(cfg.Warnings), cfg.Warnings)
+			continue
+		}
+		for _, w := range c.want {
+			if !strings.Contains(cfg.Warnings[0], w) {
+				t.Errorf("%s: в предупреждении нет %q: %s", c.name, w, cfg.Warnings[0])
+			}
+		}
+	}
+	// Далёкое от всех ключей — без подсказки, а не с первой попавшейся.
+	cfg, err := writeConfig(t, "[permissions]\ndeny_list = [\"Bash(rm:*)\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Warnings) != 1 || strings.Contains(cfg.Warnings[0], "имелось в виду") {
+		t.Errorf("подсказка к далёкому ключу: %q", cfg.Warnings)
+	}
+}
+
 // Образец из --init-config чист: предупреждение о нём с первого запуска
 // приучило бы предупреждения не читать.
 func TestTemplateHasNoUnknownKeys(t *testing.T) {

@@ -167,6 +167,100 @@ func addTestGraph(t *testing.T, base *kb.Base) {
 	}
 }
 
+// liveService — служба отвечает: книги отдаёт src; queued — сколько её
+// вызовы ждали очереди (kb.Queued).
+type liveService struct {
+	src    kb.Source
+	queued time.Duration
+}
+
+func (s liveService) Names() ([]string, error) { return []string{"test"}, nil }
+func (s liveService) Source(string) (kb.Source, error) {
+	return queuedSource{Source: s.src, queued: s.queued}, nil
+}
+
+type queuedSource struct {
+	kb.Source
+	queued time.Duration
+}
+
+func (q queuedSource) Queued() time.Duration { return q.queued }
+
+// kb_search при живой службе и kb.expand_limit > 0 своего графа не открывает:
+// дополнять запрос нечем, и это обещает комментарий graphEntities (аудит
+// 23.10.2026). Прежде граф открывался на каждый вызов — гигабайт памяти
+// при службе, которая держит граф ради того, чтобы его не держал клиент.
+func TestKBSearchExpandSkipsOwnGraphWithLiveService(t *testing.T) {
+	_, base, baseDir := newKBRegistry(t)
+	addTestGraph(t, base)
+	coll, err := base.Open("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := graph.NewCache(time.Minute, graph.Rules{})
+	defer cache.Close()
+
+	o := Options{Library: liveService{src: coll}, KB: base, KBDir: baseDir, KBDefault: "test",
+		KBTopK: 5, KBMaxPerBook: 3, MaxOutputKB: 64, GraphCache: cache, KBExpandLimit: 3}
+	reg, err := NewRegistry([]string{NameKBSearch}, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reg.Plan(NameKBSearch, map[string]any{"query": "goroutines channels"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plan.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cache.Len() != 0 {
+		t.Errorf("kb_search при живой службе открыл свой граф (kb.expand_limit = 3): графов в кэше %d", cache.Len())
+	}
+
+	// Без службы дополнение по своему графу на месте.
+	o.Library = nil
+	reg, err = NewRegistry([]string{NameKBSearch}, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan, err = reg.Plan(NameKBSearch, map[string]any{"query": "goroutines channels"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plan.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cache.Len() == 0 {
+		t.Error("без службы kb_search перестал дополнять запрос своим графом")
+	}
+}
+
+// Служба дождалась места в очереди — выдача kb_search говорит, сколько ждала
+// (решение владельца 23.10.2026), и журнал шагов это видит (Plan.Note).
+func TestKBSearchReportsQueue(t *testing.T) {
+	_, base, baseDir := newKBRegistry(t)
+	coll, err := base.Open("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Options{Library: liveService{src: coll, queued: 2300 * time.Millisecond}, KB: base, KBDir: baseDir,
+		KBDefault: "test", KBTopK: 5, KBMaxPerBook: 3, MaxOutputKB: 64}
+	reg, err := NewRegistry([]string{NameKBSearch}, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reg.Plan(NameKBSearch, map[string]any{"query": "goroutines channels"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := plan.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "(служба занята: ждал в очереди 2300 мс)") || plan.Note == "" {
+		t.Errorf("выдача молчит об очереди службы (note %q):\n%s", plan.Note, out)
+	}
+}
+
 // Инструмент графа: служба молчит — тот же вызов исполняет местный
 // инструмент, и граф берётся из общего кэша графов (закроет его простой),
 // а не открывается навсегда.

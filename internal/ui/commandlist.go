@@ -87,6 +87,7 @@ var commands = []cmdInfo{
 		{Name: "merge", Alias: []string{"compact"}, Args: "<имя>", Desc: "уплотнить хранилище, освободив место удалённых"},
 		{Name: "doctor", Args: "<имя>", Desc: "показать тихие потери в коллекции"},
 		{Name: "auto", Args: "on|off", Desc: "подмешивать найденное перед каждым вопросом"},
+		{Name: "source", Args: "[auto|service|local]", Desc: "кто ищет при kb.server_url: служба с запасным путём, только служба или свои файлы"},
 		{Name: "new", Args: "<имя> [описание]", Desc: "создать пустую коллекцию"},
 		{Name: "reindex", Alias: []string{"перечитать"}, Args: "<имя> <путь>", Desc: "перечитать книги заново"},
 		{Name: "style", Alias: []string{"стиль"}, Desc: "как модель отвечает по книгам: действующая политика"},

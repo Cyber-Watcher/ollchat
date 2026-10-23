@@ -133,7 +133,11 @@ func (t *kbSearchTool) run(ctx context.Context, coll kb.Source, name, query, boo
 		}
 	}
 	search := query
-	if o.ExpandLimit > 0 {
+	// Свой граф для дополнения — только без службы, в положении local или на
+	// запасном пути, когда она не ответила: при живой службе своего графа не
+	// открываем (этап 121 — «свой граф не открывается»), и дополнять запрос
+	// нечем (аудит 23.10.2026).
+	if o.ExpandLimit > 0 && t.opts.ownFiles(coll) {
 		search = find.Expand(query, graphEntities(t.opts, name, query, o.ExpandLimit), o)
 	}
 
@@ -331,10 +335,21 @@ func readHeader(parts []kb.Result) string {
 // хранилища организации. Инструменты графа так не умеют и берут коллекцию
 // напрямую — графу нужны файлы (`graphOpen` в graph.go).
 func (o Options) collection(name string) (kb.Source, error) {
-	if o.Library != nil {
+	if o.Library != nil && o.LibraryMode.Mode() != kb.SourceLocal {
 		return o.library(name)
 	}
 	return o.localSource(name)
+}
+
+// ownFiles сообщает, что источник ищет по своим файлам: библиотеки нет,
+// положение local (/kb source) или служба не ответила и kb.Fallback перешёл
+// на свои. Тогда и запрос дополняется именами понятий своего графа.
+func (o Options) ownFiles(src kb.Source) bool {
+	if o.Library == nil || kb.Fell(src) {
+		return true
+	}
+	_, own := src.(*kb.Collection)
+	return own
 }
 
 // localSource открывает свою коллекцию: названную, выбранную пользователем
@@ -378,7 +393,7 @@ func (o Options) library(name string) (kb.Source, error) {
 	if name == "" {
 		name = o.KBDefault
 	}
-	lib := kb.Fallback{Remote: o.Library, Default: o.KBDefault}
+	lib := kb.Fallback{Remote: o.Library, Default: o.KBDefault, Mode: o.LibraryMode.Mode()}
 	if o.KB != nil {
 		lib.Local = o.KB
 	}
@@ -387,13 +402,22 @@ func (o Options) library(name string) (kb.Source, error) {
 
 // fallbackOut помечает выдачу инструмента, который искал по своим файлам
 // вместо недоступной службы: строка в начале — модели и человеку в ленте,
-// Plan.Note — журналу шагов (этап 121, А4).
+// Plan.Note — журналу шагов (этап 121, А4). Так же помечается ожидание
+// в очереди службы (решение владельца 23.10.2026: «сообщать в выводе об
+// очереди»).
 func fallbackOut(p *Plan, src kb.Source, out string) string {
-	if !kb.Fell(src) {
+	note := ""
+	switch {
+	case kb.Fell(src):
+		note = kb.FallbackNote
+	default:
+		note = kb.QueueNote(kb.Queued(src))
+	}
+	if note == "" {
 		return out
 	}
-	p.Note = kb.FallbackNote
-	return "(" + kb.FallbackNote + ")\n" + out
+	p.Note = note
+	return "(" + note + ")\n" + out
 }
 
 // argStringOr возвращает строковый аргумент или значение по умолчанию.

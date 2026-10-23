@@ -122,6 +122,11 @@ func graphOverNetwork(opts Options, name string, err error) error {
 	if opts.Library == nil {
 		return err // обычная работа с файлами — отказ и так по существу
 	}
+	if opts.LibraryMode.Mode() == kb.SourceLocal {
+		// Свои файлы выбрал человек (/kb source local), служба тут ни при чём.
+		return fmt.Errorf("положение local (/kb source): коллекции %q среди своих файлов нет: %w; "+
+			"у службы — /kb source auto", name, err)
+	}
 	return fmt.Errorf("граф понятий идёт через общую библиотеку, а здесь понадобились "+
 		"свои файлы (служба не ответила), и коллекции %q среди них нет.\n"+
 		"Сейчас: kb_search и инструменты графа работают через службу, пока она отвечает "+

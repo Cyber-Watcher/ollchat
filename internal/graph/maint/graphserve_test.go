@@ -2,11 +2,13 @@ package maint
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,5 +176,98 @@ func TestGraphServiceSearchReturnsChain(t *testing.T) {
 	ends := map[string]bool{first.From: true, last.To: true}
 	if !ends["горутина"] || !ends["рантайм"] {
 		t.Errorf("цепочка не между понятиями вопроса: %+v", resp.Chain)
+	}
+}
+
+// Ушёл клиент — служба не ждёт за него эмбеддер и отпускает место в очереди
+// тяжёлых запросов (аудит 23.10.2026, находка 12): прежде вектор вопроса
+// считался с context.Background() и держал место до тридцати секунд.
+func TestGraphServiceSearchHonorsClientContext(t *testing.T) {
+	finished := make(chan struct{})
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-finished:
+		case <-time.After(40 * time.Second):
+		}
+	}))
+	defer stuck.Close()
+	defer close(finished) // раньше Close: висящий эмбеддер отпускается сразу
+
+	svc := serveFixture(t)
+	svc.Cfg.KB.EmbedModel = "bge-m3"
+	svc.Cfg.Servers = []config.Server{{Name: "gpu", URL: stuck.URL}}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := svc.Search(ctx, kbserve.GraphSearchRequest{Collection: "books",
+		Query: fmt.Sprintf("горутина ушедший клиент %d", time.Now().UnixNano())})
+	if took := time.Since(started); took > 5*time.Second {
+		t.Errorf("служба ждала эмбеддер %v после ухода клиента (срок клиента 300 мс)", took.Round(time.Millisecond))
+	}
+	if err == nil {
+		t.Error("запрос ушедшего клиента досчитан до конца")
+	}
+}
+
+// Год связи — самой свежей книги среди её книг (Books), а без них — среди
+// подтверждений; связи без года — 0; ни одного года — nil (поле не уходит).
+func TestRelationYears(t *testing.T) {
+	src := yearChunks{{Doc: 1, Ord: 1}: 2015, {Doc: 2, Ord: 1}: 2021, {Doc: 3, Ord: 1}: 2019}
+	rels := []graph.FoundRelation{
+		{Books: []graph.ChunkKey{{Doc: 1, Ord: 1}, {Doc: 2, Ord: 1}}},
+		{Evidences: []graph.ChunkKey{{Doc: 3, Ord: 1}}},
+		{Books: []graph.ChunkKey{{Doc: 9, Ord: 9}}},
+	}
+	got := RelationYears(src, rels)
+	if len(got) != 3 || got[0] != 2021 || got[1] != 2019 || got[2] != 0 {
+		t.Errorf("годы связей %v, ждали [2021 2019 0]", got)
+	}
+	if got := RelationYears(src, rels[2:]); got != nil {
+		t.Errorf("без единого года — %v, ждали nil", got)
+	}
+}
+
+type yearChunks map[graph.ChunkKey]int
+
+func (y yearChunks) ChunkByRef(doc, ord uint32) (kb.ChunkInfo, bool) {
+	year, ok := y[graph.ChunkKey{Doc: doc, Ord: ord}]
+	ci := kb.ChunkInfo{Doc: doc, Ord: ord}
+	ci.Book.Year = year
+	return ci, ok
+}
+
+// Вход /api/v1/find — /search клиента с kb.server_url: служба ищет по своему
+// графу и книгам тем же find.Search и печатает тем же find.Render; без графа
+// (/kb search) — одни выдержки со строкой об этом.
+func TestFindEndpoint(t *testing.T) {
+	svc := serveFixture(t)
+	mux := kbserve.Handler(kbserve.Opts{Base: svc.Base, Graph: svc})
+	post := func(body string) kbserve.FindResponse {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/find", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("код %d: %s", w.Code, w.Body.String())
+		}
+		var resp kbserve.FindResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	resp := post(`{"collection":"books","query":"горутина канал рантайм","graph":true,"entities":6}`)
+	if len(resp.Result.Entities) == 0 || len(resp.Result.Excerpts) == 0 ||
+		!strings.Contains(resp.Text, "горутина") || !strings.HasPrefix(resp.Text, "Найдено по") {
+		t.Errorf("выдача /search службы: понятий %d, выдержек %d\n%s",
+			len(resp.Result.Entities), len(resp.Result.Excerpts), resp.Text)
+	}
+	resp = post(`{"collection":"books","query":"goroutines","rerank":true}`)
+	if len(resp.Result.Entities) != 0 || !strings.Contains(resp.Text, "граф коллекции не собран") {
+		t.Errorf("/kb search службы зашёл в граф или молчит об этом:\n%s", resp.Text)
+	}
+	if !strings.Contains(resp.Note, "переранжирование") {
+		t.Errorf("ключ -r без второй ступени у службы — без оговорки: %q", resp.Note)
 	}
 }

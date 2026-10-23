@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,11 +26,16 @@ import (
 // Правила слияния (выбор владельца): ключи проекта заменяют общие, а четыре
 // списка правил [permissions] — allow, ask, deny, irreversible — СКЛАДЫВАЮТСЯ
 // с общими: проект не может снять общий запрет или вычеркнуть необратимое.
+// Серверы MCP [mcp.servers.<имя>] тоже складываются с общими — по имени
+// (mergeMCPServers, аудит 23.10.2026): раньше один свой сервер в проекте молча
+// убирал все общие.
 // Раздел [graph] проекту не даётся: граф общий для всех проектов и стоит недель
 // работы видеокарты (закон 1) — его настройки живут только в общем конфиге.
 //
 // Доверие (выбор владельца): конфиг проекта может включить yolo, расширить
-// allow, сменить сервер — скачанный чужой проект сделал бы это за человека.
+// allow, сменить сервер, завести сервер MCP со своим token_cmd (команда
+// исполнится при подключении) и allow (его инструменты пойдут без вопроса) —
+// скачанный чужой проект сделал бы это за человека.
 // Поэтому он читается только после ответа «да» на вопрос при запуске; ответ
 // помнится по пути и отпечатку файла (TrustFile), и правка файла спрашивает снова.
 
@@ -106,6 +112,7 @@ func (c *Config) ApplyProject(path string, data []byte) error {
 	global := Permissions{Allow: slices.Clone(c.Permissions.Allow), Ask: slices.Clone(c.Permissions.Ask),
 		Deny: slices.Clone(c.Permissions.Deny), Irreversible: slices.Clone(c.Permissions.Irreversible)}
 	graphBefore, namedBefore := c.Graph, c.GraphNamed
+	globalMCP := maps.Clone(c.MCP.Servers)
 	// Декодер TOML пишет массив в уже заполненный срез поверх старых элементов и
 	// не укорачивает его: `allow = ["Bash(make:*)"]` заменял первое общее правило,
 	// а семь остальных оставались (поймал TestApplyProjectOverridesAndMerges).
@@ -133,6 +140,9 @@ func (c *Config) ApplyProject(path string, data []byte) error {
 		if md.IsDefined("permissions", l.key) {
 			*l.dst = union(l.global, *l.dst)
 		}
+	}
+	if md.IsDefined("mcp", "servers") {
+		c.MCP.Servers = mergeMCPServers(globalMCP, c.MCP.Servers, md)
 	}
 	for _, name := range []string{"kb", "mix", "confluence", "web", "mcp"} {
 		if md.IsDefined(name) && !slices.Contains(c.sections, name) {
@@ -174,6 +184,43 @@ func resetDefined(v reflect.Value, doc toml.MetaData, path []string) {
 			resetDefined(fv, doc, p)
 		}
 	}
+}
+
+// mergeMCPServers складывает серверы MCP проекта (project, разобраны из md)
+// с общими (global) по имени: новый сервер добавляется, у сервера с именем
+// общего меняются только ключи, заданные в проекте. Источник ключа доступа
+// (token_file|token_env|token_cmd) берётся из проекта целиком: берётся первый
+// заданный, и token_env проекта при общем token_file иначе молча проиграл бы.
+func mergeMCPServers(global, project map[string]MCPServer, md toml.MetaData) map[string]MCPServer {
+	out := maps.Clone(global)
+	if out == nil {
+		out = map[string]MCPServer{}
+	}
+	for name, ps := range project {
+		gs, ok := global[name]
+		if !ok {
+			out[name] = ps
+			continue
+		}
+		gv, pv := reflect.ValueOf(&gs).Elem(), reflect.ValueOf(ps)
+		token := false
+		for i := 0; i < gv.NumField(); i++ {
+			key, _, _ := strings.Cut(gv.Type().Field(i).Tag.Get("toml"), ",")
+			if !md.IsDefined("mcp", "servers", name, key) {
+				continue
+			}
+			if strings.HasPrefix(key, "token_") {
+				token = true
+				continue
+			}
+			gv.Field(i).Set(pv.Field(i))
+		}
+		if token {
+			gs.TokenFile, gs.TokenEnv, gs.TokenCmd = ps.TokenFile, ps.TokenEnv, ps.TokenCmd
+		}
+		out[name] = gs
+	}
+	return out
 }
 
 // union — сначала общие правила, затем новые из проекта, без повторов.

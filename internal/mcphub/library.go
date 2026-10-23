@@ -24,11 +24,17 @@ func LibrarySearch(ctx context.Context, k config.KB, version string) (tools.Remo
 	if u == "" {
 		return nil, nil
 	}
+	// Ключ в адресе не поддерживается (решение владельца 23.10.2026): конфиг
+	// такой адрес отвергает при загрузке, а здесь — вторая проверка, до
+	// команды за ключом, как в kbremote.FromConfig.
+	if err := kbremote.CheckURL(u); err != nil {
+		return nil, err
+	}
 	token, err := kbremote.Token(ctx, k)
 	if err != nil {
 		return nil, err
 	}
-	c, err := mcpclient.New(mcpclient.Opts{Server: "библиотеки", URL: strings.TrimRight(u, "/") + "/mcp",
+	c, err := mcpclient.New(mcpclient.Opts{Server: "библиотеки", URL: libraryURL(u),
 		Token: token, Timeout: k.ServerTimeoutDuration(), Version: version})
 	if err != nil {
 		return nil, err
@@ -50,7 +56,7 @@ func (l libraryCaller) CallTool(ctx context.Context, name string, args map[strin
 		return "", err
 	}
 	if res.IsError {
-		return "", fmt.Errorf("служба библиотеки: %s", oneLine(res.Text))
+		return "", fmt.Errorf("служба библиотеки: %s", OneLine(res.Text))
 	}
 	return res.Text, nil
 }

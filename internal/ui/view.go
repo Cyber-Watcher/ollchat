@@ -368,6 +368,13 @@ func (m *Model) statusView() string {
 		segments = append(segments, style.Render(name))
 	}
 
+	// Положение /kb source — только при общей библиотеке (kb.server_url): кто
+	// сейчас ищет по книгам и графу. Без значка человек, переключивший на local,
+	// забыл бы об этом и удивлялся, почему служба не видит новых книг.
+	if s := m.sourceStatus(); s != "" {
+		segments = append(segments, styStatus.Render(s))
+	}
+
 	// Сколько памяти держит открытый граф. Значок появляется только когда граф
 	// открыт: закрытый памяти не занимает.
 	if s := m.graphMemoryStatus(); s != "" {
