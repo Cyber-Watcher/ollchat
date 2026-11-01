@@ -312,6 +312,7 @@ type cliFlags struct {
 	mcpYes        *bool
 	mcpRegistry   *bool
 	kbRemoteCheck *bool
+	kbSource      *string
 
 	// args — значения командной строки, не относящиеся к ключам: пути книг
 	// у --kb-index и --kb-reindex, всё после «--» у подкоманд. Вместо
@@ -786,6 +787,9 @@ func parseFlagsNoParse() *cliFlags {
 	f.kbRemoteCheck = flag.Bool("kb-remote-check", false,
 		"проверить общую библиотеку (kb.server_url) без интерфейса: коллекции, книги, поиск, карта,\n"+
 			"инструмент графа, MCP — со временем каждого шага: --kb-remote-check [вопрос]")
+	f.kbSource = flag.String("kb-source", "",
+		"откуда брать книги и граф при kb.server_url, как /kb source: auto — служба, при отказе свои файлы;\n"+
+			"service — только служба; local — свои файлы и свой граф. Для интерфейса и --ask")
 	flag.Usage = usage
 	return f
 }
@@ -1017,6 +1021,9 @@ func checkCommandLine(f *cliFlags) error {
 	if err := checkMCPYes(f); err != nil {
 		return err
 	}
+	if err := checkKBSource(f); err != nil {
+		return err
+	}
 	return checkDryRun(f)
 }
 
@@ -1043,6 +1050,81 @@ func checkMCPYes(f *cliFlags) error {
 		return errors.New("--mcp-yes действует только с --mcp-call: он подтверждает вызов инструмента, " +
 			"которому правила велят спросить; с другой командой и без команды ему нечего подтверждать")
 	}
+	return nil
+}
+
+// checkKBSource — --kb-source (этап 121, Д3) ставит положение /kb source
+// интерфейсу и --ask; прочие команды библиотеку через службу не берут, и молча
+// пропущенный ключ выглядел бы выполненным (как --mcp-yes).
+//
+// У --serve положение решает правило (serveSource): работающая служба по
+// kb.server_url — отказ, молчащая — свои файлы. Выбирать нечего, а явный
+// local отказ не снимает (решение владельца 31.10.2026).
+func checkKBSource(f *cliFlags) error {
+	if *f.kbSource == "" {
+		return nil
+	}
+	if _, err := kb.ParseSourceMode(*f.kbSource); err != nil {
+		return fmt.Errorf("--kb-source: %w", err)
+	}
+	for _, c := range requested(f) {
+		switch c.name {
+		case "--ask", "--ask-stdin", "--questions":
+		case "--serve":
+			return errors.New("--kb-source с --serve не задаётся: при kb.server_url служба решает сама — " +
+				"работающая служба по адресу означает отказ (граф не держится в памяти дважды), " +
+				"молчащая — работу по своим файлам")
+		default:
+			return fmt.Errorf("--kb-source действует в интерфейсе и с --ask; %s его не берёт", c.name)
+		}
+	}
+	return nil
+}
+
+// applyKBSource ставит положение из --kb-source: у --ask команды /kb source
+// нет, а интерфейсу так задаётся положение с запуска. Без службы
+// положение всегда local, и «только служба» — отказ: искать было бы негде.
+func applyKBSource(value string, library kb.Library, sw *kb.SourceSwitch) error {
+	if value == "" {
+		return nil
+	}
+	mode, err := kb.ParseSourceMode(value)
+	if err != nil {
+		return fmt.Errorf("--kb-source: %w", err)
+	}
+	switch {
+	case library != nil:
+		sw.Set(mode)
+	case mode == kb.SourceService:
+		return errors.New("--kb-source service: kb.server_url не задан — службы нет, искать негде")
+	}
+	return nil
+}
+
+// serveSource решает, по чему служить --serve при заданном kb.server_url
+// (этап 121, Д2, решение владельца 31.10.2026).
+//
+// Служба по адресу отвечает — отказ: она уже держит граф, и вторая служба
+// держала бы его в памяти дважды. Любой ответ, кроме «не достучался»
+// (kb.ErrUnreachable), — ключ не подошёл, очередь полна — тоже значит, что
+// служба жива. Не отвечает — служим по своим файлам: положение local, служба
+// не спрашивается, и петли «служба сама в себя» на том же адресе нет.
+func serveSource(library kb.Library, url string, sw *kb.SourceSwitch, warn io.Writer) error {
+	if library == nil {
+		return nil
+	}
+	_, err := library.Names()
+	if err == nil || !errors.Is(err, kb.ErrUnreachable) {
+		why := ""
+		if err != nil {
+			why = " (ответила: " + err.Error() + ")"
+		}
+		return fmt.Errorf("по kb.server_url (%s) уже работает служба библиотеки%s — используйте её (ollmcp): "+
+			"вторая служба держала бы граф в памяти дважды. Служить по своим файлам — уберите kb.server_url "+
+			"из файла настроек", url, why)
+	}
+	sw.Set(kb.SourceLocal)
+	fmt.Fprintf(warn, "ollchat --serve: служба по kb.server_url (%s) не отвечает — служу по своим файлам\n", url)
 	return nil
 }
 
@@ -1608,6 +1690,9 @@ func run() error {
 	if library != nil {
 		libMode.Set(kb.SourceAuto)
 	}
+	if err := applyKBSource(*f.kbSource, libraryOrNil(library), libMode); err != nil {
+		return err
+	}
 
 	// Кэш открытых графов один на программу: у инструментов модели и у поиска
 	// в интерфейсе он общий, иначе в памяти жили бы два одинаковых графа.
@@ -1764,6 +1849,7 @@ func run() error {
 			registry: registry, guard: guard,
 			// Подмес через общую библиотеку, свои файлы — запасным путём (этап 121).
 			library: libraryOrNil(library), graphCache: graphCache, base: base,
+			mode: libMode.Mode(),
 		})
 	}
 
@@ -1771,6 +1857,9 @@ func run() error {
 	// реестр инструментов, что у диалога: клиент обязан получить ровно ту
 	// выдачу, которую увидел бы, работая с файлами.
 	if *f.serveAddr != "" {
+		if err := serveSource(libraryOrNil(library), cfg.KB.ServerURL, libMode, os.Stderr); err != nil {
+			return err
+		}
 		return runServe(cfg, *f.serveAddr, *f.serveMCP, registry, base, gmaint.CacheFor(cfg, time.Hour))
 	}
 

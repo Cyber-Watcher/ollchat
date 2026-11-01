@@ -81,3 +81,45 @@ func TestGraphSearchContract(t *testing.T) {
 		t.Errorf("отрицательный размер дошёл до графа: %+v", g.got)
 	}
 }
+
+// Живые настройки клиента (этап 121, Д4) доходят до графа: смысловой вход,
+// вес и пул ранжирования связей. Вес ноль — осмысленное «не пересортировывать»,
+// пул — в пределах службы, отрицательный вес — отказ до очереди и до графа.
+func TestGraphSearchPassesClientRank(t *testing.T) {
+	base, err := kb.OpenBase(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &recordingGraph{}
+	mux := Handler(Opts{Base: base, Graph: g})
+
+	w := postGraphSearch(t, mux, `{"collection":"books","query":"q","sense_entry":false,"sense_weight":0,"pool":100000}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("код %d: %s", w.Code, w.Body.String())
+	}
+	if g.got.SenseEntry == nil || *g.got.SenseEntry {
+		t.Errorf("смысловой вход клиента не дошёл до графа: %v", g.got.SenseEntry)
+	}
+	if g.got.SenseWeight == nil || *g.got.SenseWeight != 0 {
+		t.Errorf("вес 0 клиента не дошёл до графа: %v", g.got.SenseWeight)
+	}
+	if g.got.Pool != maxTopK {
+		t.Errorf("пул %d дошёл до графа; ждали потолок %d", g.got.Pool, maxTopK)
+	}
+
+	// Клиент прежней сборки полей не шлёт — граф считает по настройкам службы.
+	g.got = GraphSearchRequest{}
+	postGraphSearch(t, mux, `{"collection":"books","query":"q"}`)
+	if g.got.SenseEntry != nil || g.got.SenseWeight != nil || g.got.Pool != 0 {
+		t.Errorf("без полей до графа дошло: вход %v, вес %v, пул %d", g.got.SenseEntry, g.got.SenseWeight, g.got.Pool)
+	}
+
+	g.got = GraphSearchRequest{}
+	w = postGraphSearch(t, mux, `{"collection":"books","query":"q","sense_weight":-1}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("отрицательный вес: код %d, ждали %d", w.Code, http.StatusBadRequest)
+	}
+	if g.got.Query != "" {
+		t.Errorf("запрос с отрицательным весом дошёл до графа: %+v", g.got)
+	}
+}

@@ -69,7 +69,7 @@ func (s *fakeService) Source(name string) (kb.Source, error) {
 	return s.coll, nil
 }
 
-func (s *fakeService) GraphMap(_ context.Context, _, query string, entities, neighbors int) (kbremote.GraphMap, error) {
+func (s *fakeService) GraphMap(_ context.Context, _, query string, o kbremote.MapOpts) (kbremote.GraphMap, error) {
 	s.calls++
 	if s.down {
 		return kbremote.GraphMap{}, errServiceDown
@@ -79,7 +79,12 @@ func (s *fakeService) GraphMap(_ context.Context, _, query string, entities, nei
 		s.t.Fatalf("служба не открыла свой граф: %v", err)
 	}
 	defer g.Close()
-	res := g.Search(query, graph.SearchOpts{TopEntities: entities, TopNeighbors: neighbors, TopChunks: 1, MinMentions: 2})
+	var rank graph.NeighborRank
+	if o.Rank != nil {
+		rank = *o.Rank
+	}
+	res := g.Search(query, graph.SearchOpts{TopEntities: o.Entities, TopNeighbors: o.Neighbors,
+		TopChunks: 1, MinMentions: 2, Neighbors: rank})
 	return kbremote.GraphMap{Result: res, Chain: find.Chain(g, res.Entities, res.Relations, find.Opts{})}, nil
 }
 

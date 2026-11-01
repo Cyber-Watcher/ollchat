@@ -525,7 +525,7 @@ func (c *Client) GraphTool(ctx context.Context, collection, name string, args ma
 // двумя понятиями вопроса — то же, что GraphMap, без годов связей и времени
 // в очереди (ключ --kb-remote-check).
 func (c *Client) GraphSearch(ctx context.Context, collection, query string, entities, neighbors int) (graph.SearchResult, []graph.PathStep, error) {
-	m, err := c.GraphMap(ctx, collection, query, entities, neighbors)
+	m, err := c.GraphMap(ctx, collection, query, MapOpts{Entities: entities, Neighbors: neighbors})
 	return m.Result, m.Chain, err
 }
 
@@ -543,6 +543,19 @@ type GraphMap struct {
 	Queued time.Duration
 }
 
+// MapOpts — что клиент просит у карты понятий службы.
+type MapOpts struct {
+	// Entities и Neighbors — размер карты (mix.entities, mix.neighbors);
+	// ноль — как настроено у службы.
+	Entities, Neighbors int
+
+	// Rank — ранжирование связей клиента (/graph tune, graph.neighbor_*),
+	// SenseEntry — его смысловой вход (mix.sense_entry), этап 121, Д4. nil —
+	// как настроено у службы: поля в запросе нет.
+	Rank       *graph.NeighborRank
+	SenseEntry *bool
+}
+
 // GraphMap отдаёт разбираемый результат поиска по графу, цепочку между двумя
 // понятиями вопроса и годы связей.
 //
@@ -551,16 +564,26 @@ type GraphMap struct {
 // платит, — клиент. Поэтому entities и neighbors (mix.entities, mix.neighbors
 // клиента) уходят службе; ноль — «как настроено у службы», и тогда поля
 // в запросе нет вовсе: служба прежней сборки получает тот же запрос, что раньше.
-// Ранжирование связей (/graph tune, graph.neighbor_*) и смысловой вход
-// (mix.sense_entry) — по настройкам службы: в запросе их нет.
+//
+// Ранжирование связей и смысловой вход (o.Rank, o.SenseEntry) тоже уходят
+// службе (этап 121, Д4): без них служба считала карту по своему конфигу,
+// и текст карты совпадал с прямым режимом только при одинаковых конфигах.
+// Служба прежней сборки этих полей не знает и считает по-своему — запрос
+// при этом не ломается (лишние поля JSON она пропускает).
 //
 // Цепочку служба считает тем же find.Chain по своему графу (этап 121, А6).
 // Служба прежней сборки поля chain не отдаёт — цепочка пустая, карта та же.
-func (c *Client) GraphMap(ctx context.Context, collection, query string, entities, neighbors int) (GraphMap, error) {
+func (c *Client) GraphMap(ctx context.Context, collection, query string, o MapOpts) (GraphMap, error) {
+	req := graphSearchRequest{
+		Collection: collection, Query: query, Entities: o.Entities, Neighbors: o.Neighbors,
+		SenseEntry: o.SenseEntry,
+	}
+	if o.Rank != nil {
+		w := o.Rank.SenseWeight
+		req.SenseWeight, req.Pool = &w, o.Rank.Pool
+	}
 	var resp graphSearchResponse
-	err := c.post(ctx, "/api/v1/graph/search", graphSearchRequest{
-		Collection: collection, Query: query, Entities: entities, Neighbors: neighbors,
-	}, &resp)
+	err := c.post(ctx, "/api/v1/graph/search", req, &resp)
 	if err != nil {
 		return GraphMap{}, err
 	}
@@ -621,10 +644,13 @@ func (c *Client) Find(ctx context.Context, req FindRequest) (FindReply, error) {
 // (`kbserve.GraphSearchRequest`, `kbserve.GraphSearchResponse`) — по той же
 // причине, что формы поиска выше.
 type graphSearchRequest struct {
-	Collection string `json:"collection"`
-	Query      string `json:"query"`
-	Entities   int    `json:"entities,omitempty"`
-	Neighbors  int    `json:"neighbors,omitempty"`
+	Collection  string   `json:"collection"`
+	Query       string   `json:"query"`
+	Entities    int      `json:"entities,omitempty"`
+	Neighbors   int      `json:"neighbors,omitempty"`
+	SenseEntry  *bool    `json:"sense_entry,omitempty"`
+	SenseWeight *float64 `json:"sense_weight,omitempty"`
+	Pool        int      `json:"pool,omitempty"`
 }
 
 type graphSearchResponse struct {

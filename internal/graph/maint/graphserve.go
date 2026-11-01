@@ -89,6 +89,11 @@ func (g *GraphService) Tool(ctx context.Context, collection, name string, args m
 // печатает по своей коллекции: у клиента службы кусков нет (находка 11 аудита
 // 23.10.2026). ctx — запрос клиента: ушёл клиент — ни граф, ни эмбеддер его
 // больше не ждут, и место в очереди службы освобождается (находка 12).
+//
+// Смысловой вход и ранжирование связей — тоже клиента, если он их прислал
+// (этап 121, Д4): sense_entry = false — вектор вопроса не считается, как
+// в mixer.Build при выключенном mix.sense_entry; без поля — считается, как
+// было. Ранжирование — requestRank.
 func (g *GraphService) Search(ctx context.Context, req kbserve.GraphSearchRequest) (kbserve.GraphSearchResponse, error) {
 	coll, gr, _, release, err := g.open(req.Collection)
 	if err != nil {
@@ -107,22 +112,39 @@ func (g *GraphService) Search(ctx context.Context, req kbserve.GraphSearchReques
 	if req.Neighbors > 0 {
 		neighbors = req.Neighbors
 	}
-	qv := QueryVector(ctx, gr, g.Cfg, req.Query)
-	if err := ctx.Err(); err != nil {
-		return kbserve.GraphSearchResponse{}, err
+	var qv []int8
+	if req.SenseEntry == nil || *req.SenseEntry {
+		qv = QueryVector(ctx, gr, g.Cfg, req.Query)
+		if err := ctx.Err(); err != nil {
+			return kbserve.GraphSearchResponse{}, err
+		}
 	}
 	res := gr.Search(req.Query, graph.SearchOpts{
 		TopEntities:  entities,
 		TopNeighbors: neighbors,
 		TopChunks:    1,
 		MinMentions:  2,
-		Neighbors:    NeighborRank(g.Cfg),
+		Neighbors:    requestRank(g.Cfg, req),
 		Rank:         graph.RankWith(coll),
 		QueryVector:  qv,
 	})
 	chain := find.Chain(gr, res.Entities, res.Relations, find.Opts{})
 	return kbserve.GraphSearchResponse{Result: res, Chain: chain,
 		RelationYears: RelationYears(coll, res.Relations)}, nil
+}
+
+// requestRank — ранжирование связей для карты: присланное клиентом поверх
+// своего (NeighborRank). Вес — если прислан (ноль осмыслен: «не
+// пересортировывать»), пул — если больше нуля.
+func requestRank(cfg *config.Config, req kbserve.GraphSearchRequest) graph.NeighborRank {
+	rank := NeighborRank(cfg)
+	if req.SenseWeight != nil {
+		rank.SenseWeight = *req.SenseWeight
+	}
+	if req.Pool > 0 {
+		rank.Pool = req.Pool
+	}
+	return rank
 }
 
 // RelationYears — год самой свежей книги, подтвердившей каждую связь, в порядке

@@ -503,6 +503,35 @@ func TestGraphSearchSendsMapSize(t *testing.T) {
 	}
 }
 
+// Ранжирование связей и смысловой вход клиента уходят службе (этап 121, Д4);
+// без них полей в запросе нет — служба прежней сборки видит прежний запрос.
+func TestGraphMapSendsClientRank(t *testing.T) {
+	f := &fakeServer{graphResp: `{"result":{}}`}
+	cl, _ := newFake(t, f)
+	off := false
+	if _, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{
+		Rank: &graph.NeighborRank{SenseWeight: 0, Pool: 5}, SenseEntry: &off}); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(f.graphBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	// Вес ноль — осмысленный («не пересортировывать») и уходит как есть.
+	if sent["sense_entry"] != false || sent["sense_weight"] != float64(0) || sent["pool"] != float64(5) {
+		t.Errorf("службе ушло: %s", f.graphBody)
+	}
+
+	if _, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"sense_entry", "sense_weight", "pool"} {
+		if strings.Contains(string(f.graphBody), k) {
+			t.Errorf("без настроек поле %s ушло службе: %s", k, f.graphBody)
+		}
+	}
+}
+
 // Служба прежней сборки отдаёт карту без цепочки — клиент читает карту,
 // цепочка пустая.
 func TestGraphSearchOldServiceWithoutChain(t *testing.T) {
@@ -616,7 +645,7 @@ func TestBusyServiceIsNotUnreachable(t *testing.T) {
 	<-hold.entered
 
 	started := time.Now()
-	_, err = cl.GraphMap(context.Background(), "books", "второй", 0, 0)
+	_, err = cl.GraphMap(context.Background(), "books", "второй", MapOpts{})
 	if err == nil {
 		t.Fatal("занятая служба ответила картой")
 	}
@@ -673,7 +702,7 @@ func TestGraphMapYearsAndQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := cl.GraphMap(context.Background(), "books", "q", 0, 0)
+	m, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,7 +722,7 @@ func TestGraphMapYearsAndQueue(t *testing.T) {
 	}))
 	defer bad.Close()
 	cl, _ = New(Opts{URL: bad.URL})
-	if m, err := cl.GraphMap(context.Background(), "books", "q", 0, 0); err != nil || m.Years != nil {
+	if m, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{}); err != nil || m.Years != nil {
 		t.Errorf("годы не по числу связей приняты: %v, %v", m.Years, err)
 	}
 }

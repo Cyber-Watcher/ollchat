@@ -548,6 +548,12 @@ func Mount(mux *http.ServeMux, o Opts) {
 		if !readJSON(w, r, &req) {
 			return
 		}
+		// Отрицательный вес — опечатка, а не «наоборот» (как в config.Validate):
+		// он поднял бы наверх связи, наиболее далёкие от вопроса.
+		if req.SenseWeight != nil && *req.SenseWeight < 0 {
+			apiError(w, http.StatusBadRequest, fmt.Errorf("sense_weight = %v: вес не бывает отрицательным", *req.SenseWeight))
+			return
+		}
 		if o.Graph == nil {
 			apiError(w, http.StatusNotImplemented, errNoGraph)
 			return
@@ -561,6 +567,9 @@ func Mount(mux *http.ServeMux, o Opts) {
 		// службы, как top_k у поиска: ноль и меньше — «как настроено здесь».
 		req.Entities = clampPositive(req.Entities, maxTopK)
 		req.Neighbors = clampPositive(req.Neighbors, maxTopK)
+		// Пул кандидатов — множитель к числу связей: без предела чужой клиент
+		// заставил бы службу ранжировать весь граф.
+		req.Pool = clampPositive(req.Pool, maxTopK)
 		res, err := o.Graph.Search(r.Context(), req)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err)
@@ -684,11 +693,21 @@ type GraphToolResponse struct {
 // Entities и Neighbors — размер карты, который выбрал клиент (его
 // mix.entities и mix.neighbors); ноль — по настройкам службы. Клиент прежней
 // сборки полей не шлёт и получает прежнюю карту.
+//
+// SenseEntry, SenseWeight и Pool — живые настройки клиента (этап 121, Д4):
+// смысловой вход (mix.sense_entry) и ранжирование связей (/graph tune,
+// graph.neighbor_sense_weight, graph.neighbor_pool). Без них служба считала
+// карту по своему конфигу, и текст карты совпадал с прямым режимом только
+// при одинаковых конфигах. nil и ноль — по настройкам службы; вес ноль
+// осмыслен («не пересортировывать»), поэтому он указатель.
 type GraphSearchRequest struct {
-	Collection string `json:"collection"`
-	Query      string `json:"query"`
-	Entities   int    `json:"entities,omitempty"`
-	Neighbors  int    `json:"neighbors,omitempty"`
+	Collection  string   `json:"collection"`
+	Query       string   `json:"query"`
+	Entities    int      `json:"entities,omitempty"`
+	Neighbors   int      `json:"neighbors,omitempty"`
+	SenseEntry  *bool    `json:"sense_entry,omitempty"`
+	SenseWeight *float64 `json:"sense_weight,omitempty"`
+	Pool        int      `json:"pool,omitempty"`
 }
 
 // GraphSearchResponse — карта понятий по вопросу и цепочка между двумя его

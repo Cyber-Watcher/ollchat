@@ -208,14 +208,16 @@ type Deps struct {
 
 // MapSource — служба, отдающая карту понятий по вопросу: kbremote.Client.
 //
-// Ноль в entities и neighbors — «как настроено у службы». Ошибка с меткой
+// Ноль в Entities и Neighbors — «как настроено у службы»; Rank и SenseEntry
+// Build шлёт всегда свои, чтобы карта через службу совпадала с картой по
+// своему графу (этап 121, Д4). Ошибка с меткой
 // kb.ErrUnreachable означает «служба не ответила» — по ней Build переходит
 // на свой граф; kb.ErrBusy — служба занята (очередь полна): своего графа
 // не открывают, говорят об очереди в заметке; прочие ошибки — отказ
 // по смыслу, и перехода по ним нет. Годы связей и время в очереди приходят
 // вместе с картой (kbremote.GraphMap).
 type MapSource interface {
-	GraphMap(ctx context.Context, collection, query string, entities, neighbors int) (kbremote.GraphMap, error)
+	GraphMap(ctx context.Context, collection, query string, o kbremote.MapOpts) (kbremote.GraphMap, error)
 }
 
 // defaultServiceTimeout — сколько ждать карту и книги, когда срок не задан
@@ -576,7 +578,10 @@ func serviceMap(question string, d Deps, s Settings) (m kbremote.GraphMap,
 	err := kb.ErrUnreachable
 	if !kb.Fell(d.Coll) {
 		ctx, cancel := context.WithTimeout(context.Background(), serviceTimeout(s))
-		m, err = d.Map.GraphMap(ctx, d.Coll.Name(), question, s.Entities, s.Neighbors)
+		rank, sense := s.Rank, s.SenseEntry
+		m, err = d.Map.GraphMap(ctx, d.Coll.Name(), question, kbremote.MapOpts{
+			Entities: s.Entities, Neighbors: s.Neighbors, Rank: &rank, SenseEntry: &sense,
+		})
 		cancel()
 		if err == nil {
 			return m, true, nil, nil, ""

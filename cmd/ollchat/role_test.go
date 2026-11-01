@@ -92,7 +92,7 @@ var (
 		"--graph-sense", "--graph-pool", "--mix-entities", "--mix-neighbors", "--kb-topk",
 		"--kb-max-per-book", "--kb-min-cosine", "--kb-semantic-weight",
 		"--mix-pin", "--mix-full", "--mix-sense-snippet", "--mix-only", "--kb-eval-gen-must", "--kb-eval-gen-code", "--logprobs",
-		"--kb-eval-gen-distract", "--tool-perturb", "--kb-eval-part", "--mcp-yes",
+		"--kb-eval-gen-distract", "--tool-perturb", "--kb-eval-part", "--mcp-yes", "--kb-source",
 	}
 )
 

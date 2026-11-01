@@ -108,6 +108,11 @@ type askOpts struct {
 	library    kb.Library
 	graphCache *graph.Cache
 	base       *kb.Base // свои файлы для запасного пути; nil — их нет
+
+	// mode — положение --kb-source (этап 121, Д3): local — подмес по своим
+	// файлам, как без службы; service — только служба, без запасного пути;
+	// auto (нуль) — служба, при отказе свои файлы.
+	mode kb.SourceMode
 }
 
 // askAnswer — одна строка вывода --json.
@@ -156,6 +161,11 @@ func runAsk(cfg *config.Config, srv *config.Server, model string, o askOpts) err
 	}
 	if len(questions) == 0 {
 		return fmt.Errorf("нечего спрашивать: задайте --ask \"вопрос\", --ask-stdin или --questions файл")
+	}
+	// --kb-source local: служба для подмеса не спрашивается вовсе — тот же
+	// путь, что без kb.server_url (коллекция и граф открываются раз на прогон).
+	if o.mode == kb.SourceLocal {
+		o.library = nil
 	}
 
 	client := ollama.NewWithStall(srv.URL, srv.TimeoutDuration(), srv.ChatTimeoutDuration(),
@@ -583,8 +593,11 @@ func askOpenKB(cfg *config.Config, o askOpts) (*kb.Collection, *graph.Graph, err
 // это два запроса по сети, а не гигабайт графа в памяти.
 func askRemoteMix(cfg *config.Config, o askOpts, question string, deps mixer.Deps, set mixer.Settings) mixer.Result {
 	name := askCollection(cfg, o)
-	lib := kb.Fallback{Remote: o.library}
-	if o.base != nil {
+	// Положение service (--kb-source): запасного пути нет — ни своих книг,
+	// ни своего графа, а заметка говорит почему (как в интерфейсе).
+	lib := kb.Fallback{Remote: o.library, Mode: o.mode}
+	deps.ServiceOnly = o.mode == kb.SourceService
+	if o.base != nil && o.mode == kb.SourceAuto {
 		// Своя коллекция выбирается так же, как в askOpenKB: названная или
 		// единственная. Несколько без kb.default — отказ с перечнем, как в TUI
 		// (localCollection), а не молча первая (аудит 23.10.2026): ответ по чужой

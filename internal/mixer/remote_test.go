@@ -79,19 +79,25 @@ type fakeMap struct {
 	calls               int
 	coll                string
 	entities, neighbors int
-	deadline            time.Time     // срок, с которым подмес ждал карту
-	queued              time.Duration // «ждал в очереди» в ответе службы
+	opts                kbremote.MapOpts // всё, что ушло службе
+	deadline            time.Time        // срок, с которым подмес ждал карту
+	queued              time.Duration    // «ждал в очереди» в ответе службы
 }
 
-func (f *fakeMap) GraphMap(ctx context.Context, coll, query string, entities, neighbors int) (kbremote.GraphMap, error) {
+func (f *fakeMap) GraphMap(ctx context.Context, coll, query string, o kbremote.MapOpts) (kbremote.GraphMap, error) {
 	f.calls++
-	f.coll, f.entities, f.neighbors = coll, entities, neighbors
+	f.coll, f.entities, f.neighbors, f.opts = coll, o.Entities, o.Neighbors, o
 	f.deadline, _ = ctx.Deadline()
 	if f.err != nil {
 		return kbremote.GraphMap{}, f.err
 	}
-	res := f.g.Search(query, graph.SearchOpts{TopEntities: entities, TopNeighbors: neighbors,
-		TopChunks: 1, MinMentions: 2})
+	// Ранжирование связей — присланное клиентом, как у gmaint.GraphService.Search.
+	var rank graph.NeighborRank
+	if o.Rank != nil {
+		rank = *o.Rank
+	}
+	res := f.g.Search(query, graph.SearchOpts{TopEntities: o.Entities, TopNeighbors: o.Neighbors,
+		TopChunks: 1, MinMentions: 2, Neighbors: rank})
 	return kbremote.GraphMap{Result: res, Chain: find.Chain(f.g, res.Entities, res.Relations, find.Opts{}),
 		Queued: f.queued}, nil
 }
@@ -130,6 +136,28 @@ func TestServiceMapSendsClientNumbers(t *testing.T) {
 	if fm.entities != 6 || fm.neighbors != 4 || fm.coll != "books" {
 		t.Errorf("службе ушло: коллекция %q, понятий %d, связей %d; ждали books, 6, 4",
 			fm.coll, fm.entities, fm.neighbors)
+	}
+}
+
+// Ранжирование связей и смысловой вход уходят службе — свои, а не её (этап 121,
+// Д4): после /graph tune карта через службу та же, что по своему графу.
+func TestServiceMapSendsClientRank(t *testing.T) {
+	_, coll, g := remoteFixture(t)
+	set := remoteSettings()
+	set.Rank = graph.NeighborRank{SenseWeight: 2, Pool: 5}
+	local := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, set)
+
+	fm := &fakeMap{g: g}
+	remote := Build(pairQuestion, Deps{Coll: coll, Map: fm, GraphOn: true}, set)
+	if remote.Text != local.Text {
+		t.Errorf("подмес через службу разошёлся с подмесом по своему графу:\n--- служба ---\n%s\n--- свой граф ---\n%s",
+			remote.Text, local.Text)
+	}
+	if r := fm.opts.Rank; r == nil || r.SenseWeight != 2 || r.Pool != 5 {
+		t.Errorf("службе не ушло ранжирование клиента (вес 2, пул 5): %+v", r)
+	}
+	if s := fm.opts.SenseEntry; s == nil || *s {
+		t.Errorf("смысловой вход у клиента выключен, а службе ушло %v", s)
 	}
 }
 

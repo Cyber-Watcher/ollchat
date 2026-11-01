@@ -146,6 +146,33 @@ func TestMCPYesNeedsMCPCall(t *testing.T) {
 	}
 }
 
+// --kb-source ставит положение /kb source интерфейсу и --ask (этап 121, Д3);
+// с другой командой и с неизвестным положением — отказ, а не молча
+// пропущенный ключ. У --serve положение решает правило Д2, и явный local
+// отказ не снимает (решение владельца 31.10.2026).
+func TestKBSourceCommandLine(t *testing.T) {
+	for _, args := range [][]string{
+		{"--kb-source=local"},
+		{"--ask=вопрос", "--kb-source=service"},
+		{"--questions=q.txt", "--kb-source=auto"},
+	} {
+		if err := checkCommandLine(newFlags(t, args...)); err != nil {
+			t.Errorf("%q: отказ %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"--kb-source=remote"},
+		{"--graph-status=books", "--kb-source=local"},
+		{"--kb-remote-check", "--kb-source=service"},
+		{"--serve=127.0.0.1:8377", "--kb-source=local"},
+	} {
+		err := checkCommandLine(newFlags(t, args...))
+		if err == nil || !strings.Contains(err.Error(), "--kb-source") {
+			t.Errorf("%q: %v", args, err)
+		}
+	}
+}
+
 // Одна команда с уточнениями — обычный запуск.
 func TestOneCommandWithModifiersAccepted(t *testing.T) {
 	for _, args := range [][]string{

@@ -160,6 +160,64 @@ func TestGraphServiceSearchSendsServerHeaders(t *testing.T) {
 	}
 }
 
+// Смысловой вход — клиента (этап 121, Д4): sense_entry = false — вектор
+// вопроса не запрашивается вовсе, как в подмесе при выключенном
+// mix.sense_entry; true — запрашивается.
+func TestGraphServiceSearchHonorsClientSenseEntry(t *testing.T) {
+	calls := make(chan struct{}, 8)
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			http.NotFound(w, r)
+			return
+		}
+		calls <- struct{}{}
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+	}))
+	defer ollama.Close()
+
+	svc := serveFixture(t)
+	svc.Cfg.KB.EmbedModel = "bge-m3"
+	svc.Cfg.Servers = []config.Server{{Name: "gpu", URL: ollama.URL}}
+	off, on := false, true
+	// Вопросы уникальны: одиночные векторы кэшируются на весь процесс.
+	q := fmt.Sprintf("горутина смысловой вход %d", time.Now().UnixNano())
+	if _, err := svc.Search(context.Background(), kbserve.GraphSearchRequest{Collection: "books",
+		Query: q, SenseEntry: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(calls); n != 0 {
+		t.Errorf("клиент выключил смысловой вход, а служба спросила вектор вопроса %d раз", n)
+	}
+	if _, err := svc.Search(context.Background(), kbserve.GraphSearchRequest{Collection: "books",
+		Query: q + " включён", SenseEntry: &on}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) == 0 {
+		t.Error("клиент включил смысловой вход, а вектор вопроса не запрашивался")
+	}
+}
+
+// Ранжирование связей карты — клиента поверх своего (этап 121, Д4): вес ноль —
+// осмысленное «не пересортировывать», а не «как у службы»; пул ноль — свой.
+func TestRequestRank(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Graph.NeighborSenseWeight, cfg.Graph.NeighborPool = 1.5, 8
+
+	got := requestRank(cfg, kbserve.GraphSearchRequest{})
+	if got.SenseWeight != 1.5 || got.Pool != 8 {
+		t.Errorf("без полей: вес %v, пул %d; ждали свои 1.5 и 8", got.SenseWeight, got.Pool)
+	}
+	zero := 0.0
+	got = requestRank(cfg, kbserve.GraphSearchRequest{SenseWeight: &zero, Pool: 3})
+	if got.SenseWeight != 0 || got.Pool != 3 {
+		t.Errorf("клиент прислал вес 0 и пул 3, вышло: вес %v, пул %d", got.SenseWeight, got.Pool)
+	}
+	got = requestRank(cfg, kbserve.GraphSearchRequest{Pool: -2})
+	if got.Pool != 8 {
+		t.Errorf("отрицательный пул клиента: вышло %d, ждали свой 8", got.Pool)
+	}
+}
+
 // Цепочка между двумя понятиями вопроса приходит вместе с картой (А6):
 // у клиента, берущего карту у службы, своего графа нет.
 func TestGraphServiceSearchReturnsChain(t *testing.T) {
