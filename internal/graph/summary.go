@@ -285,6 +285,34 @@ func (g *Graph) DescribeTopics(ctx context.Context, ex Extractor, ids []int, opt
 	return done, err
 }
 
+// SummaryAnswer — ответ модели про одну тему, как он лёг бы в разбиение.
+type SummaryAnswer struct {
+	Title   string
+	Summary string
+	Key     []string
+	Rating  int
+	Why     string
+}
+
+// AskSummary спрашивает модель про одну тему нижнего уровня и ничего
+// не записывает: разбиение на диске остаётся как было.
+//
+// Нужна замеру «какой моделью описывать темы» (privatescripts/summarydiff,
+// 01.11.2026): сравнивать модели можно только на одинаковом входе, а
+// Summarize и DescribeTopics пишут ответ в разбиение рабочего графа. Вход
+// модели собирается тем же askSummary, что у докатки, поэтому замер меряет
+// то, что пошло бы в граф. Верхние темы сюда не годятся: их вход — описания
+// вложенных, а здесь вложенных нет (opt.children пуст).
+func (g *Graph) AskSummary(ctx context.Context, ex Extractor, com Community,
+	opt SummaryOpts) (SummaryAnswer, error) {
+
+	out, err := g.askSummary(ctx, ex, &com, opt.norm())
+	if err != nil {
+		return SummaryAnswer{}, err
+	}
+	return SummaryAnswer(out), nil
+}
+
 // askSummary задаёт модели один вопрос про одно сообщество.
 func (g *Graph) askSummary(ctx context.Context, ex Extractor, com *Community,
 	opt SummaryOpts) (summaryOut, error) {

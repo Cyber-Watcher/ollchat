@@ -101,3 +101,38 @@ func TestDescribeTopicsGuardsAgainstRepartition(t *testing.T) {
 		t.Fatalf("ленивая запись затёрла новое разбиение:\n%s", raw)
 	}
 }
+
+// AskSummary для замера моделей: вход модели тот же, что у докатки,
+// ответ возвращается, а разбиение на диске не меняется.
+func TestAskSummarySameInputNoWrite(t *testing.T) {
+	g := lazyGraph(t)
+	path := filepath.Join(g.dir, CommunityFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := g.LoadCommunities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked string
+	m := &model{answer: okAnswer("Замер"), spy: func(u string) { asked = u }}
+	got, err := g.AskSummary(context.Background(), m, c.List[0], SummaryOpts{MinMembers: 5})
+	if err != nil || got.Title != "Замер" || got.Rating != 7 || got.Why != "важно" {
+		t.Fatalf("ответ %+v, ошибка %v", got, err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatalf("AskSummary записал разбиение:\n%s", after)
+	}
+
+	// Тот же вопрос по той же теме, заданный докаткой.
+	var described string
+	w := &model{answer: okAnswer("Докатка"), spy: func(u string) { described = u }}
+	if n, err := lazyGraph(t).DescribeTopics(context.Background(), w, []int{1}, SummaryOpts{MinMembers: 5}); err != nil || n != 1 {
+		t.Fatalf("докатка описала %d, %v", n, err)
+	}
+	if asked == "" || asked != described {
+		t.Fatalf("вход замера и докатки различается:\nзамер:\n%s\nдокатка:\n%s", asked, described)
+	}
+}
