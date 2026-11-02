@@ -158,6 +158,9 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 	if res.Scans > 0 {
 		fmt.Fprintf(stdout, ", сканов без текста %d", res.Scans)
 	}
+	if res.Short > 0 {
+		fmt.Fprintf(stdout, ", короче одного куска %d", res.Short)
+	}
 	// **Пропущенные обязаны быть в итоге.** Их не печатали вовсе, и на трёх
 	// книгах в чужой кодировке итог выглядел как «добавлено книг 0» — без
 	// единого слова о том, что три книги нашлись, но не прочитались.
@@ -188,7 +191,7 @@ func Index(stdout io.Writer, cfg *config.Config, name string, paths []string, sy
 	if res.Thin > 0 {
 		fmt.Fprintf(stdout, "  взять их всё равно: ollchat --kb-sync %s --kb-keep-thin\n", name)
 	}
-	if res.Skipped+res.Scans+res.Errors > 0 {
+	if res.Skipped+res.Scans+res.Short+res.Errors > 0 {
 		fmt.Fprintf(stdout, "причины по каждой книге: ollchat --kb-doctor %s\n", name)
 	}
 	printAdded(stdout, res.AddedBooks)
@@ -953,6 +956,9 @@ func Reindex(stdout io.Writer, cfg *config.Config, name string, paths []string) 
 		name, res.Added, res.Chunks, res.Elapsed.Round(time.Second))
 	if res.Scans+res.Errors > 0 {
 		fmt.Fprintf(stdout, "  сканов %d, со сбоями %d\n", res.Scans, res.Errors)
+	}
+	if res.Short > 0 {
+		fmt.Fprintf(stdout, "  короче одного куска %d — текст есть, но в индекс не взят\n", res.Short)
 	}
 	// Прежняя версия помечается удалённой только у перечитанной книги:
 	// прерванная работа оставляет остальные как были (kb.Reindex).

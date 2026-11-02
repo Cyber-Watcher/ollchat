@@ -93,6 +93,7 @@ type IndexResult struct {
 	Added    int
 	Skipped  int
 	Scans    int
+	Short    int // текстовые файлы короче одного куска (BookShort)
 	Errors   int
 	Removed  int
 	Chunks   int64
@@ -457,6 +458,17 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 			if err := c.appendDoc(rec); err != nil {
 				return res, err
 			}
+		case len(p.chunks) == 0 && p.doc != nil && p.doc.Kind.Text():
+			// Текстовый файл без кусков — не скан: текст в нём есть, но его
+			// меньше, чем нарезка берёт в кусок.
+			rec.Kind = BookShort
+			rec.Err = fmt.Sprintf("текст короче одного куска (меньше %d знаков) — в индекс не взят",
+				chunkMinChars(c.meta.Chunk))
+			rec.Format, rec.Units, rec.UnitWord = string(p.doc.Kind), p.doc.Units, p.doc.Unit
+			res.Short++
+			if err := c.appendDoc(rec); err != nil {
+				return res, err
+			}
 		case len(p.chunks) == 0:
 			rec.Kind = BookScan
 			rec.Err = "текста не нашлось"
@@ -543,7 +555,9 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 
 		send(Progress{
 			Phase: "извлечение", Collection: c.name,
-			DocsDone: res.Added + res.Skipped + res.Scans + res.Errors, DocsTotal: len(files),
+			// Короткие и тощие — тоже обработанные файлы: без них полоса
+			// не доходила до конца, когда такие были среди разобранных.
+			DocsDone: res.Added + res.Skipped + res.Scans + res.Short + res.Thin + res.Errors, DocsTotal: len(files),
 			Chunks: res.Chunks, Current: filepath.Base(p.cand.path),
 			Added: res.Added, Skipped: res.Skipped, Scans: res.Scans, Errors: res.Errors,
 			Elapsed: time.Since(start),

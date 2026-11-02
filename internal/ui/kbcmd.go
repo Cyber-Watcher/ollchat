@@ -708,8 +708,12 @@ func kbStatsText(coll *kb.Collection, kbCfg config.KB) string {
 	if meta.Description != "" {
 		fmt.Fprintf(&b, "  %s\n", meta.Description)
 	}
-	fmt.Fprintf(&b, "  книг: %d (с текстом %d, сканов %d, со сбоями %d, убрано %d)\n",
+	fmt.Fprintf(&b, "  книг: %d (с текстом %d, сканов %d, со сбоями %d, убрано %d",
 		st.Books, st.Indexed, st.Scans, st.Broken, st.Deleted)
+	if st.Short > 0 {
+		fmt.Fprintf(&b, ", короче одного куска %d", st.Short)
+	}
+	b.WriteString(")\n")
 	fmt.Fprintf(&b, "  кусков: %d, термов: %d, сегментов: %d\n", st.Chunks, st.Terms, st.Segments)
 	fmt.Fprintf(&b, "  на диске: %.1f МБ\n", float64(st.Bytes)/1e6)
 	fmt.Fprintf(&b, "  правила разбора: %s\n", st.Analyzer)

@@ -96,7 +96,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 	books := c.LiveBooks()
 	st := c.Stats()
 
-	var gone, scans, broken, thin []BookRec
+	var gone, scans, short, broken, thin []BookRec
 	byTitle := map[string][]BookRec{}
 	o.step("проверяю книги на месте", 0, len(books))
 	for i, b := range books {
@@ -115,6 +115,8 @@ func Doctor(c *Collection, o DoctorOpts) string {
 			byTitle[normalizeTitle(b.Title)] = append(byTitle[normalizeTitle(b.Title)], b)
 		case BookScan:
 			scans = append(scans, b)
+		case BookShort:
+			short = append(short, b)
 		case BookThin:
 			thin = append(thin, b)
 		case BookBroken, BookGarbled, BookSkipped:
@@ -235,11 +237,29 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		fmt.Fprintf(&b, "\nСканы без текстового слоя: %d\n", len(scans))
 		for i, r := range scans {
 			if i >= 3 {
+				// Счёт без хвоста прятал файлы: «сканов 5» и три имени,
+				// а о двух остальных — ни слова (02.11.2026).
+				fmt.Fprintf(&b, "  …и ещё %d\n", len(scans)-3)
 				break
 			}
 			where(&b, r.Path, paint)
 		}
 		b.WriteString("  Текста в них нет; страницы можно показать модели с vision через /addimg.\n")
+	}
+	// Короткие текстовые файлы — не беда и не скан: заглушка кода, строка
+	// настроек, вывод одной команды. Раздел свой, чтобы совет про /addimg
+	// к ним не относился.
+	if len(short) > 0 {
+		fmt.Fprintf(&b, "\nКороче одного куска: %d — текст есть, но в индекс не взят\n", len(short))
+		for i, r := range short {
+			if i >= 10 {
+				fmt.Fprintf(&b, "  …и ещё %d\n", len(short)-10)
+				break
+			}
+			where(&b, r.Path, paint)
+		}
+		fmt.Fprintf(&b, "  Нарезка не делает кусок короче %d знаков, поэтому поиск их не находит; это не сбой.\n",
+			chunkMinChars(c.Meta().Chunk))
 	}
 	// Тощие книги: в индекс не взяты намеренно, и это не беда коллекции,
 	// а решение проверки. Человеку показывается причина с числами — чтобы
@@ -398,7 +418,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		fmt.Fprintf(&b, "\nПравила разбора изменились (%s → %s): стоит пересобрать словесный индекс.\n",
 			st.Analyzer, AnalyzerVersion)
 	}
-	if len(gone)+len(scans)+len(broken)+len(thin)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
+	if len(gone)+len(scans)+len(short)+len(broken)+len(thin)+dups+same+len(pendFiles)+len(pend.Dupes) == 0 &&
 		!st.Stale && len(del) == 0 && st.NoSegment == 0 && st.BadSegments == 0 {
 		b.WriteString("\nВсё в порядке: непрочитанных, пропавших, сканов, сбоев и повторов нет.\n")
 	}
@@ -489,6 +509,7 @@ func Doctor(c *Collection, o DoctorOpts) string {
 		copies:    len(pend.Dupes),
 		gone:      len(gone),
 		scans:     len(scans),
+		short:     len(short),
 		thin:      len(thin),
 		broken:    len(broken),
 		sameFiles: same,
@@ -664,6 +685,7 @@ type summary struct {
 	copies    int
 	gone      int
 	scans     int
+	short     int
 	thin      int
 	broken    int
 	sameFiles int
@@ -692,6 +714,7 @@ func (s summary) String() string {
 		{s.gone, "пропали с диска, но ещё в выдаче"},
 		{s.broken, "не прочитались"},
 		{s.scans, "сканы без текста"},
+		{s.short, "короче одного куска — в индекс не взяты"},
 		{s.thin, "в индекс не взяты: мало текста"},
 		{s.sameFiles, "одна книга под разными именами"},
 		{s.editions, "похожи на разные издания"},

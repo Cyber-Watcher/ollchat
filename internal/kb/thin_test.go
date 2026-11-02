@@ -187,3 +187,67 @@ func TestThinBookKeepThin(t *testing.T) {
 		t.Error("книга не ищется, хотя её велели взять")
 	}
 }
+
+// TestShortTextFileIsNotScan — текстовый файл короче одного куска записывается
+// как короткий, а не как скан, и доктор называет его своим разделом, без совета
+// про /addimg. До 02.11.2026 заглушка Go на 176 знаков числилась «сканом без
+// текстового слоя», и из пяти таких доктор называл три.
+func TestShortTextFileIsNotScan(t *testing.T) {
+	base, books := newBase(t)
+	os.MkdirAll(books, 0o755)
+	stub := "//go:build !unix\n\npackage kb\n\n// На системах без сигналов процесс проверяется иначе.\nvar sigZero = 0\n"
+	if err := os.WriteFile(filepath.Join(books, "signal_other.go"), []byte(stub), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	makeBook(t, books, "real.pdf", longPage("kubernetes deployment rollout"))
+
+	c, _ := base.Create("test", "")
+	res, err := c.Add(context.Background(), []string{books}, IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Short != 1 || res.Scans != 0 {
+		t.Fatalf("коротких %d, сканов %d — ожидался один короткий и ни одного скана", res.Short, res.Scans)
+	}
+	var rec BookRec
+	for _, d := range c.LiveBooks() {
+		if filepath.Base(d.Path) == "signal_other.go" {
+			rec = d
+		}
+	}
+	if rec.Kind != BookShort || !strings.Contains(rec.Err, "короче одного куска") {
+		t.Fatalf("запись о коротком файле: вид %q, причина %q", rec.Kind, rec.Err)
+	}
+	if st := c.Stats(); st.Short != 1 || st.Scans != 0 {
+		t.Errorf("сводка: коротких %d, сканов %d", st.Short, st.Scans)
+	}
+
+	out := Doctor(c, DoctorOpts{})
+	if !strings.Contains(out, "Короче одного куска: 1") || !strings.Contains(out, "signal_other.go") {
+		t.Errorf("доктор не назвал короткий файл своим разделом:\n%s", out)
+	}
+	if strings.Contains(out, "Сканы без текстового слоя") || strings.Contains(out, "/addimg") {
+		t.Errorf("короткий файл попал в сканы:\n%s", out)
+	}
+}
+
+// TestDoctorScansTailCounted — из пяти сканов доктор называет три и говорит
+// «…и ещё 2», а не молчит об остальных.
+func TestDoctorScansTailCounted(t *testing.T) {
+	base, books := newBase(t)
+	os.MkdirAll(books, 0o755)
+	c, _ := base.Create("test", "")
+	for i := 1; i <= 5; i++ {
+		p := filepath.Join(books, fmt.Sprintf("scan%d.pdf", i))
+		if err := os.WriteFile(p, []byte("%PDF-1.4"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.appendDoc(BookRec{ID: uint32(i), Path: p, Kind: BookScan}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := Doctor(c, DoctorOpts{})
+	if !strings.Contains(out, "Сканы без текстового слоя: 5") || !strings.Contains(out, "…и ещё 2") {
+		t.Errorf("доктор не досчитал хвост сканов:\n%s", out)
+	}
+}

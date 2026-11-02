@@ -81,6 +81,15 @@ func DefaultChunkOpts() ChunkOpts {
 	return ChunkOpts{Chars: 1200, Step: 900, MinChars: 200}
 }
 
+// chunkMinChars — порог короткого куска, с которым нарезка реально работает:
+// пустые размеры коллекции значат умолчание (так их читают Split и SplitText).
+func chunkMinChars(opt ChunkOpts) int {
+	if opt.Chars <= 0 {
+		return DefaultChunkOpts().MinChars
+	}
+	return opt.MinChars
+}
+
 // Split режет книгу на куски.
 func Split(parts []document.Part, opt ChunkOpts) []Chunk {
 	if opt.Chars <= 0 {

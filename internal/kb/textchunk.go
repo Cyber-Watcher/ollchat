@@ -1,6 +1,7 @@
 package kb
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -31,6 +32,7 @@ func SplitText(parts []document.Part, opt ChunkOpts) []Chunk {
 		opt.Step = opt.Chars * 3 / 4
 	}
 	overlap := opt.Chars - opt.Step
+	parts = dropDataURIs(parts)
 	parts = splitLongLines(parts, opt.Chars)
 
 	var out []Chunk
@@ -104,6 +106,42 @@ func SplitText(parts []document.Part, opt ChunkOpts) []Chunk {
 			next = i + 1
 		}
 		i = next
+	}
+	return out
+}
+
+// dataURI — картинка или другой файл, вставленный в текст как `data:<тип>;base64,…`.
+// Тело короче 64 знаков не трогается: это пример в тексте о самих data:-ссылках,
+// а не вставленный файл.
+var dataURI = regexp.MustCompile(`data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,[A-Za-z0-9+/=]{64,}`)
+
+// dropDataURIs заменяет тело вставленного файла многоточием, оставляя тип:
+// `![](data:image/png;base64,…)` — читатель видит, что тут была картинка.
+//
+// **Зачем.** Документ, выгруженный из редактора с картинками, несёт их строкой
+// base64 по сотне-другой килобайт. С тех пор как splitLongLines режет длинные
+// строки, каждая такая строка становилась сотнями кусков мусора: 02.11.2026
+// файл плана в 641 строку с 14 картинками дал 2955 кусков вместо текста,
+// и они ушли в словесный индекс и в векторы. Номер строки остаётся прежним —
+// меняется только её текст.
+func dropDataURIs(parts []document.Part) []document.Part {
+	var out []document.Part
+	for i, p := range parts {
+		if !strings.Contains(p.Text, ";base64,") || !dataURI.MatchString(p.Text) {
+			if out != nil {
+				out = append(out, p)
+			}
+			continue
+		}
+		if out == nil {
+			out = make([]document.Part, i, len(parts))
+			copy(out, parts[:i])
+		}
+		p.Text = dataURI.ReplaceAllString(p.Text, "data:$1;base64,…")
+		out = append(out, p)
+	}
+	if out == nil {
+		return parts
 	}
 	return out
 }

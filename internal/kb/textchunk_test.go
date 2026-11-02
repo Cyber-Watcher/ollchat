@@ -155,3 +155,45 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// Картинка, вставленная в markdown строкой base64, в куски не идёт: от неё
+// остаётся тип и многоточие на той же строке, а пример data:-ссылки в тексте
+// не трогается. Без этого строка в 330 КБ резалась splitLongLines на сотни
+// кусков мусора (файл плана, 02.11.2026: 2955 кусков на 641 строку).
+func TestSplitTextDropsDataURIs(t *testing.T) {
+	payload := strings.Repeat("iVBORw0KGgoAAAANSUhEUgAAA", 4000)
+	var b strings.Builder
+	b.WriteString("# Отчёт за неделю\n\n")
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&b, "строка %d: проверили сеть, диски и резервные копии стенда\n", i)
+	}
+	b.WriteString("![](data:image/png;base64," + payload + ")\n") // строка 13
+	b.WriteString("Пример ссылки из справки: data:image/png;base64,iVBORw0KGgo=\n")
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&b, "итог %d: замечаний к инфраструктуре нет, работы идут по плану\n", i)
+	}
+
+	chunks := SplitText(lineParts(b.String()), DefaultChunkOpts())
+	if len(chunks) == 0 || len(chunks) > 3 {
+		t.Fatalf("кусков %d, ожидалось от одного до трёх — картинка не должна давать куски", len(chunks))
+	}
+	var all strings.Builder
+	imageLine := false
+	for _, c := range chunks {
+		if strings.Contains(c.Text, "AAAANSUhEUgAAAiVBOR") {
+			t.Fatalf("тело картинки попало в кусок: %.80q…", c.Text)
+		}
+		if c.UnitFrom <= 13 && 13 <= c.UnitTo {
+			imageLine = true
+		}
+		all.WriteString(c.Text)
+	}
+	for _, want := range []string{"![](data:image/png;base64,…)", "data:image/png;base64,iVBORw0KGgo=", "итог 10"} {
+		if !strings.Contains(all.String(), want) {
+			t.Errorf("в кусках нет %q", want)
+		}
+	}
+	if !imageLine {
+		t.Error("строка с картинкой выпала из нумерации кусков")
+	}
+}

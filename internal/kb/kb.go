@@ -80,6 +80,13 @@ const (
 	// текст есть и проба его находит, — поймать можно только после разбора,
 	// сравнив объём текста с объёмом файла. Подробности — ThinLimits.
 	BookThin BookKind = "thin"
+
+	// BookShort — текстовый файл (markdown, текст, код) короче одного куска
+	// (ChunkOpts.MinChars): текст есть, но нарезка не дала ни одного куска.
+	// До 02.11.2026 такой файл записывался сканом «текста не нашлось», и доктор
+	// советовал показать его страницы модели со зрением, — а это заглушка Go
+	// на десяток строк или строка crontab, никакого скана там нет.
+	BookShort BookKind = "short"
 )
 
 // BookRec — запись о книге в реестре коллекции.
@@ -975,6 +982,7 @@ type Stats struct {
 	Books    int
 	Indexed  int // книг с текстом
 	Scans    int
+	Short    int // текстовые файлы короче одного куска (BookShort)
 	Broken   int
 	Deleted  int
 	Chunks   int
@@ -1017,6 +1025,8 @@ func (c *Collection) Stats() Stats {
 			// Тощая книга стоит рядом со сканом не случайно: и там и там
 			// в коллекции есть запись, а искать нечего.
 			st.Scans++
+		case BookShort:
+			st.Short++
 		case BookBroken, BookGarbled:
 			st.Broken++
 		}
