@@ -183,6 +183,7 @@ type cliFlags struct {
 	kbSeed                *int64
 	kbSample              *string
 	kbEval                *string
+	kbEvalFresh           *bool
 	kbEvalColl            *string
 	kbEvalK               *int
 	kbEvalWide            *int
@@ -545,6 +546,8 @@ func parseFlagsNoParse() *cliFlags {
 		"слепая выборка кусков коллекции в JSON: --kb-sample books")
 	f.kbEval = flag.String("kb-eval", "",
 		"замерить качество поиска по набору вопросов: --kb-eval набор.toml")
+	f.kbEvalFresh = flag.Bool("kb-eval-fresh", false,
+		"с --kb-eval: векторы вопросов считать на сервере заново, мимо кэша на диске (ключ кэша — модель и текст, без сервера: сравнение серверов эмбеддера без этого мерит кэш)")
 	f.kbEvalColl = flag.String("kb-eval-collection", "",
 		"с --kb-eval: коллекция, по которой мерить (по умолчанию kb.default)")
 	f.kbEvalK = flag.Int("kb-eval-k", 0,
@@ -1345,6 +1348,7 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		if coll == "" {
 			coll = cfg.KB.Default
 		}
+		kbembed.SkipDiskCache = *f.kbEvalFresh
 		if *f.kbEvalGraphMerge != "" {
 			ks, err := gmaint.ParseMergeKs(*f.kbEvalGraphMerge)
 			if err != nil {

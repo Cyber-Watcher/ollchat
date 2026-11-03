@@ -56,6 +56,9 @@ readonly DOWNLOAD_BASE=https://github.com/ollama/ollama/releases/download
 
 ASSUME_YES=0
 ACTION=update
+# WANT_VERSION — поставить именно эту версию (-version), а не последнюю:
+# чтобы два сервера шли на одной версии и чтобы было чем откатиться.
+WANT_VERSION=""
 RESTORE_DIR=""
 TMP_DIRS=()
 
@@ -87,7 +90,9 @@ $SCRIPT_NAME — установка, обновление и удаление Ol
   ./$SCRIPT_NAME -h                эта справка
 
 Ключи:
-  -y    не задавать вопросов (для неинтерактивного запуска)
+  -y              не задавать вопросов (для неинтерактивного запуска)
+  -version X.Y.Z  поставить именно эту версию вместо последней — выровнять
+                  с другим сервером или откатиться на прежнюю
 
 Что скрипт делает и чего не делает:
   • перед установкой проверяет драйверы NVIDIA и ставит рекомендованные,
@@ -112,6 +117,12 @@ while [ $# -gt 0 ]; do
             RESTORE_DIR=$1
             ;;
         -y|--yes) ASSUME_YES=1 ;;
+        -version|--version)
+            shift || true
+            [ $# -gt 0 ] || die "-version требует номер версии, например 0.40.11"
+            [[ $1 =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "-version: «$1» — не номер версии вида 0.40.11"
+            WANT_VERSION=${1#v}
+            ;;
         -h|--help) usage; exit 0 ;;
         *) die "неизвестный ключ: $1 (см. $SCRIPT_NAME -h)" ;;
     esac
@@ -223,11 +234,49 @@ current_version() {
     "$bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
 }
 
+# release_api — описание выпуска на GitHub: названного ключом -version или
+# последнего.
+release_api() {
+    if [ -n "$WANT_VERSION" ]; then
+        printf '%s' "https://api.github.com/repos/ollama/ollama/releases/tags/v$WANT_VERSION"
+    else
+        printf '%s' "$RELEASES_API"
+    fi
+}
+
+# latest_version — версия, которую ставим: из описания выпуска, поэтому
+# несуществующий номер после -version даёт пустоту и отказ, а не попытку
+# качать то, чего нет.
 latest_version() {
-    fetch_text "$RELEASES_API" 2>/dev/null \
+    fetch_text "$(release_api)" 2>/dev/null \
         | grep -m1 '"tag_name"' \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
         | head -1
+}
+
+# sums_url — ссылка на файл контрольных сумм выпуска; пусто, если его нет.
+sums_url() {
+    fetch_text "$(release_api)" 2>/dev/null \
+        | grep -oE '"browser_download_url": *"[^"]+/sha256sum\.txt"' \
+        | cut -d'"' -f4 \
+        | head -1
+}
+
+# verify_archive — сверить скачанный архив с sha256sum.txt выпуска: оборванная
+# и докачанная (curl -C -) закачка или подмена по дороге видны здесь, а не
+# падением службы после замены файлов. Несошедшаяся сумма — отказ до остановки
+# службы; выпуска без файла сумм — предупреждение.
+verify_archive() {
+    local file=$1 dir=$2 version=$3 sums
+    sums=$(sums_url) || true
+    if [ -z "$sums" ]; then
+        warn "в выпуске $version нет sha256sum.txt — архив не сверен"
+        return 0
+    fi
+    fetch "$sums" "$dir/sha256sum.txt" || die "не удалось скачать sha256sum.txt выпуска $version"
+    (cd "$dir" && sha256sum -c --ignore-missing sha256sum.txt) >/dev/null 2>&1 \
+        || die "архив $(basename "$file") не сошёлся с sha256sum.txt выпуска $version — не ставлю"
+    ok "сумма архива сошлась с sha256sum.txt выпуска"
 }
 
 # asset_url — ссылка на архив под нашу архитектуру.
@@ -238,7 +287,7 @@ latest_version() {
 # Варианты rocm, mlx и jetpack пропускаем: это сборки под другое железо.
 asset_url() {
     local arch=$1 json
-    json=$(fetch_text "$RELEASES_API" 2>/dev/null) || return 1
+    json=$(fetch_text "$(release_api)" 2>/dev/null) || return 1
 
     local urls
     urls=$(printf '%s' "$json" \
@@ -630,6 +679,8 @@ install_ollama() {
     say "  качаю $(basename "$url") версии $version…"
     fetch "$url" "$file" || die "не удалось скачать архив версии $version"
 
+    verify_archive "$file" "$tmp" "$version"
+
     # Службу останавливаем только теперь, когда архив уже на диске: простой
     # длится распаковку, а не всю закачку, и сорвавшаяся сеть не оставит
     # сервер без работающей Ollama.
@@ -730,8 +781,13 @@ do_install_or_update() {
     local kind current latest
     kind=$(install_kind)
     latest=$(latest_version) || true
-    [ -n "$latest" ] || die "не удалось узнать последнюю версию с github (нет сети?)"
-    say "  последняя выпущенная версия: $latest"
+    if [ -n "$WANT_VERSION" ]; then
+        [ -n "$latest" ] || die "выпуска v$WANT_VERSION на github нет (или нет сети)"
+        say "  нужная версия (-version): $latest"
+    else
+        [ -n "$latest" ] || die "не удалось узнать последнюю версию с github (нет сети?)"
+        say "  последняя выпущенная версия: $latest"
+    fi
 
     if [ "$kind" = none ]; then
         ensure_nvidia_driver
@@ -769,7 +825,11 @@ do_install_or_update() {
     current=$(current_version || echo 0.0.0)
     if [ "$current" = "$latest" ]; then
         step "Обновление не требуется"
-        ok "установлена последняя версия $current"
+        if [ -n "$WANT_VERSION" ]; then
+            ok "уже стоит нужная версия $current"
+        else
+            ok "установлена последняя версия $current"
+        fi
         return 0
     fi
 

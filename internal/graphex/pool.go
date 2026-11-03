@@ -124,6 +124,7 @@ type Pool struct {
 	model string
 	nodes []*poolNode
 	slots chan *poolNode // по Workers меток на каждый живой узел
+	notes []string       // предупреждения последней Check: не отказ, но сказать надо
 
 	// nodeWait — сколько ждать возвращения узлов, когда живых нет. 0 — не ждать.
 	nodeWait time.Duration
@@ -225,14 +226,19 @@ func (p *Pool) Names() []string {
 	return out
 }
 
-// Check проверяет все узлы разом и сверяет веса модели.
+// Check проверяет все узлы разом и сверяет модель на них.
 //
 // Одно имя модели на двух серверах может указывать на разные файлы: другое
 // квантование, другая дата загрузки. Смешанный граф выглядит исправным
 // и не чинится ничем, кроме полной пересборки, — тот же довод, по которому
-// сборка отказывается менять модель на полпути. Поэтому сверяются digest
-// и уровень квантования из /api/tags.
+// сборка отказывается менять модель на полпути. Поэтому сверяются файлы весов
+// и проектора, квантование и рецепт (шаблон, RENDERER/PARSER, системный
+// промпт, параметры). Digest манифеста — только когда файлов узнать не
+// удалось: он расходится и от лицензии (ModelStamp). Разные версии Ollama —
+// предупреждение (Notes), а не отказ: подсказку для RENDERER собирает код
+// самой Ollama, и что это значит для извлечения, решает замер, а не догадка.
 func (p *Pool) Check(ctx context.Context) error {
+	p.notes = nil
 	type res struct {
 		name  string
 		stamp ModelStamp
@@ -265,17 +271,44 @@ func (p *Pool) Check(ctx context.Context) error {
 	if len(out) < 2 {
 		return nil
 	}
-	// Сверка весов. Пустой digest бывает у старых сборок Ollama — тогда
-	// сравнивается только квантование, и молчать об этом нельзя.
+	// Сверка весов: по файлам из Modelfile, а без них — по digest манифеста.
+	// Пустой digest бывает у старых сборок Ollama — тогда сравнивается только
+	// квантование, и молчать об этом нельзя.
 	first := out[0]
 	for _, r := range out[1:] {
-		if r.stamp.Digest != "" && first.stamp.Digest != "" && r.stamp.Digest != first.stamp.Digest {
+		a, b := first.stamp, r.stamp
+		if len(a.Files) > 0 && len(b.Files) > 0 {
+			if strings.Join(a.Files, " ") != strings.Join(b.Files, " ") {
+				return fmt.Errorf(
+					"на узлах %s и %s модель %s — это разные веса (файлы %s против %s).\n"+
+						"Собирать один граф разными весами нельзя: половина графа окажется "+
+						"собрана одной моделью, половина другой, а видно этого не будет ниоткуда.\n"+
+						"Приведите модель к одной версии на обоих серверах",
+					first.name, r.name, p.model, shortFiles(a.Files), shortFiles(b.Files))
+			}
+		} else if a.Digest != "" && b.Digest != "" && a.Digest != b.Digest {
 			return fmt.Errorf(
 				"на узлах %s и %s модель %s — это разные веса (digest %s против %s).\n"+
 					"Собирать один граф разными весами нельзя: половина графа окажется "+
 					"собрана одной моделью, половина другой, а видно этого не будет ниоткуда.\n"+
 					"Приведите модель к одной версии на обоих серверах",
-				first.name, r.name, p.model, short(first.stamp.Digest), short(r.stamp.Digest))
+				first.name, r.name, p.model, short(a.Digest), short(b.Digest))
+		}
+		for i := range a.Recipe {
+			if i < len(b.Recipe) && a.Recipe[i].Value != b.Recipe[i].Value {
+				return fmt.Errorf(
+					"на узлах %s и %s у модели %s одни веса, но отличается часть «%s»:\n  %s: %q\n  %s: %q\n"+
+						"От этого зависит ответ модели, а значит и граф; приведите тег к одному "+
+						"Modelfile на обоих серверах",
+					first.name, r.name, p.model, a.Recipe[i].Name,
+					first.name, a.Recipe[i].Value, r.name, b.Recipe[i].Value)
+			}
+		}
+		if a.Version != b.Version {
+			p.notes = append(p.notes, fmt.Sprintf(
+				"версии Ollama на узлах разные: %s — %s, %s — %s; модель та же, "+
+					"но подсказку и расчёт делает сама Ollama",
+				first.name, a.Version, r.name, b.Version))
 		}
 		if r.stamp.Quant != first.stamp.Quant {
 			return fmt.Errorf(
@@ -293,6 +326,22 @@ func short(digest string) string {
 	}
 	return digest
 }
+
+// shortFiles — имена блобов, укороченные для отказа: «sha256-f5f1dd8920d4».
+func shortFiles(files []string) string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		if strings.HasPrefix(f, "sha256-") && len(f) > 19 {
+			f = f[:19]
+		}
+		out[i] = f
+	}
+	return strings.Join(out, " ")
+}
+
+// Notes — предупреждения последней Check: расхождения, которые сборку
+// не останавливают, но о которых человек должен узнать до её начала.
+func (p *Pool) Notes() []string { return p.notes }
 
 // Extract отдаёт кусок первому освободившемуся узлу.
 //

@@ -45,6 +45,7 @@ var modes = []struct {
 	{"stability", "устойчивость извлечения по оси температуры или починки текста (-axis temp|textfix; нужна карта)"},
 	{"seq", "детерминизм извлечения по одному запросу, дважды подряд, температура 0 (нужна карта)"},
 	{"det", "детерминизм сборки построчно: сравнение опорного и проверочного графа (карта не нужна)"},
+	{"compare", "два итога stability -axis temp по одним кускам (два сервера, до и после обновления): -a A.tsv -b B.tsv (карта не нужна)"},
 }
 
 // Run — один замер по выбору `-only`. Коллекция приходит ключом ollchat.
@@ -80,6 +81,10 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 	cname := fs.String("check", "detcheck", "с -only det: проверочный граф (второй прогон)")
 	show := fs.Int("show", 12, "с -only det: сколько расхождений показать")
 
+	// compare
+	fileA := fs.String("a", "", "с -only compare: первый итог stability (TSV из -out)")
+	fileB := fs.String("b", "", "с -only compare: второй итог stability (TSV из -out)")
+
 	timeout := fs.Duration("timeout", 5*time.Minute, "с -only stability и seq: предел одного запроса")
 
 	fs.Usage = func() {
@@ -104,6 +109,8 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 		return runSeq(stdout, cfg, collName, *chunks, *seqN, *timeout)
 	case "det":
 		return runDet(stdout, cfg, collName, *gname, *cname, *show)
+	case "compare":
+		return runCompare(stdout, *fileA, *fileB)
 	}
 	return fmt.Errorf("неизвестный режим %q; есть: %s", *only, strings.Join(modeNames(), ", "))
 }

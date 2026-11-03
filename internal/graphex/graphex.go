@@ -10,6 +10,8 @@ package graphex
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -171,12 +173,28 @@ func (e *Extractor) Check(ctx context.Context) error {
 		e.url, e.model, strings.Join(names, ", "))
 }
 
-// ModelStamp — отпечаток весов модели на сервере: чем она отличается
-// от одноимённой модели на соседнем сервере.
+// ModelStamp — отпечаток модели на сервере: чем она отличается от одноимённой
+// модели на соседнем сервере.
+//
+// Digest из /api/tags — sha256 МАНИФЕСТА, а не весов: он меняется от любого
+// слоя, даже от лицензии и записи о том, из чего создан тег. 03.11.2026 у
+// `qwen3.8:latest` на двух серверах digest разошёлся (лицензия есть только
+// на одном), а файл весов, шаблон, RENDERER/PARSER и параметры совпали.
+// Поэтому пул сверяет Files и рецепт, а digest — только когда Files пуст.
 type ModelStamp struct {
-	Digest string // sha256 весов из /api/tags
-	Quant  string // уровень квантования, «Q4_K_M»
-	Size   int64  // размер файла в байтах
+	Digest  string   // digest манифеста из /api/tags
+	Quant   string   // уровень квантования, «Q4_K_M»
+	Size    int64    // размер всех слоёв в байтах
+	Files   []string // FROM и ADAPTER из Modelfile: имена блобов весов и проектора
+	Recipe  []Part   // всё прочее, от чего зависит ответ модели
+	Version string   // версия Ollama на сервере
+}
+
+// Part — одна часть рецепта модели: шаблон, RENDERER/PARSER, системный
+// промпт, параметры. Имя — для отказа, который говорит, что именно разошлось.
+type Part struct {
+	Name  string
+	Value string
 }
 
 // Stamp снимает отпечаток модели извлечения на этом сервере.
@@ -186,21 +204,102 @@ type ModelStamp struct {
 // собранный наполовину одними весами, наполовину другими, выглядит исправным
 // и не чинится ничем, кроме полной пересборки.
 //
-// Всё берётся из /api/tags: там есть и digest, и уровень квантования,
-// поэтому второй запрос к /api/show не нужен.
+// Квантование и digest — из /api/tags, файлы весов и рецепт — из /api/show
+// по тому же имени, которое уйдёт в чат: так сверяется ровно та модель,
+// которую сервер возьмёт, а не первая с похожим тегом.
 func (e *Extractor) Stamp(ctx context.Context) (ModelStamp, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	var st ModelStamp
+	v, err := e.client.Version(ctx)
+	if err != nil {
+		return st, fmt.Errorf("сервер не отвечает: %w", err)
+	}
+	st.Version = v
 	tags, err := e.client.Tags(ctx)
 	if err != nil {
-		return ModelStamp{}, fmt.Errorf("не удалось получить список моделей: %w", err)
+		return st, fmt.Errorf("не удалось получить список моделей: %w", err)
 	}
+	found := false
 	for _, m := range tags {
 		if m.Name == e.model || strings.HasPrefix(m.Name, e.model+":") {
-			return ModelStamp{Digest: m.Digest, Quant: m.Details.QuantizationLevel, Size: m.Size}, nil
+			st.Digest, st.Quant, st.Size = m.Digest, m.Details.QuantizationLevel, m.Size
+			found = true
+			break
 		}
 	}
-	return ModelStamp{}, fmt.Errorf("нет модели %q", e.model)
+	if !found {
+		return st, fmt.Errorf("нет модели %q", e.model)
+	}
+	show, err := e.client.Show(ctx, e.model)
+	if err != nil {
+		return st, fmt.Errorf("модель %q: не удалось прочитать /api/show: %w", e.model, err)
+	}
+	files, directives := modelfileParts(show.Modelfile)
+	st.Files = files
+	st.Recipe = []Part{
+		{"шаблон", show.Template},
+		{"RENDERER/PARSER", strings.Join(directives, "\n")},
+		{"системный промпт", show.System},
+		{"параметры", sortedLines(show.Parameters)},
+	}
+	return st, nil
+}
+
+// modelfileParts — файлы весов (FROM, ADAPTER) и строки RENDERER/PARSER из
+// Modelfile, который отдаёт /api/show.
+//
+// От пути FROM остаётся имя блоба «sha256-…»: каталог моделей у каждого
+// сервера свой. Текст в тройных кавычках (LICENSE, многострочные TEMPLATE
+// и SYSTEM) пропускается — в лицензии бывают строки, начинающиеся с тех же
+// слов. RENDERER/PARSER старые версии Ollama в отдельные поля /api/show
+// не выводят, а в Modelfile пишут все.
+func modelfileParts(mf string) (files, directives []string) {
+	inQuote := false
+	for _, line := range strings.Split(mf, "\n") {
+		odd := strings.Count(line, `"""`)%2 == 1
+		if inQuote {
+			if odd {
+				inQuote = false
+			}
+			continue
+		}
+		if odd {
+			inQuote = true
+		}
+		kw, rest, _ := strings.Cut(strings.TrimSpace(line), " ")
+		rest = strings.TrimSpace(rest)
+		switch kw {
+		case "FROM", "ADAPTER":
+			files = append(files, blobName(rest))
+		case "RENDERER", "PARSER":
+			directives = append(directives, kw+" "+rest)
+		}
+	}
+	sort.Strings(directives)
+	return files, directives
+}
+
+// blobName — «sha256-…» из пути к блобу; не блоб (имя модели) — как есть.
+func blobName(from string) string {
+	base := filepath.Base(from)
+	if strings.HasPrefix(base, "sha256-") {
+		return base
+	}
+	return from
+}
+
+// sortedLines — строки по алфавиту, пробелы внутри строки сжаты: порядок
+// PARAMETER у разных версий Ollama разный, а смысл тот же.
+func sortedLines(s string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if l = strings.Join(strings.Fields(l), " "); l != "" {
+			out = append(out, l)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, "\n")
 }
 
 // Extract спрашивает модель и возвращает её ответ как есть — разбирает его

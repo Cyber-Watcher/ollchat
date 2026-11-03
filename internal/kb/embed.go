@@ -461,6 +461,41 @@ func (c *Collection) embedTexts(from, to int, header bool) ([]string, error) {
 	return out, nil
 }
 
+// EmbedProbe — n кусков равномерно по векторизованной части хранилища: текст
+// ровно в том виде, в каком его векторизовал --kb-embed (embedTexts, шапка —
+// по паспорту векторов), и сохранённый вектор.
+//
+// Нужна переписи census vec-drift: сверить новый вектор того же текста со
+// старым, когда меняется сервер эмбеддера или версия Ollama. Без того же
+// текста расхождение мерило бы шапку, а не сервер.
+func (c *Collection) EmbedProbe(n int) (texts []string, stored [][]int8, err error) {
+	c.mu.RLock()
+	vecs := c.vectors
+	c.mu.RUnlock()
+	if vecs == nil || vecs.Count() == 0 {
+		return nil, nil, fmt.Errorf("коллекция %q: векторов нет (--kb-embed)", c.name)
+	}
+	total := vecs.Count()
+	if n <= 0 || n > total {
+		n = total
+	}
+	step := total / n
+	header := vecs.Meta().Header
+	for i := 0; i < total && len(texts) < n; i += step {
+		t, err := c.embedTexts(i, i+1, header)
+		if err != nil {
+			return nil, nil, err
+		}
+		v := vecs.At(i)
+		if v == nil {
+			continue
+		}
+		texts = append(texts, t[0])
+		stored = append(stored, append([]int8(nil), v...))
+	}
+	return texts, stored, nil
+}
+
 // embedderDigest снимает отпечаток весов эмбеддера, если тот умеет его дать
 // (kbembed.Embedder.Stamp) и сервер его отдаёт.
 //

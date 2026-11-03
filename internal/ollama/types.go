@@ -322,6 +322,7 @@ type ShowResponse struct {
 	Modelfile    string         `json:"modelfile"`
 	Parameters   string         `json:"parameters"`
 	Template     string         `json:"template"`
+	System       string         `json:"system"`
 	Details      ModelDetails   `json:"details"`
 	ModelInfo    map[string]any `json:"model_info"`
 	Capabilities []string       `json:"capabilities"`

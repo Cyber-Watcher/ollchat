@@ -51,6 +51,7 @@ var modes = []struct {
 	{"text-dotprefix", "куски, где четверть и больше слов начинается с точки: «.выполнить .действие»"},
 	{"text-dotprefix-fresh", "тот же признак на файле книги с диска, разобранном заново мимо индекса — отвечает «починит ли книгу перечитывание»; файлы доводами после ключей. Восстановлен 30.09.2026 взамен утраченного privatescripts/dotprefixcensus/fresh"},
 	{"vec-norms", "длина квантованных векторов кусков и понятий графа, и насколько на настоящих парах расходятся kb.Cosine и vecstand.CosineRaw — прибор долга Д15"},
+	{"vec-drift", "те же ли векторы даёт эмбеддер из настроек (и второй сервер, -vs), что лежат в индексе: косинус на тех же текстах (нужна карта эмбеддера)"},
 	{"chunk-ends", "доля кусков прозы, обрезанных посреди предложения (конец) и начатых со строчной буквы (начало), по форматам книг — Е4 этапа 112"},
 	{"page-gaps", "страницы PDF, не покрытые ни одним куском: доля по книгам и самые длинные пустоты подряд (вставленный скан, страницы-картинки) — Л5 этапа 112"},
 }
@@ -85,6 +86,8 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 	top := fs.Int("top", 12, "с -only text, text-longwords и page-gaps: сколько книг показывать")
 	examples := fs.Int("examples", 6, "с -only text: сколько примеров на род порчи")
 	minLen := fs.Int("minlen", 25, "с -only text-longwords: с какой длины слово считается слипшимся")
+	driftN := fs.Int("n", 400, "с -only vec-drift: сколько кусков сверить (равномерно по векторизованной части)")
+	vs := fs.String("vs", "", "с -only vec-drift: второй сервер эмбеддера — сверить и его, и сервер с сервером")
 	fs.Usage = func() {
 		fmt.Fprintf(stdout, "перепись состояния: ollchat --census <коллекция> -- -only <режим> [ключи]\n\nрежимы:\n")
 		for _, m := range modes {
@@ -131,6 +134,8 @@ func Run(stdout io.Writer, cfg *config.Config, collName string, args []string) (
 		return textDotPrefixFresh(stdout, cfg, fs.Args())
 	case "vec-norms":
 		return vecNorms(stdout, cfg, collName)
+	case "vec-drift":
+		return vecDrift(stdout, cfg, collName, *driftN, *vs)
 	case "chunk-ends":
 		return chunkEnds(stdout, cfg, collName, *examples)
 	case "page-gaps":

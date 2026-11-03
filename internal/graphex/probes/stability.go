@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -134,7 +135,7 @@ func stabilityTemp(stdout io.Writer, cfg *config.Config, collName string, n int,
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "модель %s\n\n", exCold.Model())
+	fmt.Fprintf(stdout, "модель %s на %s\n\n", exCold.Model(), exCold.URL())
 
 	var tsv *os.File
 	if out != "" {
@@ -142,7 +143,7 @@ func stabilityTemp(stdout io.Writer, cfg *config.Config, collName string, n int,
 			return err
 		}
 		defer tsv.Close()
-		fmt.Fprintln(tsv, "кусок\tкнига\tтемпература\tпрогон\tпонятий\tсвязей\tвидимых\tимена")
+		fmt.Fprintln(tsv, "кусок\tкнига\tтемпература\tпрогон\tпонятий\tсвязей\tвидимых\tимена\tсвязи")
 	}
 
 	ctx := context.Background()
@@ -186,12 +187,20 @@ func stabilityTemp(stdout io.Writer, cfg *config.Config, collName string, n int,
 			t.relations += len(facts.Relations)
 			t.seen += seen
 			if tsv != nil {
-				var list []string
+				// Пары связей — через « ~ »: «|» уже разделяет элементы списка.
+				// По этим двум колонкам режим compare сравнивает два итога.
+				var list, pairs []string
 				for k := range names {
 					list = append(list, k)
 				}
-				fmt.Fprintf(tsv, "%d#%d\t%s\t%.2f\t%d\t%d\t%d\t%d\t%s\n", p.Doc, p.Ord,
-					filepath.Base(p.Book.Path), temp, pass, len(facts.Entities), len(facts.Relations), seen, strings.Join(list, " | "))
+				for k := range rels {
+					pairs = append(pairs, strings.Replace(k, "|", relSep, 1))
+				}
+				sort.Strings(list)
+				sort.Strings(pairs)
+				fmt.Fprintf(tsv, "%d#%d\t%s\t%.2f\t%d\t%d\t%d\t%d\t%s\t%s\n", p.Doc, p.Ord,
+					filepath.Base(p.Book.Path), temp, pass, len(facts.Entities), len(facts.Relations), seen,
+					strings.Join(list, listSep), strings.Join(pairs, listSep))
 			}
 			return names, rels
 		}

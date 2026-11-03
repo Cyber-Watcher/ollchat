@@ -68,7 +68,7 @@ var (
 		"--graph-redo-empty", "--graph-ignore-busy", "--graph-log",
 		"--graph-allow-model-change", "--graph-allow-prompt-change", "--graph-books",
 		"--graph-summaries-force", "--graph-summaries-min", "--kb-eval-gen-n", "--kb-seed",
-		"--kb-eval-collection", "--kb-eval-k", "--kb-eval-wide", "--kb-eval-dedupe",
+		"--kb-eval-collection", "--kb-eval-fresh", "--kb-eval-k", "--kb-eval-wide", "--kb-eval-dedupe",
 		"--kb-eval-keep-adjacent", "--kb-eval-weight", "--kb-eval-table-boost",
 		"--kb-eval-rrfk", "--kb-eval-graph-merge", "--kb-eval-window", "--kb-eval-window-self", "--kb-eval-only", "--kb-eval-rerank", "--kb-eval-candidates",
 		"--kb-eval-expand", "--kb-eval-snippet", "--kb-eval-out", "--kb-eval-books", "--kb-eval-prf", "--kb-eval-translate", "--kb-eval-translate-workers", "--kb-ground", "--kb-ground-refs",

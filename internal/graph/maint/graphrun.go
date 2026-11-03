@@ -183,6 +183,11 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 		fmt.Fprintf(stdout, "журнал после обрыва — %s\n", s)
 	}
 	fmt.Fprintf(stdout, "коллекция %s, модель извлечения %s\n", name, ex.Model())
+	if pool != nil {
+		for _, n := range pool.Notes() {
+			fmt.Fprintf(stdout, "внимание: %s\n", n)
+		}
+	}
 	if named && pool != nil {
 		fmt.Fprintf(stdout, "узлов сборки: %d (%s), слотов всего %d\n",
 			len(nodes), strings.Join(pool.Names(), ", "), pool.Slots())

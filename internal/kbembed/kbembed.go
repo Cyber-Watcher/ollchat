@@ -54,6 +54,12 @@ type Options struct {
 	CacheDir string
 }
 
+// SkipDiskCache — не читать и не писать кэш векторов на диске во всём
+// процессе. Ключ кэша — модель и текст, без адреса и версии сервера: замер,
+// сравнивающий два сервера эмбеддера или версии Ollama (--kb-eval-fresh),
+// иначе взял бы векторы вопросов, посчитанные прежним сервером.
+var SkipDiskCache bool
+
 func New(o Options, fallbackURL string, timeout time.Duration, headers map[string]string) *Embedder {
 	if o.Model == "" {
 		return nil
@@ -69,7 +75,7 @@ func New(o Options, fallbackURL string, timeout time.Duration, headers map[strin
 	if keep == "" {
 		keep = "5m"
 	}
-	if o.CacheDir != "" {
+	if o.CacheDir != "" && !SkipDiskCache {
 		useDiskCache(filepath.Join(o.CacheDir, "queries.cache"))
 	}
 	// Предел ожидания у эмбеддингов свой: первый запрос ждёт, пока сервер

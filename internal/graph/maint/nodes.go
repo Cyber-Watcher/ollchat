@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/graphex"
 	"github.com/Cyber-Watcher/ollchat/internal/nodeprobe"
 )
 
@@ -50,6 +51,28 @@ func Nodes(stdout io.Writer, cfg *config.Config) error {
 		fmt.Fprintln(stdout, "\nНи у одного узла нет наблюдателя. Поставьте ollnode рядом с Ollama")
 		fmt.Fprintln(stdout, "и укажите его адрес в probe — тогда будет видно чужую работу на карте,")
 		fmt.Fprintln(stdout, "вытеснение модели в ОЗУ и настоящее число слотов службы.")
+	}
+
+	// Сверка модели — та же, что сборка делает перед стартом (Pool.Check): одни
+	// ли веса, шаблон, RENDERER/PARSER и параметры, одни ли версии Ollama. Здесь
+	// она видна до запуска, а не отказом сборки посреди ночной цепочки.
+	model := cfg.Graph.Model
+	p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, nil)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stdout, "\nсверка модели: %v\n", err)
+	case len(nodes) < 2:
+		fmt.Fprintf(stdout, "\nсверка модели %s: узел один, сверять не с чем\n", model)
+	default:
+		if err := p.Check(ctx); err != nil {
+			fmt.Fprintf(stdout, "\nсверка модели %s на узлах — сборка ОТКАЖЕТ:\n%v\n", model, err)
+			break
+		}
+		fmt.Fprintf(stdout, "\nсверка модели %s на узлах: веса, квантование, шаблон, "+
+			"RENDERER/PARSER и параметры совпадают\n", model)
+		for _, n := range p.Notes() {
+			fmt.Fprintf(stdout, "внимание: %s\n", n)
+		}
 	}
 	return nil
 }
