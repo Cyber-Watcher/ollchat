@@ -41,6 +41,7 @@ type gens struct {
 	find    int // поиск /search
 	job     int // индексация книг
 	compact int // сжатие истории сводкой
+	role    int // проверка сервера /graph-server, /embed-server
 }
 
 // kbState — база знаний в этом сеансе.
@@ -52,6 +53,9 @@ type kbState struct {
 	autoOn bool   // подмешивать найденное перед каждым вопросом
 	emb    *kbembed.Embedder
 	embURL string // адрес, под который собран эмбеддер
+	// embHeaders — заголовки, под которые собран эмбеддер: при смене сервера
+	// чата адрес бывает тем же (kb.embed_url), а ключ — другим.
+	embHeaders map[string]string
 
 	// lib — общая библиотека организации (kb.server_url); nil — работаем
 	// со своими файлами. С ней свой граф интерфейс не открывает: карту
@@ -201,6 +205,13 @@ type Model struct {
 	compacting    bool
 	compactText   string
 	compactCancel context.CancelFunc
+
+	// roleCancel снимает идущую проверку сервера (/graph-server,
+	// /embed-server); не nil, пока она идёт. Вторая такая команда при ней
+	// отказывает, Esc её снимает, а итог с чужим поколением (gen.role)
+	// отбрасывается: поздний итог снятой проверки иначе записал бы выбор
+	// поверх более позднего (аудит этапа 123).
+	roleCancel context.CancelFunc
 
 	// autosaveID — файл сессии, который автосохранение (этап 112, Х3,
 	// agent.autosave) переписывает после каждого хода; пусто — ещё не заведён.

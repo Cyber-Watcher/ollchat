@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/roleserver"
+	"github.com/Cyber-Watcher/ollchat/internal/textx"
 )
 
 // Выбор сервера графа и эмбеддера из TUI (этап 123): /graph-server и
@@ -31,6 +33,15 @@ type roleCheckMsg struct {
 	roleserver.Result
 	force    bool
 	collDirs []string // с чем сверялся выбор: перед записью — ещё раз на идущую работу
+	gen      int      // поколение проверки (gen.role): чужое — итог отбрасывается
+}
+
+// roleBlock кладёт в ленту текст команды выбора сервера. Чужой текст в нём —
+// имена моделей и ответы сервера, имена и адреса из конфига — идёт через
+// textx.TermSafe: ESC/OSC в имени модели иначе перекрашивали бы ленту и
+// меняли заголовок окна (аудит этапа 123).
+func (m *Model) roleBlock(kind blockKind, text string) {
+	m.addBlock(block{kind: kind, text: textx.TermSafe(text)})
 }
 
 // roleServerCmd — /graph-server и /embed-server: без имени — кто сейчас несёт
@@ -38,86 +49,133 @@ type roleCheckMsg struct {
 func (m *Model) roleServerCmd(kind roleserver.Kind, arg string) tea.Cmd {
 	fields := strings.Fields(arg)
 	if len(fields) == 0 {
-		m.addBlock(block{kind: blockNotice, text: m.rolesText()})
+		m.roleBlock(blockNotice, m.rolesText())
 		return nil
 	}
 	name, force := fields[0], len(fields) > 1 && fields[1] == "force"
 	if len(fields) > 2 || (len(fields) == 2 && !force) {
-		m.addBlock(block{kind: blockError, text: "использование: /" + kind.Command() + " [<имя сервера> [force]]"})
+		m.roleBlock(blockError, "использование: /"+kind.Command()+" [<имя сервера> [force]]")
 		return nil
 	}
 	if m.cfg == nil || m.cfg.Path == "" {
-		m.addBlock(block{kind: blockError, text: "конфиг прочитан не из файла — выбор записать некуда"})
+		m.roleBlock(blockError, "конфиг прочитан не из файла — выбор записать некуда")
+		return nil
+	}
+	if m.roleCancel != nil {
+		m.roleBlock(blockError, "проверка сервера уже идёт — дождитесь её итога или снимите её: Esc")
 		return nil
 	}
 	collDirs, err := roleserver.CollDirs(m.kb.base)
 	if err != nil {
-		m.addBlock(block{kind: blockError, text: "коллекции не перечислены, сверять выбор не с чем: " + err.Error()})
+		m.roleBlock(blockError, "коллекции не перечислены, сверять выбор не с чем: "+err.Error())
 		return nil
+	}
+	// Выбор пишется в общий конфиг (m.cfg.Path) — и проверяется сервер общего
+	// конфига: у конфига проекта свои [[servers]], и то же имя там может
+	// значить другой адрес (аудит этапа 123).
+	jobCfg := m.cfg
+	if m.cfg.ProjectPath != "" {
+		global, _, err := config.Load(m.cfg.Path)
+		if err != nil {
+			m.roleBlock(blockError, "общий конфиг не прочитан, проверять выбор не по чему: "+err.Error())
+			return nil
+		}
+		jobCfg = global
 	}
 	// Всё, что нужно проверке, копирует NewJob: горутина не читает m.cfg,
 	// который Update меняет под ней.
-	job, err := roleserver.NewJob(m.cfg, kind, name, collDirs)
+	job, err := roleserver.NewJob(jobCfg, kind, name, collDirs)
 	if err != nil {
-		m.addBlock(block{kind: blockError, text: err.Error()})
+		m.roleBlock(blockError, err.Error())
 		return nil
 	}
 	if err := roleserver.CheckIdle(kind, job.Server.Name, collDirs); err != nil {
-		m.addBlock(block{kind: blockError, text: err.Error()})
+		m.roleBlock(blockError, err.Error())
 		return nil
 	}
-	m.statusMsg = fmt.Sprintf("проверяю сервер %s для %s…", job.Server.Name, kind.Title())
+	ctx, cancel := context.WithCancel(context.Background())
+	m.roleCancel = cancel
+	m.gen.role++
+	gen := m.gen.role
+	m.statusMsg = fmt.Sprintf("проверяю сервер %s для %s… (Esc — снять)", job.Server.Name, kind.Title())
 	return func() tea.Msg {
-		return roleCheckMsg{Result: job.Run(), force: force, collDirs: collDirs}
+		return roleCheckMsg{Result: job.RunContext(ctx), force: force, collDirs: collDirs, gen: gen}
 	}
+}
+
+// cancelRoleCheck снимает идущую проверку сервера (Esc): итог её, когда
+// придёт, отбросится по поколению. false — проверки нет.
+func (m *Model) cancelRoleCheck() bool {
+	if m.roleCancel == nil {
+		return false
+	}
+	m.roleCancel()
+	m.roleCancel = nil
+	m.gen.role++
+	m.statusMsg = ""
+	return true
 }
 
 // onRoleCheck — итог проверки: запись выбора в конфиг или отказ.
 func (m *Model) onRoleCheck(msg roleCheckMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.gen.role || m.roleCancel == nil {
+		return m, nil // итог снятой проверки: выбор после неё уже другой
+	}
+	m.roleCancel()
+	m.roleCancel = nil
 	m.statusMsg = ""
 	for _, n := range msg.Notes {
-		m.addBlock(block{kind: blockHint, text: n})
+		m.roleBlock(blockHint, n)
 	}
 	if msg.Err != nil && !msg.force {
-		m.addBlock(block{kind: blockError, text: fmt.Sprintf("сервер %s для %s не выбран: %v\n"+
-			"записать всё равно: /%s %s force", msg.Server, msg.Kind.Title(), msg.Err, msg.Kind.Command(), msg.Server)})
+		m.roleBlock(blockError, fmt.Sprintf("сервер %s для %s не выбран: %v\n"+
+			"записать всё равно: /%s %s force", msg.Server, msg.Kind.Title(), msg.Err, msg.Kind.Command(), msg.Server))
 		return m, nil
 	}
 	if err := roleserver.CheckIdle(msg.Kind, msg.Server, msg.collDirs); err != nil {
-		m.addBlock(block{kind: blockError, text: err.Error()})
+		m.roleBlock(blockError, err.Error())
 		return m, nil
 	}
 	if msg.Err != nil {
-		m.addBlock(block{kind: blockHint, text: "проверка не прошла, записываю по force: " + msg.Err.Error()})
+		m.roleBlock(blockHint, "проверка не прошла, записываю по force: "+msg.Err.Error())
 	}
 
 	if err := roleserver.Write(m.cfg.Path, msg.Kind, msg.Server, "выбран из ollchat: /"+msg.Kind.Command()); err != nil {
-		m.addBlock(block{kind: blockError, text: "выбор не записан: " + err.Error()})
+		m.roleBlock(blockError, "выбор не записан: "+err.Error())
 		return m, nil
 	}
 	if err := roleserver.Apply(m.cfg, msg.Kind, msg.Server); err != nil {
-		m.addBlock(block{kind: blockError, text: "записано в файл, но не применено в этом окне: " + err.Error()})
+		m.roleBlock(blockError, "записано в файл, но не применено в этом окне: "+err.Error())
 		return m, nil
 	}
 	for _, w := range roleserver.Overrides(m.cfg.Path) {
-		m.addBlock(block{kind: blockHint, text: w})
+		m.roleBlock(blockHint, w)
 	}
 
+	// Адрес в подтверждении — тот, что возьмут сборка и индексация: по общему
+	// конфигу. Под конфигом проекта у окна свои [[servers]], и то же имя
+	// значит в нём другой адрес.
+	target := m.cfg
+	if m.cfg.ProjectPath != "" {
+		if global, _, err := config.Load(m.cfg.Path); err == nil {
+			target = global
+		}
+	}
 	var text string
 	if msg.Kind == roleEmbed {
 		text = fmt.Sprintf("векторы — на сервере %s (%s): записано в %s, kb.embed_server = %q. "+
 			"Индексация и сборка графа возьмут его при следующем запуске, поиск в этом окне — со следующего вопроса.",
-			msg.Server, m.cfg.KB.EmbedURL, m.cfg.Path, msg.Server)
+			msg.Server, target.KB.EmbedURL, m.cfg.Path, msg.Server)
 		if m.cfg.KB.ServerURL != "" {
 			text += " Служба библиотеки (kb.server_url) читает конфиг при запуске — у неё новый адрес после перезапуска."
 		}
 	} else {
 		text = fmt.Sprintf("сборка графа — на сервере %s: записано в %s, [graph].server = %q; %s. "+
 			"Следующая сборка (graph put, --graph-build) и ночной запуск пойдут туда.",
-			msg.Server, m.cfg.Path, msg.Server, graphTargetText(m.cfg))
+			msg.Server, m.cfg.Path, msg.Server, graphTargetText(target))
 	}
-	m.addBlock(block{kind: blockNotice, text: text})
-	_ = m.logger.Write("Система", text)
+	m.roleBlock(blockNotice, text)
+	_ = m.logger.Write("Система", textx.TermSafe(text))
 	return m, nil
 }
 

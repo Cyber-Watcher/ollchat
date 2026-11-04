@@ -22,6 +22,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/mcphub"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
+	"github.com/Cyber-Watcher/ollchat/internal/textx"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 )
 
@@ -114,21 +115,8 @@ func runMCPKey(f *cliFlags, hub *mcphub.Hub, guard *permissions.Guard, egressChe
 // перевод строки и табуляция остаются как есть. ESC-последовательность
 // в ответе сервера иначе чистит экран, перекрашивает вывод или меняет
 // заголовок окна (OSC), а `\r` затирает напечатанное (аудит 23.10.2026).
-func termSafe(s string) string {
-	var b strings.Builder
-	for i, line := range strings.Split(s, "\n") {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		for j, part := range strings.Split(line, "\t") {
-			if j > 0 {
-				b.WriteByte('\t')
-			}
-			b.WriteString(visible(part))
-		}
-	}
-	return b.String()
-}
+// Сама чистка — textx.TermSafe: её же берут лента TUI и проверка серверов.
+func termSafe(s string) string { return textx.TermSafe(s) }
 
 // termWriter пропускает всё, что пишут ключи, через termSafe. fmt.Fprint*
 // отдаёт строку одним Write, так что многобайтовый знак не рвётся.

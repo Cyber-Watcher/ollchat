@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	kmaint "github.com/Cyber-Watcher/ollchat/internal/kb/maint"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -947,7 +948,9 @@ func (m *Model) kbPendingCmd() tea.Cmd {
 // embedder возвращает то, чем считать смыслы, или nil.
 //
 // Пересобирается при смене сервера: пустой kb.embed_url означает «тот сервер,
-// что выбран для чата», и после Ctrl+S это уже другой адрес.
+// что выбран для чата», и после Ctrl+S это уже другой адрес. И при смене
+// заголовков: адрес бывает тем же (kb.embed_url), а ключ — уже другого
+// сервера (/embed-server, Ctrl+S), и прежний не должен уходить дальше.
 func (m *Model) embedder() kb.Embedder {
 	if m.cfg.KB.EmbedModel == "" {
 		return nil
@@ -956,9 +959,10 @@ func (m *Model) embedder() kb.Embedder {
 	if url == "" {
 		url = m.server.URL
 	}
-	if m.kb.emb == nil || m.kb.embURL != url {
-		m.kb.emb = kbembed.New(m.cfg.KB.EmbedOptions(), m.server.URL, m.server.TimeoutDuration(), m.cfg.EmbedHeadersFor(m.server))
-		m.kb.embURL = url
+	headers := m.cfg.EmbedHeadersFor(m.server)
+	if m.kb.emb == nil || m.kb.embURL != url || !maps.Equal(m.kb.embHeaders, headers) {
+		m.kb.emb = kbembed.New(m.cfg.KB.EmbedOptions(), m.server.URL, m.server.TimeoutDuration(), headers)
+		m.kb.embURL, m.kb.embHeaders = url, maps.Clone(headers)
 	}
 	if m.kb.emb == nil {
 		return nil

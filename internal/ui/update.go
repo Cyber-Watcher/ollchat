@@ -519,6 +519,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.abortCompaction("Esc")
 			return m, nil
 		}
+		// Проверка сервера перед записью выбора (/graph-server): Esc снимает
+		// её, и выбор не пишется даже при force (аудит этапа 123).
+		if m.cancelRoleCheck() {
+			m.addBlock(block{kind: blockNotice, text: "проверка сервера снята — выбор не записан"})
+			return m, nil
+		}
 		// Вне хода Esc останавливает фоновую задачу — но только второй подряд
 		// в пределах jobStopWindow. Одним Esc прерывают ответ, и если тот
 		// успел кончиться, нажатие убивало многочасовую индексацию или
