@@ -112,6 +112,7 @@ func (c *Config) ApplyProject(path string, data []byte) error {
 	global := Permissions{Allow: slices.Clone(c.Permissions.Allow), Ask: slices.Clone(c.Permissions.Ask),
 		Deny: slices.Clone(c.Permissions.Deny), Irreversible: slices.Clone(c.Permissions.Irreversible)}
 	graphBefore, namedBefore := c.Graph, c.GraphNamed
+	embedBefore := c.KB.EmbedURL
 	globalMCP := maps.Clone(c.MCP.Servers)
 	// Декодер TOML пишет массив в уже заполненный срез поверх старых элементов и
 	// не укорачивает его: `allow = ["Bash(make:*)"]` заменял первое общее правило,
@@ -151,6 +152,22 @@ func (c *Config) ApplyProject(path string, data []byte) error {
 	}
 	for _, w := range unknownKeys(md.Undecoded(), nil, nil) {
 		c.Warnings = append(c.Warnings, "конфиг проекта: "+w)
+	}
+	// Свои [[servers]] проекта заменяют общие, и сервера векторов из общего
+	// конфига (его пишет /embed-server) среди них может не быть. Отказ здесь
+	// значил бы, что ollchat не запускается в каталоге проекта (аудит этапа
+	// 123), — поэтому замечание, а векторы остаются на прежнем адресе:
+	// с ним сверены паспорта векторов коллекций.
+	if name := c.KB.EmbedServer; name != "" {
+		if _, ok := c.ServerByName(name); !ok {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("конфиг проекта: kb.embed_server = %q — такого сервера "+
+				"нет среди [[servers]] проекта (есть: %s); выбор не применяется, векторы — по прежнему адресу",
+				name, strings.Join(c.ServerNames(), ", ")))
+			c.KB.EmbedServer = ""
+			if !md.IsDefined("kb", "embed_url") {
+				c.KB.EmbedURL = embedBefore
+			}
+		}
 	}
 	c.ProjectPath = path
 	return c.finalize()

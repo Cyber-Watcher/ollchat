@@ -8,6 +8,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/graphex"
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 	"github.com/Cyber-Watcher/ollchat/internal/kbrerank"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -877,6 +878,15 @@ type Graph struct {
 	// finalize бывает вызван дважды, а замечание о перекрытых узлах
 	// должно сравнивать с узлами из файла, а не с подставленными.
 	resolvedServer string
+	// serverFollows — подраздел [graph.<имя>] идёт за [graph].server: server
+	// в нём не написан, своих url и nodes нет. Только такие подразделы
+	// переводит запись [graph].server — в файле при перечитывании и в окне
+	// (SetGraphServer); у подраздела со своим адресом унаследованный server
+	// не действует (аудит этапа 123: свой url молча уезжал на чужой сервер).
+	serverFollows bool
+	// ownNodes — [[graph.<имя>.nodes]] написаны в самом подразделе: замечание
+	// «server перекрывает узлы» — только о таких, унаследованные не его.
+	ownNodes bool
 
 	// MaxTokens — потолок длины ответа модели (num_predict). Замерено
 	// 23.08.2026: без него на отдельных кусках модель писала 3 648 токенов
@@ -1284,6 +1294,22 @@ func checkServiceURL(where, raw string, u *url.URL, tokenKeys string) error {
 		return fmt.Errorf("%s: строка запроса и якорь (?… и #…) в адресе не поддерживаются — ключ задаётся %s", where, tokenKeys)
 	}
 	return nil
+}
+
+// noCredentials — в адресе Ollama нет учётных данных user:pass@ (аудит этапа
+// 123): адреса серверов, узлов, сборки и векторов печатаются в ленте TUI,
+// в журнале чата, в выводе --role-servers и в текстах отказов, и пароль
+// ушёл бы туда как есть. Запрет на загрузке закрывает все места печати
+// разом. Авторизация — заголовком сервера. Сам адрес в отказ не попадает.
+// Неразборный адрес здесь не ошибка: его проверяют там, где он нужен.
+func noCredentials(where, raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.User == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: учётные данные в адресе (user:pass@) не поддерживаются — адрес печатается "+
+		"в ленте, журнале и отказах; авторизация — заголовком сервера: [servers.headers] "+
+		"Authorization = \"Basic …\", а для векторов — kb.embed_server", where)
 }
 
 // HintsAtStartup — показывать ли советы при запуске.
@@ -1957,6 +1983,15 @@ func namedGraphs(data string, base Graph) (map[string]Graph, []string, error) {
 		for _, k := range md.Undecoded() {
 			unknown = append(unknown, "graph."+name+"."+k.String())
 		}
+		// server наследуется, как любой ключ, — но не поверх своего адреса:
+		// подраздел, где написан url или [[nodes]], а server нет, собирается
+		// там, где написано. Явный server перекрывает свой адрес, как в [graph].
+		own, addr := md.IsDefined("server"), md.IsDefined("url") || md.IsDefined("nodes")
+		if !own && addr {
+			eff.Server = ""
+		}
+		eff.serverFollows = !own && !addr
+		eff.ownNodes = md.IsDefined("nodes")
 		eff.Name = name
 		out[name] = eff
 	}
@@ -2283,6 +2318,12 @@ func validateGraphNodes(section string, nodes []GraphNode) error {
 			return fmt.Errorf("%s.nodes: узел %q, url должен начинаться с http:// или https:// и содержать хост",
 				section, n.Name)
 		}
+		if err := noCredentials(fmt.Sprintf("%s.nodes: узел %q, url", section, n.Name), n.URL); err != nil {
+			return err
+		}
+		if err := noCredentials(fmt.Sprintf("%s.nodes: узел %q, probe", section, n.Name), n.Probe); err != nil {
+			return err
+		}
 		if n.Probe != "" {
 			pu, err := url.Parse(n.Probe)
 			if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
@@ -2298,11 +2339,6 @@ func validateGraphNodes(section string, nodes []GraphNode) error {
 	return nil
 }
 
-// Rules собирает правила открытия графа из его раздела настроек.
-//
-// С этапа 91 (R3) это единственный путь от настроек к поведению графа:
-// пакет graph глобалов не держит, правила передаются в graph.Open и живут
-// в открытом графе. Два графа с разными правилами в одном процессе — норма.
 // EmbedFallback — сервер для эмбеддера, когда kb.embed_url не задан:
 // первый сервер конфига. Одно место вместо восьми одинаковых блоков
 // в командах обслуживания.
@@ -2328,13 +2364,34 @@ func (c *Config) EmbedFallbackHeaders() map[string]string {
 }
 
 // EmbedHeaders — заголовки для самого эмбеддера: выбран kb.embed_server —
-// его, иначе те же, что у запасного сервера. Переводчику и извлечению —
-// EmbedFallbackHeaders: они говорят с первым сервером.
+// его, иначе те же, что у запасного сервера, — если эмбеддер идёт на его
+// машину (embedGoesTo). Переводчику и извлечению — EmbedFallbackHeaders:
+// они говорят с первым сервером.
 func (c *Config) EmbedHeaders() map[string]string {
 	if s := c.embedServer(); s != nil {
 		return s.Headers
 	}
-	return c.EmbedFallbackHeaders()
+	if len(c.Servers) > 0 && c.embedGoesTo(c.Servers[0].URL) {
+		return c.Servers[0].Headers
+	}
+	return nil
+}
+
+// embedGoesTo — эмбеддер идёт на машину сервера с адресом serverURL:
+// kb.embed_url пуст (эмбеддер берёт адрес самого сервера) или указывает на
+// тот же хост, хоть и на другой порт. Явный kb.embed_url на чужой хост
+// заголовков сервера не получает: иначе его токен уходил бы третьей машине
+// (аудит этапа 123). Серверу векторов с авторизацией — kb.embed_server.
+func (c *Config) embedGoesTo(serverURL string) bool {
+	if strings.TrimSpace(c.KB.EmbedURL) == "" {
+		return true
+	}
+	a, err := url.Parse(strings.TrimSpace(c.KB.EmbedURL))
+	if err != nil || a.Hostname() == "" {
+		return false
+	}
+	b, err := url.Parse(strings.TrimSpace(serverURL))
+	return err == nil && strings.EqualFold(a.Hostname(), b.Hostname())
 }
 
 // embedServer — сервер из kb.embed_server; nil — не выбран.
@@ -2348,12 +2405,13 @@ func (c *Config) embedServer() *Server {
 
 // EmbedHeadersFor — заголовки для эмбеддера, которому как запасной сервер
 // передан сервер чата: выбран kb.embed_server — его заголовки, а не чата,
-// иначе авторизация одного сервера уходила бы другому.
+// иначе авторизация одного сервера уходила бы другому. Без него — заголовки
+// чата, только если эмбеддер идёт на машину чата (embedGoesTo).
 func (c *Config) EmbedHeadersFor(chat *Server) map[string]string {
 	if s := c.embedServer(); s != nil {
 		return s.Headers
 	}
-	if chat != nil {
+	if chat != nil && c.embedGoesTo(chat.URL) {
 		return chat.Headers
 	}
 	return nil
@@ -2387,6 +2445,11 @@ func (k KB) ThinLimits() kb.ThinLimits {
 	return lim
 }
 
+// Rules собирает правила открытия графа из его раздела настроек.
+//
+// С этапа 91 (R3) это единственный путь от настроек к поведению графа:
+// пакет graph глобалов не держит, правила передаются в graph.Open и живут
+// в открытом графе. Два графа с разными правилами в одном процессе — норма.
 func (g Graph) Rules() graph.Rules {
 	// Режим групп: выключен, если groups_enabled=false, иначе — что задано.
 	mode := g.Groups
@@ -2478,6 +2541,18 @@ func (c *Config) finalize() error {
 		if !graph.KnownAlgorithm(g.Partition) {
 			return fmt.Errorf("graph.%s.partition = %q: допустимо louvain или leiden", name, g.Partition)
 		}
+	}
+	// Адреса сборки и векторов печатаются, как адреса серверов (noCredentials).
+	if err := noCredentials("graph.url", c.graphBase.URL); err != nil {
+		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.GraphNamed)) {
+		if err := noCredentials("graph."+name+".url", c.GraphNamed[name].URL); err != nil {
+			return err
+		}
+	}
+	if err := noCredentials("kb.embed_url", c.KB.EmbedURL); err != nil {
+		return err
 	}
 	// Узлы сборки: опечатка в имени или адресе должна быть ошибкой запуска,
 	// а не выясняться через час работы, когда узел впервые понадобится.
@@ -2835,6 +2910,9 @@ func (c *Config) finalize() error {
 		if u.Host == "" {
 			return fmt.Errorf("сервер %q: в url не указан хост", s.Name)
 		}
+		if err := noCredentials(fmt.Sprintf("сервер %q: url", s.Name), s.URL); err != nil {
+			return err
+		}
 		s.URL = strings.TrimRight(s.URL, "/")
 
 		if s.Timeout == "" {
@@ -2901,6 +2979,9 @@ func (c *Config) resolveRoles() error {
 			if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
 				return fmt.Errorf("сервер %q: probe должен быть адресом вида http://хост:11435", s.Name)
 			}
+			if err := noCredentials(fmt.Sprintf("сервер %q: probe", s.Name), s.Probe); err != nil {
+				return err
+			}
 		}
 	}
 	if err := c.resolveGraphServer(&c.graphBase, "graph", true); err != nil {
@@ -2910,7 +2991,7 @@ func (c *Config) resolveRoles() error {
 		return err
 	}
 	for name, g := range c.GraphNamed {
-		if err := c.resolveGraphServer(&g, "graph."+name, false); err != nil {
+		if err := c.resolveGraphServer(&g, "graph."+name, g.ownNodes); err != nil {
 			return err
 		}
 		c.GraphNamed[name] = g
@@ -2931,8 +3012,8 @@ func (c *Config) resolveRoles() error {
 }
 
 // resolveGraphServer подставляет сервер раздела графа. warn — назвать
-// перекрытые узлы раздела: у подраздела [graph.<имя>] они чаще всего
-// унаследованы от [graph], и замечание было бы о чужих узлах.
+// перекрытые узлы раздела: у подраздела [graph.<имя>] — только если они
+// написаны в нём самом (ownNodes), унаследованные от [graph] не его.
 func (c *Config) resolveGraphServer(g *Graph, section string, warn bool) error {
 	if g.Server == "" || g.resolvedServer == g.Server {
 		return nil
@@ -2957,14 +3038,16 @@ func (c *Config) resolveGraphServer(g *Graph, section string, warn bool) error {
 
 // SetGraphServer повторяет в памяти запись [graph].server = name (этап 123,
 // /graph-server): адрес и узлы сервера — в общем разделе графа и в тех
-// подразделах и выбранном графе, что несли прежний выбор. Выбранный граф
-// правится на месте, а не берётся заново из GraphFor: подстройки, сделанные
-// в нём за сеанс (/graph tune), не должны пропасть.
+// подразделах, что идут за ним (serverFollows), и в выбранном графе, если он
+// из них. Ровно эти подразделы переведёт и перечитывание файла: подраздел
+// со своим server или своим адресом в файле не меняется — и в окне тоже
+// (аудит этапа 123: окно и файл расходились). Выбранный граф правится на
+// месте, а не берётся заново из GraphFor: подстройки, сделанные в нём за
+// сеанс (/graph tune), не должны пропасть.
 func (c *Config) SetGraphServer(name string) error {
 	if _, ok := c.ServerByName(name); !ok {
 		return fmt.Errorf("сервер %q не описан в конфиге (есть: %s)", name, strings.Join(c.ServerNames(), ", "))
 	}
-	old := c.graphBase.Server
 	set := func(g *Graph, section string) error {
 		g.Server, g.resolvedServer = name, ""
 		return c.resolveGraphServer(g, section, false)
@@ -2973,15 +3056,49 @@ func (c *Config) SetGraphServer(name string) error {
 		return err
 	}
 	for n, g := range c.GraphNamed {
-		if g.Server == old {
+		if g.serverFollows {
 			if err := set(&g, "graph."+n); err != nil {
 				return err
 			}
 			c.GraphNamed[n] = g
 		}
 	}
-	if c.Graph.Server == old {
+	// Выбранный граф: рабочий, именованный без своего раздела (он и есть
+	// настройки рабочего) или подраздел, идущий за [graph].server.
+	if g, ok := c.GraphNamed[c.Graph.Name]; c.Graph.Name == "" || !ok || g.serverFollows {
 		return set(&c.Graph, "graph")
+	}
+	return nil
+}
+
+// GraphsFollowingServer — имена подразделов [graph.<имя>], которые переведёт
+// запись [graph].server (serverFollows), по алфавиту. Проверка /graph-server
+// сверяет модель каждого из них, а не только рабочего графа.
+func (c *Config) GraphsFollowingServer() []string {
+	var out []string
+	for n, g := range c.GraphNamed {
+		if g.serverFollows {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// GraphHeaders — заголовки сервера, на котором собирается выбранный граф
+// (cfg.Graph): сборка говорит с ним так же, как проверка /graph-server.
+func (c *Config) GraphHeaders() map[string]string { return c.GraphHeadersFor(c.Graph) }
+
+// GraphHeadersFor — заголовки сервера графа g: выбран server — его заголовки,
+// иначе nil, как было до этапа 123 (адрес сборки — url или [[nodes]] без
+// своих заголовков). Без них сервер за прокси проходил проверку
+// /graph-server, а ночная сборка на нём падала (аудит этапа 123).
+func (c *Config) GraphHeadersFor(g Graph) map[string]string {
+	if g.Server == "" {
+		return nil
+	}
+	if s, ok := c.ServerByName(g.Server); ok {
+		return s.Headers
 	}
 	return nil
 }
