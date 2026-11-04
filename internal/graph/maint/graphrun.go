@@ -115,14 +115,17 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 			nodes = []graphex.Node{{Name: "основной", URL: url, Workers: cfg.Graph.Workers}}
 		}
 	}
+	// Заголовки — сервера, выбранного [graph].server (nil, если не выбран):
+	// с ними же его проверяет /graph-server, и сервер за прокси, прошедший
+	// проверку, не падает на сборке (аудит этапа 123).
 	if len(nodes) > 0 {
-		p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, nil)
+		p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, cfg.GraphHeaders())
 		if err != nil {
 			return fmt.Errorf("узлы сборки (graph.nodes): %w", err)
 		}
 		pool, ex = p, p
 	} else {
-		one := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
+		one := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, cfg.GraphHeaders())
 		if one == nil {
 			return fmt.Errorf("извлечение не настроено: задайте graph.model в %s "+
 				"(например \"glm-4.7-flash:q8_0\")", cfg.Path)
@@ -260,7 +263,7 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	var link *graph.LinkOpts
 	if linkNew {
 		// Вид графа проверяет сам graph.Build: только опытный.
-		emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
+		emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, cfg.EmbedHeaders())
 		if emb == nil {
 			return fmt.Errorf("--graph-link-new требует модели эмбеддингов: задайте kb.embed_model")
 		}
@@ -451,7 +454,7 @@ func Find(stdout io.Writer, cfg *config.Config, name, query string, asJSON bool)
 	deps := find.Deps{
 		Coll:     coll,
 		Graph:    g,
-		Embedder: kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, nil),
+		Embedder: kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, cfg.EmbedHeaders()),
 		Reranker: kbrerank.New(cfg.KB.RerankOptions()),
 	}
 	opts := find.Opts{
@@ -965,7 +968,7 @@ func Recheck(stdout io.Writer, cfg *config.Config, name string, count, minMember
 	fallback := cfg.EmbedFallback()
 	// Нарочно без WithModel: проверяет именно модель извлечения, та самая,
 	// ради честности которой всё и затевается.
-	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
+	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, cfg.GraphHeaders())
 	if ex == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
 	}
@@ -1073,7 +1076,7 @@ func Summaries(stdout io.Writer, cfg *config.Config, name string, minMembers int
 	}
 
 	fallback := cfg.EmbedFallback()
-	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
+	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, cfg.GraphHeaders())
 	if ex == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
 	}
@@ -1276,7 +1279,7 @@ func Embed(stdout io.Writer, cfg *config.Config, name string, recount bool) erro
 	defer unmark()
 
 	fallback := cfg.EmbedFallback()
-	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
+	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, cfg.EmbedHeaders())
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
 	}
@@ -1388,7 +1391,7 @@ func Findings(stdout io.Writer, cfg *config.Config, name string, minRating, minM
 	}
 
 	fallback := cfg.EmbedFallback()
-	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
+	ex := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, cfg.GraphHeaders())
 	if ex == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
 	}
@@ -1822,7 +1825,7 @@ func Bench(stdout io.Writer, cfg *config.Config, name, models, folder string,
 	}
 
 	fallback := cfg.EmbedFallback()
-	proto := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, nil)
+	proto := graphex.New(cfg.Graph.ExtractOptions(), fallback, 10*time.Minute, cfg.GraphHeaders())
 	if proto == nil {
 		return fmt.Errorf("извлечение не настроено: задайте graph.model в %s", cfg.Path)
 	}
@@ -3003,7 +3006,7 @@ func EmbedStale(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 	}
 
 	fallback := cfg.EmbedFallback()
-	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
+	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, cfg.EmbedHeaders())
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
 	}
@@ -3033,7 +3036,7 @@ func LazySummarizer(cfg *config.Config) (graph.Extractor, graph.SummaryOpts) {
 	if !cfg.Graph.LazySummaries() {
 		return nil, opts
 	}
-	ex := graphex.New(cfg.Graph.ExtractOptions(), cfg.EmbedFallback(), 2*time.Minute, nil)
+	ex := graphex.New(cfg.Graph.ExtractOptions(), cfg.EmbedFallback(), 2*time.Minute, cfg.GraphHeaders())
 	if ex == nil {
 		return nil, opts
 	}
@@ -3090,7 +3093,7 @@ func EmbedEdges(stdout io.Writer, cfg *config.Config, name string, dry bool) err
 	defer unmark()
 
 	fallback := cfg.EmbedFallback()
-	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, nil)
+	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, 5*time.Minute, cfg.EmbedHeaders())
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s", cfg.Path)
 	}

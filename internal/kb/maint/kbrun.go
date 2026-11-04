@@ -366,7 +366,8 @@ func Embed(stdout io.Writer, cfg *config.Config, name string, run EmbedRun) erro
 	// Сервер эмбеддингов: свой из настроек, иначе первый сервер конфига.
 	fallback := cfg.EmbedFallback()
 	timeout := 5 * time.Minute
-	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, timeout, nil)
+	// Заголовки — сервера векторов (kb.embed_server), как у поиска и службы.
+	emb := kbembed.New(cfg.KB.EmbedOptions(), fallback, timeout, cfg.EmbedHeaders())
 	if emb == nil {
 		return fmt.Errorf("смысловой поиск не настроен: задайте kb.embed_model в %s "+
 			"(например \"bge-m3\") и вытяните модель: ollama pull bge-m3", cfg.Path)

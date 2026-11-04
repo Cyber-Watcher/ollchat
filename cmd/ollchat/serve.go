@@ -94,6 +94,31 @@ func runServe(cfg *config.Config, addr string, withMCP bool, registry *tools.Reg
 	}
 }
 
+// serveOpts — настройки входа данных службы.
+//
+// Вектор вопроса считает эмбеддер с заголовками своего сервера
+// (cfg.EmbedHeaders: kb.embed_server — его, иначе первого сервера, если
+// эмбеддер идёт на его машину) — тот же источник, что у ollmcp и у карты
+// понятий службы (gmaint.QueryVector). До аудита этапа 123 здесь шли
+// заголовки первого сервера и при kb.embed_server: сервер векторов за
+// прокси отказывал, и служба молча искала по словам. Переводчик вопросов
+// говорит с первым сервером — и с его заголовками.
+func serveOpts(cfg *config.Config, token string, base *kb.Base, gsvc *gmaint.GraphService) kbserve.Opts {
+	fallback, headers := cfg.EmbedFallback(), cfg.EmbedFallbackHeaders()
+	return kbserve.Opts{
+		TableBoost: cfg.KB.TableBoost,
+		Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
+		RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
+		Base:       base,
+		Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, cfg.EmbedHeaders()),
+		Translator: qtranslate.New(cfg, fallback, headers),
+		Default:    cfg.KB.Default,
+		Token:      token,
+		Graph:      gsvc,
+		Verbose:    true,
+	}
+}
+
 // serveMux собирает маршруты службы: вход данных, граф и, если попросили,
 // MCP. Возвращает имена коллекций для строки запуска и закрытие журнала шагов.
 func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Registry,
@@ -111,16 +136,6 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 			"ollchat --kb-add имя /путь/к/книгам", cfg.KB.Dir)
 	}
 
-	// Вектор вопроса служба считает через первый сервер конфига — и с его
-	// заголовками, как диалог со своим сервером. Без них Ollama за прокси
-	// с авторизацией отказывала эмбеддеру, и служба молча откатывалась
-	// на поиск по словам.
-	fallback := ""
-	var headers map[string]string
-	if len(cfg.Servers) > 0 {
-		fallback, headers = cfg.Servers[0].URL, cfg.Servers[0].Headers
-	}
-
 	// Графовому входу — только инструменты графа. Реестр диалога содержит то,
 	// что человек включил себе (bash, запись файлов, правку кода), и отдать
 	// его службе значило бы исполнять это по сети без правил и подтверждений.
@@ -129,18 +144,8 @@ func serveMux(cfg *config.Config, token string, withMCP bool, registry *tools.Re
 		return nil, nil, nil, fmt.Errorf("набор графового входа службы: %w", err)
 	}
 
-	mux := kbserve.Handler(kbserve.Opts{
-		TableBoost: cfg.KB.TableBoost,
-		Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
-		RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
-		Base:       base,
-		Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
-		Translator: qtranslate.New(cfg, fallback, headers),
-		Default:    cfg.KB.Default,
-		Token:      token,
-		Graph:      &gmaint.GraphService{Cfg: cfg, Registry: graphReg, Base: base, Cache: cache},
-		Verbose:    true,
-	})
+	mux := kbserve.Handler(serveOpts(cfg, token, base,
+		&gmaint.GraphService{Cfg: cfg, Registry: graphReg, Base: base, Cache: cache}))
 
 	// Вход MCP на том же порту, если попросили. Клиенты MCP ходят в /mcp,
 	// клиенты ollchat — в /api/v1; две службы с двумя портами и двумя ключами

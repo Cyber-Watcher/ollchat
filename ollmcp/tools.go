@@ -51,11 +51,11 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 		return nil, kbserve.Opts{}, err
 	}
 
-	// Вектор вопроса служба считает через первый сервер конфига — и с его
-	// заголовками, как диалог со своим сервером. Без них Ollama за прокси
-	// с авторизацией отказывала эмбеддеру, и служба молча откатывалась
-	// на поиск по словам.
-	// Тот же источник, что у карты понятий службы (gmaint.QueryVector).
+	// Запасной адрес эмбеддера — первый сервер конфига. Заголовки эмбеддеру —
+	// cfg.EmbedHeaders (kb.embed_server — его), тот же источник, что у карты
+	// понятий службы (gmaint.QueryVector); без них Ollama за прокси
+	// отказывала, и служба молча откатывалась на поиск по словам. headers —
+	// заголовки первого сервера: с ним говорит переводчик вопросов.
 	fallback, headers := cfg.EmbedFallback(), cfg.EmbedFallbackHeaders()
 	// Один переводчик на службу: его кэш общий у инструментов и у /api/v1.
 	// nil — kb.translate выключен.
@@ -163,7 +163,9 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 			Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
 			RerankOpts: kb.RerankOpts{Candidates: cfg.KB.RerankCandidates, Snippet: cfg.KB.RerankSnippet},
 			Base:       base,
-			Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
+			// Заголовки — сервера векторов, как у инструментов выше: при
+			// kb.embed_server заголовки первого сервера ему не годятся.
+			Emb:        kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, cfg.EmbedHeaders()),
 			Translator: tr,
 			Default:    cfg.KB.Default,
 			Token:      kbserve.Token(),

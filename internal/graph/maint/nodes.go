@@ -56,8 +56,10 @@ func Nodes(stdout io.Writer, cfg *config.Config) error {
 	// Сверка модели — та же, что сборка делает перед стартом (Pool.Check): одни
 	// ли веса, шаблон, RENDERER/PARSER и параметры, одни ли версии Ollama. Здесь
 	// она видна до запуска, а не отказом сборки посреди ночной цепочки.
+	// Заголовки — те же, с которыми пойдёт сборка (GraphHeaders): иначе под
+	// прокси с авторизацией --nodes отказывал там, где сборка проходит.
 	model := cfg.Graph.Model
-	p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, nil)
+	p, err := graphex.NewPool(nodes, cfg.Graph.ExtractOptions(), 10*time.Minute, cfg.GraphHeaders())
 	switch {
 	case err != nil:
 		fmt.Fprintf(stdout, "\nсверка модели: %v\n", err)
