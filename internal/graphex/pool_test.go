@@ -300,6 +300,11 @@ func TestPoolCheckSameWeightsDifferentManifest(t *testing.T) {
 
 // Одни веса, но другой рецепт — параметры, RENDERER/PARSER — меняют ответ
 // модели, а значит и граф: отказ, и в нём сказано, что разошлось.
+//
+// Параметр для примера — top_k: запрос извлечения его не задаёт, и значение
+// из Modelfile доходит до модели. Прежде здесь стояла temperature, но её
+// запрос задаёт всегда (options), и расхождение в Modelfile ответа не меняет —
+// см. TestPoolCheckIgnoresParamsTheRequestSets.
 func TestPoolCheckRejectsDifferentRecipe(t *testing.T) {
 	a := newFakeNode(t, 0)
 	b := newFakeNode(t, 0)
@@ -307,9 +312,9 @@ func TestPoolCheckRejectsDifferentRecipe(t *testing.T) {
 		Node{Name: "a", URL: a.srv.URL, Workers: 1},
 		Node{Name: "b", URL: b.srv.URL, Workers: 1})
 
-	b.params = "temperature 0.6\ntop_k 20"
+	b.params = "temperature 1\ntop_k 40"
 	err := p.Check(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "параметры") {
+	if err == nil || !strings.Contains(err.Error(), "параметры") || !strings.Contains(err.Error(), "top_k 40") {
 		t.Errorf("разные параметры не пойманы: %v", err)
 	}
 

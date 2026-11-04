@@ -94,6 +94,10 @@ type poolNode struct {
 	spent time.Duration // суммарное время удачных запросов
 	off   bool          // выключен из работы
 
+	// banned — почему узел выключен до конца захода: вернулся в строй с другой
+	// моделью, чем при старте (revive). Не пусто — revive его больше не трогает.
+	banned string
+
 	// downs — сколько раз узел уже выключался, nextTry — когда его пробовать
 	// снова. Откат нужен против мигания: сервер, который отвечает на /api/version,
 	// но валит чат (карта занята, модель выгружена), иначе возвращался бы каждые
@@ -134,7 +138,13 @@ type Pool struct {
 	// probeEvery — шаг опроса наблюдателей. Тоже поле ради тестов.
 	probeEvery time.Duration
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// ref — отпечаток модели, которой начат заход: первого узла последней
+	// удачной Check, refName — имя этого узла. С ним revive сверяет узел,
+	// возвращающийся в строй. nil — Check не вызывали или узел один: тогда
+	// узел возвращается без сверки, как прежде.
+	ref     *ModelStamp
+	refName string
 	left    int           // сколько слотов ещё в обороте
 	lastErr error         // чем умер последний узел
 	dead    chan struct{} // закрыт, когда живых слотов не осталось
@@ -233,10 +243,14 @@ func (p *Pool) Names() []string {
 // и не чинится ничем, кроме полной пересборки, — тот же довод, по которому
 // сборка отказывается менять модель на полпути. Поэтому сверяются файлы весов
 // и проектора, квантование и рецепт (шаблон, RENDERER/PARSER, системный
-// промпт, параметры). Digest манифеста — только когда файлов узнать не
-// удалось: он расходится и от лицензии (ModelStamp). Разные версии Ollama —
-// предупреждение (Notes), а не отказ: подсказку для RENDERER собирает код
-// самой Ollama, и что это значит для извлечения, решает замер, а не догадка.
+// промпт, параметры). Digest манифеста — только когда файлов не назвал ни один
+// узел: он расходится и от лицензии (ModelStamp). Разные версии Ollama и
+// несверенные веса — предупреждение (Notes), а не отказ: подсказку для
+// RENDERER собирает код самой Ollama, и что это значит для извлечения, решает
+// замер, а не догадка. Правила сверки — compareStamps.
+//
+// Удачная Check запоминает отпечаток первого узла эталоном захода: с ним
+// сверяется узел, возвращающийся в строй (revive).
 func (p *Pool) Check(ctx context.Context) error {
 	p.notes = nil
 	type res struct {
@@ -271,53 +285,130 @@ func (p *Pool) Check(ctx context.Context) error {
 	if len(out) < 2 {
 		return nil
 	}
-	// Сверка весов: по файлам из Modelfile, а без них — по digest манифеста.
-	// Пустой digest бывает у старых сборок Ollama — тогда сравнивается только
-	// квантование, и молчать об этом нельзя.
 	first := out[0]
 	for _, r := range out[1:] {
-		a, b := first.stamp, r.stamp
-		if len(a.Files) > 0 && len(b.Files) > 0 {
-			if strings.Join(a.Files, " ") != strings.Join(b.Files, " ") {
-				return fmt.Errorf(
-					"на узлах %s и %s модель %s — это разные веса (файлы %s против %s).\n"+
-						"Собирать один граф разными весами нельзя: половина графа окажется "+
-						"собрана одной моделью, половина другой, а видно этого не будет ниоткуда.\n"+
-						"Приведите модель к одной версии на обоих серверах",
-					first.name, r.name, p.model, shortFiles(a.Files), shortFiles(b.Files))
-			}
-		} else if a.Digest != "" && b.Digest != "" && a.Digest != b.Digest {
-			return fmt.Errorf(
-				"на узлах %s и %s модель %s — это разные веса (digest %s против %s).\n"+
-					"Собирать один граф разными весами нельзя: половина графа окажется "+
-					"собрана одной моделью, половина другой, а видно этого не будет ниоткуда.\n"+
-					"Приведите модель к одной версии на обоих серверах",
-				first.name, r.name, p.model, short(a.Digest), short(b.Digest))
-		}
-		for i := range a.Recipe {
-			if i < len(b.Recipe) && a.Recipe[i].Value != b.Recipe[i].Value {
-				return fmt.Errorf(
-					"на узлах %s и %s у модели %s одни веса, но отличается часть «%s»:\n  %s: %q\n  %s: %q\n"+
-						"От этого зависит ответ модели, а значит и граф; приведите тег к одному "+
-						"Modelfile на обоих серверах",
-					first.name, r.name, p.model, a.Recipe[i].Name,
-					first.name, a.Recipe[i].Value, r.name, b.Recipe[i].Value)
-			}
-		}
-		if a.Version != b.Version {
-			p.notes = append(p.notes, fmt.Sprintf(
-				"версии Ollama на узлах разные: %s — %s, %s — %s; модель та же, "+
-					"но подсказку и расчёт делает сама Ollama",
-				first.name, a.Version, r.name, b.Version))
-		}
-		if r.stamp.Quant != first.stamp.Quant {
-			return fmt.Errorf(
-				"на узлах %s и %s у модели %s разное квантование (%s против %s).\n"+
-					"Это разные модели по качеству извлечения; один граф ими собирать нельзя",
-				first.name, r.name, p.model, first.stamp.Quant, r.stamp.Quant)
+		notes, err := compareStamps(first.name, r.name, first.stamp, r.stamp)
+		p.notes = append(p.notes, notes...)
+		if err != nil {
+			return err
 		}
 	}
+	// Эталон для revive: узел, вернувшийся посреди захода, сверяется с той
+	// моделью, которой заход начат, — по тем же правилам, что здесь.
+	ref := first.stamp
+	p.mu.Lock()
+	p.ref, p.refName = &ref, first.name
+	p.mu.Unlock()
 	return nil
+}
+
+// compareStamps сверяет отпечатки одной модели на двух узлах. Ошибка — граф
+// собрался бы двумя моделями; notes — то, что сборку не останавливает, но о чём
+// человек должен узнать: веса сверить не удалось, версии Ollama разные.
+// Одна на Check и на revive, чтобы узел, вернувшийся в строй, сверялся по тем
+// же правилам, что и при старте захода.
+//
+// Веса сверяются по файлам из Modelfile, а когда их не назвал ни один узел —
+// по digest манифеста. Файлы только у одного узла digest не заменяет: он
+// расходится и от лицензии (ModelStamp), и отказ по нему был бы ложным.
+// Веса, не сверенные ни так, ни так, — заметка с именами узлов: тогда
+// сравниваются только квантование и рецепт, и молчать об этом нельзя.
+func compareStamps(aName, bName string, a, b ModelStamp) (notes []string, err error) {
+	model := a.Model
+	differ := func(what string) error {
+		return fmt.Errorf(
+			"на узлах %s и %s модель %s — это разные веса (%s).\n"+
+				"Собирать один граф разными весами нельзя: половина графа окажется "+
+				"собрана одной моделью, половина другой, а видно этого не будет ниоткуда.\n"+
+				"Приведите модель к одной версии на обоих серверах",
+			aName, bName, model, what)
+	}
+	switch {
+	case len(a.Files) > 0 && len(b.Files) > 0:
+		if strings.Join(a.Files, " ") != strings.Join(b.Files, " ") {
+			return notes, differ(fmt.Sprintf("файлы %s против %s", shortFiles(a.Files), shortFiles(b.Files)))
+		}
+	case len(a.Files) == 0 && len(b.Files) == 0 && a.Digest != "" && b.Digest != "":
+		if a.Digest != b.Digest {
+			return notes, differ(fmt.Sprintf("digest %s против %s", short(a.Digest), short(b.Digest)))
+		}
+	default:
+		why := "Modelfile не назвал файлов весов ни у одного узла, а digest манифеста пуст"
+		if len(a.Files) > 0 {
+			why = "файлы весов в Modelfile названы только у узла " + aName
+		} else if len(b.Files) > 0 {
+			why = "файлы весов в Modelfile названы только у узла " + bName
+		}
+		notes = append(notes, fmt.Sprintf(
+			"веса модели %s на узлах %s и %s сверить не удалось: %s; сверены только "+
+				"квантование и рецепт", model, aName, bName, why))
+	}
+	for i := range a.Recipe {
+		if i < len(b.Recipe) && a.Recipe[i].Value != b.Recipe[i].Value {
+			line, ea, eb := firstDiff(a.Recipe[i].Value, b.Recipe[i].Value)
+			return notes, fmt.Errorf(
+				"на узлах %s и %s у модели %s отличается часть «%s», первое расхождение "+
+					"в строке %d:\n  %s: %q\n  %s: %q\n"+
+					"От этого зависит ответ модели, а значит и граф; приведите тег к одному "+
+					"Modelfile на обоих серверах",
+				aName, bName, model, a.Recipe[i].Name, line, aName, ea, bName, eb)
+		}
+	}
+	if a.Version != b.Version {
+		notes = append(notes, fmt.Sprintf(
+			"версии Ollama на узлах разные: %s — %s, %s — %s; модель та же, "+
+				"но подсказку и расчёт делает сама Ollama",
+			aName, a.Version, bName, b.Version))
+	}
+	if a.Quant != b.Quant {
+		return notes, fmt.Errorf(
+			"на узлах %s и %s у модели %s разное квантование (%s против %s).\n"+
+				"Это разные модели по качеству извлечения; один граф ими собирать нельзя",
+			aName, bName, model, a.Quant, b.Quant)
+	}
+	return notes, nil
+}
+
+// diffContext — сколько знаков показывать по обе стороны от расхождения.
+const diffContext = 200
+
+// firstDiff — номер первой расходящейся строки (с единицы) и её окрестность
+// у каждой стороны: до diffContext знаков до первого различного знака и после
+// него, обрезка помечена «…». Части рецепта приходят с чужого сервера целиком
+// (шаблон бывает в сотни килобайт), и отказ с обоими текстами занимал журнал
+// и экран; человеку нужно место расхождения, а не всё остальное.
+func firstDiff(a, b string) (line int, ea, eb string) {
+	la, lb := strings.Split(a, "\n"), strings.Split(b, "\n")
+	i := 0
+	for i < len(la) && i < len(lb) && la[i] == lb[i] {
+		i++
+	}
+	var sa, sb string
+	if i < len(la) {
+		sa = la[i]
+	}
+	if i < len(lb) {
+		sb = lb[i]
+	}
+	ra, rb := []rune(sa), []rune(sb)
+	k := 0
+	for k < len(ra) && k < len(rb) && ra[k] == rb[k] {
+		k++
+	}
+	return i + 1, around(ra, k), around(rb, k)
+}
+
+// around — знаки r в окрестности diffContext от позиции k.
+func around(r []rune, k int) string {
+	from, to := k-diffContext, k+diffContext
+	pre, post := "…", "…"
+	if from <= 0 {
+		from, pre = 0, ""
+	}
+	if to >= len(r) {
+		to, post = len(r), ""
+	}
+	return pre + string(r[from:to]) + post
 }
 
 func short(digest string) string {
@@ -602,10 +693,15 @@ func (p *Pool) waitAlive(ctx context.Context) error {
 			p.reviveMu.Unlock()
 		}
 		p.mu.Lock()
-		alive := p.left > 0
+		alive, hopeless, why := p.left > 0, p.allBanned(), p.lastErr
 		p.mu.Unlock()
 		if alive {
 			return nil
+		}
+		// Все узлы выключены до конца захода (вернулись с другой моделью):
+		// ждать node_wait незачем — вернуть их в строй revive не станет.
+		if hopeless {
+			return fmt.Errorf("все узлы извлечения выключены до конца захода: %w", why)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("все узлы извлечения выключены и не вернулись за %s: %w",
@@ -707,16 +803,35 @@ func (p *Pool) Watch(ctx context.Context) {
 // Узел, выключавшийся не в первый раз, проверяется реже — но только пока
 // в строю есть кто-то ещё. Когда живых узлов нет, откат не соблюдается:
 // заход всё равно стоит, и ждать лишнее незачем.
+//
+// **Узел сверяется с эталоном захода** (p.ref, его ставит Check): сервер,
+// пролежавший пять минут, мог вернуться после `ollama pull` с другими весами
+// или другим рецептом, и без сверки граф дальше собирался бы двумя моделями —
+// молча. Разошёлся отпечаток — узел выключается до конца захода (banned)
+// и больше не проверяется: часть захода он уже пропустил, а сервер, сменивший
+// модель однажды, сменит её и снова. Отпечаток снять не удалось — узел ждёт
+// следующей проверки, как не ответивший.
 func (p *Pool) revive(ctx context.Context) {
 	for _, n := range p.nodes {
 		p.mu.Lock()
 		off, early := n.off, time.Now().Before(n.nextTry) && p.left > 0
+		banned, ref, refName := n.banned != "", p.ref, p.refName
 		p.mu.Unlock()
-		if !off || early {
+		if !off || early || banned {
 			continue
 		}
 		if err := n.ex.Check(ctx); err != nil {
 			continue
+		}
+		if ref != nil {
+			st, err := n.ex.Stamp(ctx)
+			if err != nil {
+				continue
+			}
+			if _, err := compareStamps(refName+" (при старте захода)", n.name, *ref, st); err != nil {
+				p.ban(n, err)
+				continue
+			}
 		}
 		p.mu.Lock()
 		if !n.off { // вернули, пока проверяли
@@ -729,6 +844,32 @@ func (p *Pool) revive(ctx context.Context) {
 		// наблюдателя работу не отменяют (12.09.2026).
 		p.restore(n)
 	}
+}
+
+// ban выключает узел до конца захода: он вернулся с другой моделью, чем при
+// старте. Узел уже выключен (revive берёт только такие), его слоты изъяты из
+// оборота и там и остаются. Причина идёт в NodeStat.Banned, в строку хода
+// и в ошибку «все узлы выключены», если других узлов не осталось.
+func (p *Pool) ban(n *poolNode, err error) {
+	reason := fmt.Errorf("узел %s вернулся в строй с другой моделью, чем при старте захода, "+
+		"и выключен до его конца: %w", n.name, err)
+	p.mu.Lock()
+	if n.off && n.banned == "" {
+		n.banned = reason.Error()
+		p.lastErr = reason
+	}
+	p.mu.Unlock()
+}
+
+// allBanned — все узлы выключены до конца захода: ждать возвращения некого.
+// Вызывается под замком.
+func (p *Pool) allBanned() bool {
+	for _, n := range p.nodes {
+		if n.banned == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // NodeStat — что узел сделал за заход.
@@ -746,6 +887,10 @@ type NodeStat struct {
 	Busy string
 	// Probe — последний снимок наблюдателя; nil, если наблюдателя нет.
 	Probe *nodeprobe.Report
+	// Banned — почему узел выключен до конца захода (вернулся с другой
+	// моделью, чем при старте); пусто — узел не выключен навсегда. Полный
+	// текст для журнала; строка хода (Line) говорит короче.
+	Banned string
 }
 
 // Stats — срез по узлам для строки хода и журнала.
@@ -755,7 +900,7 @@ func (p *Pool) Stats() []NodeStat {
 	out := make([]NodeStat, 0, len(p.nodes))
 	for _, n := range p.nodes {
 		s := NodeStat{Name: n.name, Done: n.done, Errs: n.errs, Off: n.off,
-			Busy: n.note, Probe: n.last}
+			Busy: n.note, Probe: n.last, Banned: n.banned}
 		if n.done > 0 {
 			s.Avg = n.spent / time.Duration(n.done)
 		}
@@ -772,7 +917,9 @@ func (p *Pool) Line() string {
 		if s.Avg > 0 {
 			part += fmt.Sprintf(" (%.1f с)", s.Avg.Seconds())
 		}
-		if s.Off {
+		if s.Banned != "" {
+			part += " ВЫКЛ до конца захода (вернулся с другой моделью)"
+		} else if s.Off {
 			part += " ВЫКЛ"
 		} else if s.Busy != "" {
 			// Не «ждёт»: узел работает, просто на его карте есть посторонняя

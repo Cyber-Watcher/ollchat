@@ -161,16 +161,52 @@ func (e *Extractor) Check(ctx context.Context) error {
 		return fmt.Errorf("сервер %s: не удалось получить список моделей: %w", e.url, err)
 	}
 	for _, m := range tags {
-		if m.Name == e.model || strings.HasPrefix(m.Name, e.model+":") {
+		if sameTag(m.Name, e.model) {
 			return nil
 		}
 	}
-	var names []string
-	for _, m := range tags {
-		names = append(names, m.Name)
+	return fmt.Errorf("на сервере %s нет модели %q; есть: %s", e.url, e.model, tagNames(tags))
+}
+
+// maxListedTags — сколько имён моделей показывать в отказе «модели нет».
+const maxListedTags = 20
+
+// tagNames — имена моделей сервера для отказа: не больше maxListedTags,
+// каждое в кавычках с экранированием. Имена приходят с чужого сервера,
+// а отказ печатается в ленту и журнал: ни управляющих знаков, ни списка
+// в мегабайты в нём быть не должно.
+func tagNames(tags []ollama.ModelInfo) string {
+	if len(tags) == 0 {
+		return "ни одной модели"
 	}
-	return fmt.Errorf("на сервере %s нет модели %q; есть: %s",
-		e.url, e.model, strings.Join(names, ", "))
+	var names []string
+	for i, m := range tags {
+		if i == maxListedTags {
+			names = append(names, fmt.Sprintf("и ещё %d", len(tags)-maxListedTags))
+			break
+		}
+		names = append(names, fmt.Sprintf("%q", m.Name))
+	}
+	return strings.Join(names, ", ")
+}
+
+// sameTag — имя из /api/tags и есть та модель, которую чат получит по имени
+// model. Имя без тега Ollama читает как «:latest»; «проба:8b» — другой тег
+// с другими весами, и чат по «проба» его не возьмёт, а ответит 404. Прежнее
+// сравнение по началу имени принимало любой тег и брало отпечаток у первого
+// из них — какого, решал порядок строк в /api/tags.
+func sameTag(name, model string) bool {
+	return withTag(name) == withTag(model)
+}
+
+// withTag — имя модели с тегом: без тега — «:latest». Тег — то, что после
+// двоеточия в последней части пути: в «registry.example:5000/m» двоеточие
+// принадлежит адресу, а не тегу.
+func withTag(name string) string {
+	if strings.Contains(name[strings.LastIndex(name, "/")+1:], ":") {
+		return name
+	}
+	return name + ":latest"
 }
 
 // ModelStamp — отпечаток модели на сервере: чем она отличается от одноимённой
@@ -182,6 +218,7 @@ func (e *Extractor) Check(ctx context.Context) error {
 // на одном), а файл весов, шаблон, RENDERER/PARSER и параметры совпали.
 // Поэтому пул сверяет Files и рецепт, а digest — только когда Files пуст.
 type ModelStamp struct {
+	Model   string   // имя модели, как оно уходит в чат
 	Digest  string   // digest манифеста из /api/tags
 	Quant   string   // уровень квантования, «Q4_K_M»
 	Size    int64    // размер всех слоёв в байтах
@@ -204,13 +241,18 @@ type Part struct {
 // собранный наполовину одними весами, наполовину другими, выглядит исправным
 // и не чинится ничем, кроме полной пересборки.
 //
-// Квантование и digest — из /api/tags, файлы весов и рецепт — из /api/show
+// Digest и размер — из строки /api/tags ровно этого тега (имя без тега —
+// «:latest», см. sameTag); квантование, файлы весов и рецепт — из /api/show
 // по тому же имени, которое уйдёт в чат: так сверяется ровно та модель,
 // которую сервер возьмёт, а не первая с похожим тегом.
+//
+// Параметры в рецепте — без тех, что запрос извлечения задаёт сам (options):
+// их значение из Modelfile запрос перекрывает, на ответ оно не влияет,
+// и расхождение в нём между узлами — не повод отказывать.
 func (e *Extractor) Stamp(ctx context.Context) (ModelStamp, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	var st ModelStamp
+	st := ModelStamp{Model: e.model}
 	v, err := e.client.Version(ctx)
 	if err != nil {
 		return st, fmt.Errorf("сервер не отвечает: %w", err)
@@ -222,7 +264,7 @@ func (e *Extractor) Stamp(ctx context.Context) (ModelStamp, error) {
 	}
 	found := false
 	for _, m := range tags {
-		if m.Name == e.model || strings.HasPrefix(m.Name, e.model+":") {
+		if sameTag(m.Name, e.model) {
 			st.Digest, st.Quant, st.Size = m.Digest, m.Details.QuantizationLevel, m.Size
 			found = true
 			break
@@ -235,15 +277,36 @@ func (e *Extractor) Stamp(ctx context.Context) (ModelStamp, error) {
 	if err != nil {
 		return st, fmt.Errorf("модель %q: не удалось прочитать /api/show: %w", e.model, err)
 	}
+	// Квантование — того же ответа, что и файлы: старые версии Ollama его
+	// в /api/show не отдают, тогда остаётся взятое из строки тега.
+	if q := show.Details.QuantizationLevel; q != "" {
+		st.Quant = q
+	}
 	files, directives := modelfileParts(show.Modelfile)
 	st.Files = files
 	st.Recipe = []Part{
 		{"шаблон", show.Template},
 		{"RENDERER/PARSER", strings.Join(directives, "\n")},
 		{"системный промпт", show.System},
-		{"параметры", sortedLines(show.Parameters)},
+		{"параметры", sortedLines(ownParams(show.Parameters, e.options()))},
 	}
 	return st, nil
+}
+
+// ownParams — строки PARAMETER из /api/show без тех, чьё имя запрос задаёт
+// сам в options. Список имён берётся из options() — того же места, где
+// собирается запрос, — чтобы сверка и запрос не разошлись.
+func ownParams(params string, sent map[string]any) string {
+	var keep []string
+	for _, l := range strings.Split(params, "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			if _, ok := sent[f[0]]; ok {
+				continue
+			}
+		}
+		keep = append(keep, l)
+	}
+	return strings.Join(keep, "\n")
 }
 
 // modelfileParts — файлы весов (FROM, ADAPTER) и строки RENDERER/PARSER из
@@ -325,17 +388,6 @@ func (e *Extractor) Extract(ctx context.Context, system, user string) (string, e
 	}
 
 	think := false
-	opts := map[string]any{"temperature": e.temp}
-	if e.numCtx > 0 {
-		opts["num_ctx"] = e.numCtx
-	}
-	// Потолок на длину ответа. Замерено 23.08.2026: на отдельных кусках модель
-	// выдавала 3 648 токенов вместо трёхсот — тридцать пять секунд на один
-	// кусок вместо трёх. Разбор такой простыни всё равно обрезается нашими же
-	// пределами, так что платить за неё незачем.
-	if e.maxTokens > 0 {
-		opts["num_predict"] = e.maxTokens
-	}
 	req := ollama.ChatRequest{
 		Model: e.model,
 		Messages: []ollama.Message{
@@ -344,7 +396,7 @@ func (e *Extractor) Extract(ctx context.Context, system, user string) (string, e
 		},
 		Think:     &think,
 		KeepAlive: e.keepAlive,
-		Options:   opts,
+		Options:   e.options(),
 	}
 
 	var last error
@@ -363,6 +415,24 @@ func (e *Extractor) Extract(ctx context.Context, system, user string) (string, e
 		case <-time.After(time.Duration(try+1) * e.retryPause):
 		}
 	}
+}
+
+// options — параметры модели, которые запрос извлечения задаёт сам, поверх
+// PARAMETER из Modelfile. Одно место на запрос (Extract) и на сверку узлов
+// (Stamp): что перекрыто здесь, то сверке не нужно.
+func (e *Extractor) options() map[string]any {
+	opts := map[string]any{"temperature": e.temp}
+	if e.numCtx > 0 {
+		opts["num_ctx"] = e.numCtx
+	}
+	// Потолок на длину ответа. Замерено 23.08.2026: на отдельных кусках модель
+	// выдавала 3 648 токенов вместо трёхсот — тридцать пять секунд на один
+	// кусок вместо трёх. Разбор такой простыни всё равно обрезается нашими же
+	// пределами, так что платить за неё незачем.
+	if e.maxTokens > 0 {
+		opts["num_predict"] = e.maxTokens
+	}
+	return opts
 }
 
 func (e *Extractor) once(ctx context.Context, req ollama.ChatRequest) (string, error) {
