@@ -329,8 +329,17 @@ func (c *Collection) collect(paths []string, opt IndexOpts) ([]candidate, error)
 			// причину отказа и велел взять её всё равно. Без этого исключения
 			// ключ не работал бы вовсе: файл не менялся, и книга не попала бы
 			// даже в кандидаты.
+			//
+			// Второе исключение — «скан» у текстового файла. Текстовый файл
+			// сканом не бывает: так до 02.11.2026 записывался файл короче
+			// одного куска, и не менявшийся файл носил бы эту запись вечно,
+			// а доктор советовал бы ему /addimg. Такой файл перечитывается
+			// и получает вид тем же путём, что новый (extract): «короче
+			// одного куска» или куски, если нарезка с тех пор их даёт.
+			// Читать его — доли миллисекунды: в нём меньше куска текста.
 			if rec, ok := known[p]; ok && rec.Unchanged(info) && !opt.Force &&
-				!(opt.KeepThin && rec.Kind == BookThin) {
+				!(opt.KeepThin && rec.Kind == BookThin) &&
+				!(rec.Kind == BookScan && document.IndexExt(p)) {
 				return nil
 			}
 			seen[p] = true
@@ -379,10 +388,11 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 	}
 
 	type parsed struct {
-		cand   candidate
-		doc    *document.Doc
-		chunks []Chunk
-		err    error
+		cand      candidate
+		doc       *document.Doc
+		chunks    []Chunk
+		textBytes int64 // объём текста для проверки на тощую книгу; 0 — размер файла
+		err       error
 	}
 
 	jobs := make(chan candidate)
@@ -396,9 +406,9 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 				if ctx.Err() != nil {
 					return
 				}
-				doc, chunks, err := parseBook(cand.path, opt.MaxBytes, c.meta.Chunk)
+				doc, chunks, textBytes, err := parseBook(cand.path, opt.MaxBytes, c.meta.Chunk)
 				select {
-				case done <- parsed{cand: cand, doc: doc, chunks: chunks, err: err}:
+				case done <- parsed{cand: cand, doc: doc, chunks: chunks, textBytes: textBytes, err: err}:
 				case <-ctx.Done():
 					return
 				}
@@ -439,9 +449,24 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 		// разойтись. Проверка идёт здесь, а не в пробе на скан: пока книга
 		// не разобрана, объёма текста никто не знает, а именно он и отличает
 		// превью издательства от книги.
+		//
+		// Мера объёма — та же, по которой считались куски. У PDF и EPUB это
+		// размер файла: картинки страниц и есть то, что проверка ловит (N8N —
+		// 67 МБ картинок и 7 кусков). У текстового файла сам файл и есть текст,
+		// а не текстом в нём бывают только вставленные файлы base64, которые
+		// нарезка вырезает до счёта кусков. Судить по размеру файла вместе с ними
+		// значило сравнивать куски одного текста с объёмом другого: markdown
+		// в 600 строк с 14 картинками по 330 КБ — 61 кусок на 4,6 МБ, «похоже
+		// на превью издательства», и файл не попадал в индекс (аудит 04.11.2026).
+		// Вычитать картинки из размера файла — то же самое, но окольным путём:
+		// объём взятого текста нарезка и так знает.
 		thin, thinWhy := false, ""
 		if p.err == nil && len(p.chunks) > 0 && !opt.KeepThin {
-			thin, thinWhy = opt.Thin.Verdict(len(p.chunks), rec.Size)
+			size := rec.Size
+			if p.textBytes > 0 {
+				size = p.textBytes
+			}
+			thin, thinWhy = opt.Thin.Verdict(len(p.chunks), size)
 		}
 		switch {
 		case p.err != nil:
@@ -574,24 +599,33 @@ func (c *Collection) extract(ctx context.Context, files []candidate, opt IndexOp
 }
 
 // parseBook читает книгу и режет её на куски.
-func parseBook(path string, maxBytes int64, opt ChunkOpts) (*document.Doc, []Chunk, error) {
+//
+// textBytes — объём, по которому судить, не тощая ли книга: у текстового
+// файла это его текст без вырезанных вставленных файлов, у PDF и EPUB — 0,
+// и тогда судят по размеру файла (почему — в комментарии к Verdict в extract).
+func parseBook(path string, maxBytes int64, opt ChunkOpts) (doc *document.Doc, chunks []Chunk, textBytes int64, err error) {
 	if maxBytes <= 0 {
 		maxBytes = 512 << 20
 	}
 	// Сначала дешёвая проба: у скана она отвечает по пяти страницам вместо
 	// полного разбора всех трёхсот.
 	if _, err := document.Probe(path, maxBytes, 5); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	doc, parts, err := document.Parts(path, maxBytes)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	// У текста своя нарезка: приёмы, написанные под PDF, на нём вредны.
 	if doc.Kind.Text() {
-		return doc, SplitText(parts, opt), nil
+		chunks, textBytes = splitText(parts, opt)
+		// Название markdown — его первый заголовок, и картинка base64
+		// в заголовке иначе легла бы в реестр названием в сотни килобайт.
+		// Чистит тот же scrubBinary, что строки и заголовки разделов.
+		doc.Title = scrubBinary(doc.Title)
+		return doc, chunks, textBytes, nil
 	}
-	return doc, Split(parts, opt), nil
+	return doc, Split(parts, opt), 0, nil
 }
 
 func classifyErr(err error) BookKind {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mbSize переводит мегабайты в байты. Функцией, а не выражением в месте
@@ -228,6 +229,132 @@ func TestShortTextFileIsNotScan(t *testing.T) {
 	}
 	if strings.Contains(out, "Сканы без текстового слоя") || strings.Contains(out, "/addimg") {
 		t.Errorf("короткий файл попал в сканы:\n%s", out)
+	}
+}
+
+// TestDataURIMarkdownNotThin — markdown с картинками base64 не объявляется
+// тощим и индексируется.
+//
+// Куски считаются по тексту, из которого тела картинок вырезаны, а размер
+// до правки брался у файла вместе с картинками: 600 строк текста и 14 картинок
+// по 330 КБ — 64 куска на 4,6 МБ, «похоже на превью издательства», и файл
+// не попадал в индекс вовсе (так случилось бы с файлом плана 02.11.2026).
+func TestDataURIMarkdownNotThin(t *testing.T) {
+	base, books := newBase(t)
+	if err := os.MkdirAll(books, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	img := fakeBase64(330 << 10)
+	var b strings.Builder
+	b.WriteString("# План работ\n\n")
+	images := 0
+	for i := 0; i < 600; i++ {
+		if i%43 == 10 && images < 14 {
+			fmt.Fprintf(&b, "![](data:image/png;base64,%s)\n", img)
+			images++
+		}
+		fmt.Fprintf(&b, "Строка плана %d: настройка таймаутов службы и проверка индекса книг по разделам.\n", i)
+	}
+	if n := strings.Count(b.String(), ";base64,"); n != 14 {
+		t.Fatalf("картинок в образце %d, нужно 14", n)
+	}
+	path := filepath.Join(books, "plan.md")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(path); info.Size() <= int64(DefaultThinMinMB)<<20 {
+		t.Fatalf("образец %d байт — не крупнее порога в %d МБ, проверка ничего не проверит", info.Size(), DefaultThinMinMB)
+	}
+
+	c, err := base.Create("test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Add(context.Background(), []string{books}, IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec BookRec
+	for _, d := range c.LiveBooks() {
+		rec = d
+	}
+	if rec.Kind != BookOK || res.Added != 1 || res.Thin != 0 {
+		t.Fatalf("вид %q, добавлено %d, тощих %d, причина %q — markdown с картинками должен войти в индекс",
+			rec.Kind, res.Added, res.Thin, rec.Err)
+	}
+	if hits, _ := c.Search("таймаутов службы", DefaultSearchOpts()); len(hits) == 0 {
+		t.Error("книга в индексе, но не ищется")
+	}
+}
+
+// TestOldScanTextRecBecomesShort — запись «скан» у короткого текстового файла,
+// оставшаяся от прежних версий, при доливке переходит в «короче одного куска».
+//
+// Файл не менялся, и до правки обход пропускал его без чтения: запись «скан»
+// жила вечно, а доктор советовал ей /addimg — распознавание картинок для
+// заглушки Go на 176 знаков. Скан PDF при этом заново не читается: у него
+// причина та же, а чтение стоит.
+func TestOldScanTextRecBecomesShort(t *testing.T) {
+	base, books := newBase(t)
+	if err := os.MkdirAll(books, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err := base.Create("test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := func(name, body string) string {
+		p := filepath.Join(books, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Так запись «скан» выглядела до 02.11.2026: без формата и без номера.
+		if err := c.appendDoc(BookRec{Path: p, Size: info.Size(), ModTime: info.ModTime().UnixNano(),
+			At: time.Now().Unix(), Kind: BookScan, Err: "текста не нашлось"}); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	stub := old("signal_other.go", "//go:build !unix\n\npackage kb\n\nvar sigZero = 0\n")
+	note := old("note.md", "# Заметка\n\nКоротко.\n")
+	old("scan.pdf", "%PDF-1.4")
+
+	res, err := c.Add(context.Background(), []string{books}, IndexOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Short != 2 || res.Scans != 0 {
+		t.Errorf("при доливке коротких %d, сканов %d — ожидались два коротких и скан PDF без перечитывания",
+			res.Short, res.Scans)
+	}
+	kinds := map[string]BookKind{}
+	for _, d := range c.LiveBooks() {
+		kinds[filepath.Base(d.Path)] = d.Kind
+	}
+	for _, p := range []string{stub, note} {
+		if k := kinds[filepath.Base(p)]; k != BookShort {
+			t.Errorf("%s: вид %q, ожидался %q", filepath.Base(p), k, BookShort)
+		}
+	}
+	if k := kinds["scan.pdf"]; k != BookScan {
+		t.Errorf("scan.pdf: вид %q — скан PDF трогать незачем", k)
+	}
+
+	// Запись дошла до реестра на диске, а не только до памяти процесса.
+	again, err := base.Open("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := again.Stats(); st.Short != 2 || st.Scans != 1 {
+		t.Errorf("после переоткрытия коротких %d, сканов %d — ожидалось 2 и 1", st.Short, st.Scans)
+	}
+	if out := Doctor(again, DoctorOpts{}); !strings.Contains(out, "Сканы без текстового слоя: 1") ||
+		!strings.Contains(out, "Короче одного куска: 2") {
+		t.Errorf("доктор числит короткие файлы сканами:\n%s", out)
 	}
 }
 
