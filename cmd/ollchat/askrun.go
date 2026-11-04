@@ -268,7 +268,7 @@ func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model
 
 	if coll != nil || (o.library != nil && askMixWanted(cfg, o)) {
 		deps := mixer.Deps{
-			Embedder:   kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), srv.Headers),
+			Embedder:   kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), cfg.EmbedHeadersFor(srv)),
 			Translator: qtranslate.New(cfg, srv.URL, srv.Headers),
 			Reranker:   kbrerank.New(cfg.KB.RerankOptions()),
 			BooksOn:    askMixBooks(cfg, o),

@@ -42,6 +42,8 @@ var commands = []cmdInfo{
 	{Name: "help", Alias: []string{"?"}, Desc: "справка по командам и клавишам"},
 	{Name: "servers", Desc: "список серверов из конфига (Ctrl+S)"},
 	{Name: "server", Args: "<имя>", Desc: "переключиться на сервер"},
+	{Name: "graph-server", Args: "[<имя> [force]]", Desc: "сервер сборки графа — пишется в конфиг; без имени — кто несёт роли", Need: "graph"},
+	{Name: "embed-server", Args: "[<имя> [force]]", Desc: "сервер векторов (эмбеддер) — пишется в конфиг", Need: "kb"},
 	{Name: "models", Desc: "список моделей — запрашивается у сервера заново (Ctrl+R)"},
 	{Name: "model", Args: "<имя>", Desc: "переключиться на модель"},
 	{Name: "ps", Desc: "что загружено в память сервера"},

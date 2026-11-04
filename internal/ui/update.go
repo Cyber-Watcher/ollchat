@@ -94,6 +94,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case graphHealthMsg:
 		return m.onGraphHealth(msg)
 
+	case roleCheckMsg:
+		return m.onRoleCheck(msg)
+
 	case healthTickMsg:
 		return m, m.checkGraphHealthCmd()
 

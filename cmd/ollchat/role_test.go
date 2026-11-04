@@ -48,7 +48,10 @@ var (
 	// архивов с ведущей машины; читателю разрешены.
 	flagsReading = []string{
 		"--version", "--init-config", "--kb-list", "--kb-doctor", "--kb-rebase",
-		"--graph-pending", "--nodes", "--graph-doctor", "--graph-repartition-due",
+		"--graph-pending", "--nodes", "--role-servers", "--graph-doctor", "--graph-repartition-due",
+		// Пишут файл конфига, а не коллекцию и граф: читателю тоже нужен свой
+		// сервер чата и эмбеддера для вопросов (этап 123).
+		"--use-graph-server", "--use-embed-server", "--use-chat-server",
 		"--graph-archive", "--graph-archives", "--graph-restore", "--graph-find",
 		"--kb-eval-gen", "--kb-sample", "--kb-eval", "--graph-entry-eval", "--graph-book",
 		"--graph-stats", "--doc-probe", "--scan-redact", "--scan-redact-llm", "--census",
@@ -93,6 +96,7 @@ var (
 		"--kb-max-per-book", "--kb-min-cosine", "--kb-semantic-weight",
 		"--mix-pin", "--mix-full", "--mix-sense-snippet", "--mix-only", "--kb-eval-gen-must", "--kb-eval-gen-code", "--logprobs",
 		"--kb-eval-gen-distract", "--tool-perturb", "--kb-eval-part", "--mcp-yes", "--kb-source",
+		"--use-force",
 	}
 )
 

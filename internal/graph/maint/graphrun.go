@@ -537,7 +537,7 @@ func QueryVector(ctx context.Context, g *graph.Graph, cfg *config.Config, query 
 	// Заголовки — того же сервера, что адрес: без них служба (GraphService.Search)
 	// за прокси с авторизацией молча считала карту без смыслового входа, хотя
 	// её инструменты получали заголовки (ollmcp, рецензия этапа 121).
-	emb := kbembed.New(cfg.KB.EmbedOptions(), cfg.EmbedFallback(), 30*time.Second, cfg.EmbedFallbackHeaders())
+	emb := kbembed.New(cfg.KB.EmbedOptions(), cfg.EmbedFallback(), 30*time.Second, cfg.EmbedHeaders())
 	if emb == nil {
 		return nil
 	}

@@ -168,13 +168,16 @@ func (m *Model) openServerPicker() tea.Cmd {
 	items := make([]pickerItem, 0, len(m.cfg.Servers))
 	for i := range m.cfg.Servers {
 		s := &m.cfg.Servers[i]
+		// Какие роли, кроме чата, сервер несёт сейчас (этап 123): граф и
+		// векторы выбираются не здесь, а командами, — выбор пишется в конфиг.
 		items = append(items, pickerItem{
 			label:   s.Name,
-			columns: []string{trimScheme(s.URL), s.Model},
+			columns: []string{trimScheme(s.URL), s.Model, m.roleMarks(s)},
 			value:   s.Name,
 		})
 	}
-	m.picker = newPicker(pickServer, "Выбор сервера Ollama", items, m.server.Name)
+	m.picker = newPicker(pickServer, "Выбор сервера для чата (граф и векторы — /graph-server, /embed-server)",
+		items, m.server.Name)
 	m.syncHeights()
 	return nil
 }

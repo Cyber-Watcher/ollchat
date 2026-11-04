@@ -62,7 +62,7 @@ func vecDrift(stdout io.Writer, cfg *config.Config, collName string, n int, vs s
 		if url != "" {
 			o.URL = url
 		}
-		return kbembed.New(o, cfg.EmbedFallback(), 5*time.Minute, cfg.EmbedFallbackHeaders())
+		return kbembed.New(o, cfg.EmbedFallback(), 5*time.Minute, cfg.EmbedHeaders())
 	}
 	main := mk("")
 	if main == nil {

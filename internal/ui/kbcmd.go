@@ -957,7 +957,7 @@ func (m *Model) embedder() kb.Embedder {
 		url = m.server.URL
 	}
 	if m.kb.emb == nil || m.kb.embURL != url {
-		m.kb.emb = kbembed.New(m.cfg.KB.EmbedOptions(), m.server.URL, m.server.TimeoutDuration(), m.server.Headers)
+		m.kb.emb = kbembed.New(m.cfg.KB.EmbedOptions(), m.server.URL, m.server.TimeoutDuration(), m.cfg.EmbedHeadersFor(m.server))
 		m.kb.embURL = url
 	}
 	if m.kb.emb == nil {

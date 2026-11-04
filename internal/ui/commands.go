@@ -224,6 +224,8 @@ func commandHandlers() []cmdHandler {
 			}
 			return m.switchServer(arg)
 		}},
+		{names: []string{"graph-server"}, run: func(m *Model, arg string) tea.Cmd { return m.roleServerCmd(roleGraph, arg) }},
+		{names: []string{"embed-server"}, run: func(m *Model, arg string) tea.Cmd { return m.roleServerCmd(roleEmbed, arg) }},
 		// Список моделей всегда запрашивается заново: на сервере их добавляют
 		// и удаляют, а показанный при запуске список к этому моменту врёт.
 		{names: []string{"models"}, run: func(m *Model, _ string) tea.Cmd {

@@ -36,6 +36,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 	"github.com/Cyber-Watcher/ollchat/internal/qtranslate"
 	"github.com/Cyber-Watcher/ollchat/internal/redact"
+	"github.com/Cyber-Watcher/ollchat/internal/roleserver"
 	"github.com/Cyber-Watcher/ollchat/internal/session"
 	"github.com/Cyber-Watcher/ollchat/internal/tools"
 	"github.com/Cyber-Watcher/ollchat/internal/ui"
@@ -161,6 +162,11 @@ type cliFlags struct {
 	graphLinkNew          *bool
 	graphIgnoreBusy       *bool
 	nodes                 *bool
+	roleServers           *bool
+	useGraphServer        *string
+	useEmbedServer        *string
+	useChatServer         *string
+	useForce              *bool
 	graphLog              *string
 	graphNewModel         *bool
 	graphNewPrompt        *bool
@@ -506,6 +512,20 @@ func parseFlagsNoParse() *cliFlags {
 			"только показывают состояние карт и сборку не отменяют")
 	f.nodes = flag.Bool("nodes", false,
 		"состояние серверов сборки по данным ollnode: карта, память, слоты, беды из журнала")
+	f.roleServers = flag.Bool("role-servers", false,
+		"куда пойдут сборка графа и счёт векторов по этому конфигу: строки graph, node, embed\n"+
+			"через табуляцию (для обвязки; [graph].server и kb.embed_server уже подставлены)")
+	f.useGraphServer = flag.String("use-graph-server", "",
+		"записать в конфиг сервер сборки графа ([graph].server), проверив модель и веса на его узлах;\n"+
+			"под идущей работой с коллекцией — отказ; как /graph-server в TUI")
+	f.useEmbedServer = flag.String("use-embed-server", "",
+		"записать в конфиг сервер векторов (kb.embed_server), сверив веса модели с паспортом векторов\n"+
+			"каждой коллекции; под идущей работой с коллекцией — отказ; как /embed-server в TUI")
+	f.useChatServer = flag.String("use-chat-server", "",
+		"записать в конфиг сервер чата по умолчанию (general.default_server), проверив, что он\n"+
+			"отвечает и его модель на нём есть")
+	f.useForce = flag.Bool("use-force", false,
+		"с --use-*-server: записать выбор, даже если проверка модели не прошла (идущую работу не обходит)")
 	f.graphLog = flag.String("graph-log", "",
 		"с --graph-build: дозаписывать ход в этот файл строками с отметкой времени")
 	f.graphNewModel = flag.Bool("graph-allow-model-change", false,
@@ -922,6 +942,10 @@ func commands(f *cliFlags) []cliCommand {
 		{name: "--graph-build", on: str(f.graphBuild)},
 		{name: "--graph-pending", on: str(f.graphPending)},
 		{name: "--nodes", on: on(f.nodes)},
+		{name: "--role-servers", on: on(f.roleServers)},
+		{name: "--use-graph-server", on: str(f.useGraphServer)},
+		{name: "--use-embed-server", on: str(f.useEmbedServer)},
+		{name: "--use-chat-server", on: str(f.useChatServer)},
 		{name: "--graph-doctor", on: str(f.graphDoctor)},
 		{name: "--graph-repartition-due", on: str(f.graphRepartition)},
 		{name: "--graph-rebase-books", on: str(f.graphRebaseBooks), can: cmdDry},
@@ -1027,7 +1051,21 @@ func checkCommandLine(f *cliFlags) error {
 	if err := checkKBSource(f); err != nil {
 		return err
 	}
+	if err := checkUseForce(f); err != nil {
+		return err
+	}
 	return checkDryRun(f)
+}
+
+// checkUseForce — --use-force (этап 123) записывает выбор сервера мимо
+// проверки модели; без --use-*-server ему нечего записывать, и молча
+// пропущенный ключ выглядел бы выполненным (как --mcp-yes).
+func checkUseForce(f *cliFlags) error {
+	if *f.useForce && *f.useGraphServer == "" && *f.useEmbedServer == "" && *f.useChatServer == "" {
+		return errors.New("--use-force действует только с --use-graph-server, --use-embed-server " +
+			"или --use-chat-server: он записывает выбор сервера, не прошедший проверку; без них ему нечего записывать")
+	}
+	return nil
 }
 
 // checkEmptyValues — команда с пустым значением ключа (аудит 23.10.2026):
@@ -1277,6 +1315,14 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Pending(os.Stdout, cfg, *f.graphPending, *f.graphFolder, *f.graphBookName, *f.graphDocsFile)
 	case *f.nodes:
 		return true, gmaint.Nodes(os.Stdout, cfg)
+	case *f.roleServers:
+		return true, printRoleServers(os.Stdout, cfg)
+	case *f.useGraphServer != "":
+		return true, useRoleServer(os.Stdout, os.Stderr, cfg, roleserver.Graph, *f.useGraphServer, *f.useForce)
+	case *f.useEmbedServer != "":
+		return true, useRoleServer(os.Stdout, os.Stderr, cfg, roleserver.Embed, *f.useEmbedServer, *f.useForce)
+	case *f.useChatServer != "":
+		return true, useRoleServer(os.Stdout, os.Stderr, cfg, roleserver.Chat, *f.useChatServer, *f.useForce)
 	case *f.graphDoctor != "":
 		return true, gmaint.Doctor(os.Stdout, cfg, *f.graphDoctor)
 	case *f.graphRepartition != "":
@@ -1746,7 +1792,7 @@ func run() error {
 		ConfluenceToken: confluence.Resolver(cfSession, config.ExpandPath(cfg.Confluence.TokenFile),
 			cfg.Confluence.TokenCmd, cfg.Confluence.TokenEnv),
 		ConfluenceTimeout: cfg.Confluence.TimeoutDuration(),
-		Embedder:          kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), srv.Headers),
+		Embedder:          kbembed.New(cfg.KB.EmbedOptions(), srv.URL, srv.TimeoutDuration(), cfg.EmbedHeadersFor(srv)),
 		Translator:        qtranslate.New(cfg, srv.URL, srv.Headers),
 	})
 	if err != nil {

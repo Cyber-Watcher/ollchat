@@ -587,6 +587,11 @@ type KB struct {
 	EmbedBatch   int    `toml:"embed_batch"`
 	EmbedWorkers int    `toml:"embed_workers"` // пачек одновременно
 
+	// EmbedServer — имя сервера из [[servers]], на котором считать векторы
+	// (этап 123). Задано — перекрывает embed_url; пишется из TUI командой
+	// /embed-server, его видят сборка графа, индексация и служба.
+	EmbedServer string `toml:"embed_server"`
+
 	// EmbedHeader — дописывать ли к куску шапку «название книги · с. N» перед
 	// тем, как считать его вектор.
 	//
@@ -860,6 +865,18 @@ type Graph struct {
 	// графа окажется собрана одной моделью, половина другой; сборка это
 	// проверяет и отказывается идти.
 	Nodes []GraphNode `toml:"nodes"`
+
+	// Server — имя сервера из [[servers]], на котором собирать граф (этап 123).
+	// Задано — перекрывает url и nodes раздела: адрес берётся у сервера, узлы —
+	// из его [[servers.nodes]], а без них сервер — один узел (с его probe,
+	// если задан). Пишется из TUI командой /graph-server, и следующая сборка
+	// и ночной cron видят выбор, перечитав конфиг. Подраздел [graph.<имя>]
+	// наследует его, как любой ключ; сбросить там — server = "".
+	Server string `toml:"server"`
+	// resolvedServer — для какого Server уже подставлены url и nodes:
+	// finalize бывает вызван дважды, а замечание о перекрытых узлах
+	// должно сравнивать с узлами из файла, а не с подставленными.
+	resolvedServer string
 
 	// MaxTokens — потолок длины ответа модели (num_predict). Замерено
 	// 23.08.2026: без него на отдельных кусках модель писала 3 648 токенов
@@ -1568,6 +1585,15 @@ type Server struct {
 	// расчёта /calc, когда замеров olldiagtools ещё нет: по сети размер карты
 	// узнать неоткуда, Ollama его не сообщает.
 	VRAMGiB float64 `toml:"vram_gib"`
+
+	// Nodes — карты этого сервера для сборки графа (этап 123): то же, что
+	// [[graph.nodes]], но у сервера, — раздел [[servers.nodes]]. Действуют,
+	// когда сервер выбран для графа ([graph].server); на чат не влияют.
+	Nodes []GraphNode `toml:"nodes"`
+	// Probe и ProbeToken — наблюдатель ollnode сервера без своих узлов: при
+	// выборе для графа сервер становится одним узлом с этим probe.
+	Probe      string `toml:"probe"`
+	ProbeToken string `toml:"probe_token"`
 
 	timeout      time.Duration
 	chatTimeout  time.Duration
@@ -2280,6 +2306,10 @@ func validateGraphNodes(section string, nodes []GraphNode) error {
 // EmbedFallback — сервер для эмбеддера, когда kb.embed_url не задан:
 // первый сервер конфига. Одно место вместо восьми одинаковых блоков
 // в командах обслуживания.
+//
+// С kb.embed_server он не меняется: адрес эмбеддера тогда уже в KB.EmbedURL,
+// а этот же запасной адрес берут извлечение графа при пустом [graph].url и
+// переводчик вопросов — им сервер эмбеддера не годится.
 func (c *Config) EmbedFallback() string {
 	if len(c.Servers) > 0 {
 		return c.Servers[0].URL
@@ -2293,6 +2323,38 @@ func (c *Config) EmbedFallback() string {
 func (c *Config) EmbedFallbackHeaders() map[string]string {
 	if len(c.Servers) > 0 {
 		return c.Servers[0].Headers
+	}
+	return nil
+}
+
+// EmbedHeaders — заголовки для самого эмбеддера: выбран kb.embed_server —
+// его, иначе те же, что у запасного сервера. Переводчику и извлечению —
+// EmbedFallbackHeaders: они говорят с первым сервером.
+func (c *Config) EmbedHeaders() map[string]string {
+	if s := c.embedServer(); s != nil {
+		return s.Headers
+	}
+	return c.EmbedFallbackHeaders()
+}
+
+// embedServer — сервер из kb.embed_server; nil — не выбран.
+func (c *Config) embedServer() *Server {
+	if c.KB.EmbedServer == "" {
+		return nil
+	}
+	s, _ := c.ServerByName(c.KB.EmbedServer)
+	return s
+}
+
+// EmbedHeadersFor — заголовки для эмбеддера, которому как запасной сервер
+// передан сервер чата: выбран kb.embed_server — его заголовки, а не чата,
+// иначе авторизация одного сервера уходила бы другому.
+func (c *Config) EmbedHeadersFor(chat *Server) map[string]string {
+	if s := c.embedServer(); s != nil {
+		return s.Headers
+	}
+	if chat != nil {
+		return chat.Headers
 	}
 	return nil
 }
@@ -2820,6 +2882,143 @@ func (c *Config) finalize() error {
 		return fmt.Errorf("general.default_server: сервер %q не описан в конфиге", c.General.DefaultServer)
 	}
 
+	return c.resolveRoles()
+}
+
+// resolveRoles подставляет серверы, выбранные по имени для графа и эмбеддера
+// ([graph].server, [graph.<имя>].server, kb.embed_server), в адреса и узлы,
+// которые читают сборка, индексация и служба (этап 123). Одно место: все они
+// берут готовые Graph.URL, Graph.Nodes и KB.EmbedURL и о ссылке по имени не
+// знают. Зовётся последним в finalize — адреса серверов к этому времени
+// проверены и приведены к виду без косой черты в конце.
+func (c *Config) resolveRoles() error {
+	for _, s := range c.Servers {
+		if err := validateGraphNodes("servers."+s.Name+".nodes", s.Nodes); err != nil {
+			return err
+		}
+		if s.Probe != "" {
+			pu, err := url.Parse(s.Probe)
+			if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+				return fmt.Errorf("сервер %q: probe должен быть адресом вида http://хост:11435", s.Name)
+			}
+		}
+	}
+	if err := c.resolveGraphServer(&c.graphBase, "graph", true); err != nil {
+		return err
+	}
+	if err := c.resolveGraphServer(&c.Graph, "graph", true); err != nil {
+		return err
+	}
+	for name, g := range c.GraphNamed {
+		if err := c.resolveGraphServer(&g, "graph."+name, false); err != nil {
+			return err
+		}
+		c.GraphNamed[name] = g
+	}
+	if c.KB.EmbedServer != "" {
+		s, ok := c.ServerByName(c.KB.EmbedServer)
+		if !ok {
+			return fmt.Errorf("kb.embed_server = %q: такого сервера нет в [[servers]] (есть: %s)",
+				c.KB.EmbedServer, strings.Join(c.ServerNames(), ", "))
+		}
+		if u := strings.TrimRight(c.KB.EmbedURL, "/"); u != "" && u != s.URL {
+			c.warnOnce(fmt.Sprintf("kb.embed_server = %q перекрывает kb.embed_url — векторы считает %s",
+				s.Name, s.Name))
+		}
+		c.KB.EmbedURL = s.URL
+	}
+	return nil
+}
+
+// resolveGraphServer подставляет сервер раздела графа. warn — назвать
+// перекрытые узлы раздела: у подраздела [graph.<имя>] они чаще всего
+// унаследованы от [graph], и замечание было бы о чужих узлах.
+func (c *Config) resolveGraphServer(g *Graph, section string, warn bool) error {
+	if g.Server == "" || g.resolvedServer == g.Server {
+		return nil
+	}
+	s, ok := c.ServerByName(g.Server)
+	if !ok {
+		return fmt.Errorf("%s.server = %q: такого сервера нет в [[servers]] (есть: %s)",
+			section, g.Server, strings.Join(c.ServerNames(), ", "))
+	}
+	// Ловушка my-mistakes #140: узел перекрывает адрес. Здесь ссылка на сервер
+	// перекрывает и то и другое, и забытый [[graph.nodes]] не должен молча
+	// пропасть — человек должен увидеть, что его узлы больше не действуют.
+	if warn && len(g.Nodes) > 0 {
+		c.warnOnce(fmt.Sprintf("%s.server = %q перекрывает [[%s.nodes]] — сборка идёт на узлы сервера %s",
+			section, s.Name, section, s.Name))
+	}
+	g.URL = s.URL
+	g.Nodes = s.GraphNodes()
+	g.resolvedServer = g.Server
+	return nil
+}
+
+// SetGraphServer повторяет в памяти запись [graph].server = name (этап 123,
+// /graph-server): адрес и узлы сервера — в общем разделе графа и в тех
+// подразделах и выбранном графе, что несли прежний выбор. Выбранный граф
+// правится на месте, а не берётся заново из GraphFor: подстройки, сделанные
+// в нём за сеанс (/graph tune), не должны пропасть.
+func (c *Config) SetGraphServer(name string) error {
+	if _, ok := c.ServerByName(name); !ok {
+		return fmt.Errorf("сервер %q не описан в конфиге (есть: %s)", name, strings.Join(c.ServerNames(), ", "))
+	}
+	old := c.graphBase.Server
+	set := func(g *Graph, section string) error {
+		g.Server, g.resolvedServer = name, ""
+		return c.resolveGraphServer(g, section, false)
+	}
+	if err := set(&c.graphBase, "graph"); err != nil {
+		return err
+	}
+	for n, g := range c.GraphNamed {
+		if g.Server == old {
+			if err := set(&g, "graph."+n); err != nil {
+				return err
+			}
+			c.GraphNamed[n] = g
+		}
+	}
+	if c.Graph.Server == old {
+		return set(&c.Graph, "graph")
+	}
+	return nil
+}
+
+// SetEmbedServer повторяет в памяти запись kb.embed_server = name
+// (/embed-server): эмбеддер TUI сменит адрес при следующем вопросе.
+func (c *Config) SetEmbedServer(name string) error {
+	s, ok := c.ServerByName(name)
+	if !ok {
+		return fmt.Errorf("сервер %q не описан в конфиге (есть: %s)", name, strings.Join(c.ServerNames(), ", "))
+	}
+	c.KB.EmbedServer, c.KB.EmbedURL = s.Name, s.URL
+	return nil
+}
+
+// warnOnce добавляет замечание к конфигу, если такого ещё нет: finalize
+// бывает вызван дважды (конфиг проекта поверх общего).
+func (c *Config) warnOnce(msg string) {
+	for _, w := range c.Warnings {
+		if w == msg {
+			return
+		}
+	}
+	c.Warnings = append(c.Warnings, msg)
+}
+
+// GraphNodes — узлы сборки графа, когда сервер выбран для графа: свои
+// [[servers.nodes]], а без них — сам сервер одним узлом, если у него есть
+// probe (узел нужен ради наблюдателя); иначе пусто, и сборка идёт одним
+// адресом сервера, как при [graph].url.
+func (s Server) GraphNodes() []GraphNode {
+	if len(s.Nodes) > 0 {
+		return append([]GraphNode(nil), s.Nodes...)
+	}
+	if s.Probe != "" {
+		return []GraphNode{{Name: s.Name, URL: s.URL, Probe: s.Probe, ProbeToken: s.ProbeToken}}
+	}
 	return nil
 }
 

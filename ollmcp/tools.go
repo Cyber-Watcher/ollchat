@@ -138,7 +138,7 @@ func build(cfg *config.Config, service bool, so mcp.ServiceOptions) (*mcp.Server
 		AnswerStyle:    cfg.KB.AnswerStyle,
 		SearxURL:       cfg.Web.SearxngURL,
 		SearxTimeout:   cfg.Web.TimeoutDuration(),
-		Embedder:       kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, headers),
+		Embedder:       kbembed.New(cfg.KB.EmbedOptions(), fallback, 0, cfg.EmbedHeaders()),
 		Translator:     tr,
 	})
 	if err != nil {

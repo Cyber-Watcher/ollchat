@@ -90,20 +90,32 @@ func vecPaths(dir string) (dat, meta string) {
 	return filepath.Join(dir, "vectors.dat"), filepath.Join(dir, "vectors.meta")
 }
 
+// ReadVecMeta читает один паспорт векторов коллекции из её каталога, без
+// самих векторов — килобайт вместо сотен мегабайт (этап 123: TUI сверяет
+// веса эмбеддера выбранного сервера, не открывая коллекцию). ok = false —
+// векторов нет.
+func ReadVecMeta(dir string) (meta VecMeta, ok bool, err error) {
+	_, metaPath := vecPaths(dir)
+	if err := readJSON(metaPath, &meta); err != nil {
+		if os.IsNotExist(err) {
+			return VecMeta{}, false, nil
+		}
+		return VecMeta{}, false, err
+	}
+	if meta.Magic != vecMagic || meta.Dim <= 0 || meta.Count <= 0 {
+		return VecMeta{}, false, nil
+	}
+	return meta, true, nil
+}
+
 // OpenVectors читает векторы коллекции. Отсутствие файлов — не ошибка:
 // коллекция без смыслов просто ищется по словам.
 func OpenVectors(dir string) (*Vectors, error) {
-	dat, metaPath := vecPaths(dir)
-	var meta VecMeta
-	if err := readJSON(metaPath, &meta); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+	meta, ok, err := ReadVecMeta(dir)
+	if err != nil || !ok {
 		return nil, err
 	}
-	if meta.Magic != vecMagic || meta.Dim <= 0 || meta.Count <= 0 {
-		return nil, nil
-	}
+	dat, _ := vecPaths(dir)
 
 	f, err := os.Open(dat)
 	if err != nil {
