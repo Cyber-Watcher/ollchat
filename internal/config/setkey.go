@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/Cyber-Watcher/ollchat/internal/fsx"
 )
 
 // Запись одного значения в файл конфига из самой программы (этап 123: выбор
@@ -50,15 +55,35 @@ type KeyEdit struct {
 //   - новый файл проходит Load — тот же разбор и те же проверки, что у запуска;
 //   - файл не изменился с момента чтения (его могли править в редакторе).
 //
+// Два писателя из ollchat (окно и ключ обвязки) идут по очереди: вся цепочка
+// чтение → правка → замена держит замок на файле рядом с конфигом
+// (.<имя>.lock). Без него вторая правка читала файл до замены первой и
+// затирала её молча (аудит этапа 123: потеря в 23 случаях из 300).
+// Замена — fsx.WriteFileAtomicCheck: данные и каталог сброшены на диск,
+// права прежние; запущенный от root, писатель возвращает файлу владельца.
+//
+// Файл без права записи владельцу и файл с жёсткой ссылкой не заменяются:
+// первый закрыт нарочно, у второго замена разорвала бы связь, и по второму
+// имени остался бы прежний конфиг.
+//
 // Ссылка не заменяется файлом: пишется её цель, с теми же правами.
 func SetString(path string, e KeyEdit) error {
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("конфиг %s: %w", path, err)
 	}
+	unlock, err := lockConfig(real)
+	if err != nil {
+		return fmt.Errorf("конфиг %s: %w", path, err)
+	}
+	defer unlock()
+
 	st, err := os.Stat(real)
 	if err != nil {
 		return fmt.Errorf("конфиг %s: %w", path, err)
+	}
+	if err := replaceable(st); err != nil {
+		return fmt.Errorf("конфиг %s: %w — выбор не записан", path, err)
 	}
 	old, err := os.ReadFile(real)
 	if err != nil {
@@ -72,33 +97,96 @@ func SetString(path string, e KeyEdit) error {
 		return nil
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(real), "."+filepath.Base(real)+".set-*")
-	if err != nil {
-		return fmt.Errorf("конфиг %s: %w", path, err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // после переименования файла уже нет — ошибка не важна
-	_, werr := tmp.Write(out)
-	cerr := tmp.Close()
-	if werr != nil || cerr != nil {
-		return fmt.Errorf("конфиг %s: запись копии: %w", path, errors.Join(werr, cerr))
-	}
-	if err := os.Chmod(tmpName, st.Mode().Perm()); err != nil {
-		return fmt.Errorf("конфиг %s: %w", path, err)
-	}
-	if _, _, err := Load(tmpName); err != nil {
-		msg := strings.ReplaceAll(err.Error(), tmpName, path)
-		return fmt.Errorf("после правки %s.%s конфиг не проходит проверку, файл не тронут: %s",
-			e.Section, e.Key, msg)
-	}
-	now, err := os.ReadFile(real)
-	if err != nil || !bytes.Equal(now, old) {
-		return fmt.Errorf("конфиг %s изменился, пока шла правка, — файл не тронут, повторите", path)
-	}
-	if err := os.Rename(tmpName, real); err != nil {
+	var checkErr error // отказ проверки — уже с путём конфига, без обёртки
+	err = fsx.WriteFileAtomicCheck(real, out, st.Mode().Perm(), func(tmpName string) error {
+		if err := keepOwner(tmpName, st); err != nil {
+			checkErr = fmt.Errorf("конфиг %s: владелец копии: %w", path, err)
+		} else if _, _, err := Load(tmpName); err != nil {
+			msg := strings.ReplaceAll(err.Error(), tmpName, path)
+			checkErr = fmt.Errorf("после правки %s.%s конфиг не проходит проверку, файл не тронут: %s",
+				e.Section, e.Key, msg)
+		} else if now, err := os.ReadFile(real); err != nil || !bytes.Equal(now, old) {
+			checkErr = fmt.Errorf("конфиг %s изменился, пока шла правка, — файл не тронут, повторите", path)
+		}
+		return checkErr
+	})
+	switch {
+	case checkErr != nil:
+		return checkErr
+	case err != nil:
 		return fmt.Errorf("конфиг %s: %w", path, err)
 	}
 	return nil
+}
+
+// lockTimeout — сколько ждать чужой правки конфига. Правка — доли секунды,
+// так что дольше ждать значит, что замок держит зависший процесс.
+const lockTimeout = 10 * time.Second
+
+// lockConfig берёт замок на правку конфига real: flock на файле
+// .<имя>.lock в том же каталоге. Замок на самом конфиге не годится — его
+// файл заменяется переименованием, и второй писатель запер бы уже другой
+// файл. Снимая замок, писатель удаляет его файл, чтобы рядом с конфигом
+// ничего не оставалось; поэтому взявший замок сверяет, что по имени лежит
+// тот самый файл, который он запер: ждавший на удалённом файле иначе
+// прошёл бы вместе с тем, кто создал новый.
+func lockConfig(real string) (func(), error) {
+	name := filepath.Join(filepath.Dir(real), "."+filepath.Base(real)+".lock")
+	deadline := time.Now().Add(lockTimeout)
+	for {
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("замок правки %s: %w", name, err)
+		}
+		for {
+			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			if err == nil || !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+				break
+			}
+			if time.Now().After(deadline) {
+				f.Close()
+				return nil, fmt.Errorf("конфиг правит другой процесс дольше %v (замок %s) — повторите", lockTimeout, name)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("замок правки %s: %w", name, err)
+		}
+		held, herr := f.Stat()
+		now, nerr := os.Stat(name)
+		if herr == nil && nerr == nil && os.SameFile(held, now) {
+			return func() {
+				_ = os.Remove(name)
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				f.Close()
+			}, nil
+		}
+		f.Close() // прежний писатель удалил этот файл — запирать заново
+	}
+}
+
+// replaceable — можно ли заменить файл конфига новым: у владельца есть право
+// записи, и других имён у файла нет.
+func replaceable(st os.FileInfo) error {
+	if st.Mode().Perm()&0o200 == 0 {
+		return fmt.Errorf("файл только для чтения (права %04o)", st.Mode().Perm())
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
+		return fmt.Errorf("у файла есть жёсткие ссылки (имён: %d) — замена разорвала бы их, правьте файл руками", sys.Nlink)
+	}
+	return nil
+}
+
+// keepOwner отдаёт копии владельца прежнего файла, если пишет root (sudo):
+// иначе конфиг человека стал бы файлом root, и его правка закрылась бы.
+// Не root сменить владельца не может — и копия остаётся его.
+func keepOwner(tmpName string, st os.FileInfo) error {
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || os.Geteuid() != 0 || int(sys.Uid) == os.Geteuid() && int(sys.Gid) == os.Getegid() {
+		return nil
+	}
+	return os.Chown(tmpName, int(sys.Uid), int(sys.Gid))
 }
 
 // setStringIn — сама правка над содержимым файла, без диска.
@@ -217,10 +305,56 @@ func sameExceptKey(old, out []byte, section []string, key, value string) error {
 		m = nm
 	}
 	m[key] = value
-	if !reflect.DeepEqual(a, b) {
+	if !sameTOML(a, b) {
 		return fmt.Errorf("правка задела не только %s.%s — файл не тронут", strings.Join(section, "."), key)
 	}
 	return nil
+}
+
+// sameTOML — reflect.DeepEqual для разобранного TOML, только NaN здесь равен
+// NaN: значение nan в любом разделе иначе делало любую правку «задевшей
+// чужое», и выбор сервера не писался с вводящим в заблуждение отказом.
+func sameTOML(a, b any) bool {
+	switch x := a.(type) {
+	case float64:
+		y, ok := b.(float64)
+		return ok && (x == y || math.IsNaN(x) && math.IsNaN(y))
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := y[k]
+			if !ok || !sameTOML(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !sameTOML(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case []map[string]any:
+		y, ok := b.([]map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !sameTOML(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // tomlEntry — заголовок раздела или пара ключ = значение и её место в файле.
@@ -239,9 +373,15 @@ type tomlEntry struct {
 // понимая строки (в том числе многострочные), массивы и встроенные таблицы
 // на нескольких строках — иначе `[` в начале строки внутри массива или
 // многострочной строки читался бы заголовком раздела.
+//
+// BOM в начале файла пропускается: разборщик TOML его принимает, и файл,
+// который программа читает, должен и правиться.
 func scanTOML(data []byte) ([]tomlEntry, error) {
 	var out []tomlEntry
 	i := 0
+	if bytes.HasPrefix(data, []byte("\xEF\xBB\xBF")) {
+		i = 3
+	}
 	for i < len(data) {
 		ls := i
 		i = skipBlank(data, i)

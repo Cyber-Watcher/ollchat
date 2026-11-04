@@ -30,6 +30,16 @@ import (
 // после перезаписи становился 0644 (вместе с содержимым, которое его владелец
 // закрыл от чужих глаз), а umask 077 человека не действовал вовсе.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return WriteFileAtomicCheck(path, data, perm, nil)
+}
+
+// WriteFileAtomicCheck — WriteFileAtomic с последней проверкой перед заменой:
+// before получает имя готового временного файла (данные на диске, права как
+// у прежнего) и решает, ставить ли его на место. Ошибка before — временный
+// файл удаляется, прежний не тронут. Нужна записи конфига (config.SetString):
+// новый файл проходит ту же загрузку, что у запуска, до того как заменит
+// прежний, а не после. nil — без проверки.
+func WriteFileAtomicCheck(path string, data []byte, perm os.FileMode, before func(tmp string) error) error {
 	dir := filepath.Dir(path)
 	keep, hasOld := existingPerm(path)
 	tmp, err := createTemp(dir, filepath.Base(path), perm)
@@ -59,6 +69,12 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 		if err := os.Chmod(tmpName, keep); err != nil {
 			cleanup()
 			return fmt.Errorf("права %s: %w", path, err)
+		}
+	}
+	if before != nil {
+		if err := before(tmpName); err != nil {
+			cleanup()
+			return err
 		}
 	}
 	if err := os.Rename(tmpName, path); err != nil {
