@@ -59,6 +59,13 @@ ACTION=update
 # WANT_VERSION — поставить именно эту версию (-version), а не последнюю:
 # чтобы два сервера шли на одной версии и чтобы было чем откатиться.
 WANT_VERSION=""
+# ALLOW_UNVERIFIED — ставить архив и тогда, когда в выпуске нет sha256sum.txt
+# (-allow-unverified). Без ключа такой выпуск — отказ: молча ставить
+# несверенное нельзя, а старые выпуски без файла сумм бывают.
+ALLOW_UNVERIFIED=0
+# RELEASE_JSON — описание выпуска с GitHub, полученное ОДИН раз за запуск
+# (load_release); версия, архив и файл сумм берутся из него.
+RELEASE_JSON=""
 RESTORE_DIR=""
 TMP_DIRS=()
 
@@ -67,6 +74,10 @@ cleanup() {
     for d in "${TMP_DIRS[@]:-}"; do
         [ -n "$d" ] && [ -d "$d" ] && rm -rf "$d"
     done
+    # Без этого ловушка возвращала код последней проверки: при пустом списке
+    # он 1, и под set -e успешный выход (справка, «обновление не требуется»)
+    # превращался в код 1. Код отказа (die → exit 1) остаётся прежним.
+    return 0
 }
 trap cleanup EXIT
 
@@ -93,6 +104,10 @@ $SCRIPT_NAME — установка, обновление и удаление Ol
   -y              не задавать вопросов (для неинтерактивного запуска)
   -version X.Y.Z  поставить именно эту версию вместо последней — выровнять
                   с другим сервером или откатиться на прежнюю
+  -allow-unverified
+                  ставить и тогда, когда в выпуске нет sha256sum.txt (старые
+                  выпуски); без ключа такой архив не ставится. Если файл сумм
+                  есть, архив сверяется всегда
 
 Что скрипт делает и чего не делает:
   • перед установкой проверяет драйверы NVIDIA и ставит рекомендованные,
@@ -123,6 +138,7 @@ while [ $# -gt 0 ]; do
             [[ $1 =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "-version: «$1» — не номер версии вида 0.40.11"
             WANT_VERSION=${1#v}
             ;;
+        -allow-unverified|--allow-unverified) ALLOW_UNVERIFIED=1 ;;
         -h|--help) usage; exit 0 ;;
         *) die "неизвестный ключ: $1 (см. $SCRIPT_NAME -h)" ;;
     esac
@@ -244,19 +260,36 @@ release_api() {
     fi
 }
 
+# load_release — получить описание выпуска в RELEASE_JSON; код 1 — не получено.
+#
+# Один запрос на запуск, а не по запросу на версию, архив и суммы. До 04.11.2026
+# каждый из трёх ходил в API сам, а у API без учётки предел — 60 запросов
+# в час на адрес. Третий запрос, упёршийся в предел, отдавал пустоту, она
+# читалась как «в выпуске нет sha256sum.txt», и скрипт останавливал службу
+# и стирал /usr/local/lib/ollama ради архива, которого никто не сверил.
+#
+# Зовётся в самом сеансе, а не внутри $(…): из подоболочки значение
+# переменной назад не вернулось бы, и каждый разбор снова ходил бы в сеть.
+load_release() {
+    RELEASE_JSON=$(fetch_text "$(release_api)" 2>/dev/null) || RELEASE_JSON=""
+    [ -n "$RELEASE_JSON" ]
+}
+
 # latest_version — версия, которую ставим: из описания выпуска, поэтому
 # несуществующий номер после -version даёт пустоту и отказ, а не попытку
 # качать то, чего нет.
 latest_version() {
-    fetch_text "$(release_api)" 2>/dev/null \
+    printf '%s\n' "$RELEASE_JSON" \
         | grep -m1 '"tag_name"' \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
         | head -1
 }
 
 # sums_url — ссылка на файл контрольных сумм выпуска; пусто, если его нет.
+# Пустота здесь значит «нет в выпуске», только если описание получено —
+# это проверяет verify_archive.
 sums_url() {
-    fetch_text "$(release_api)" 2>/dev/null \
+    printf '%s\n' "$RELEASE_JSON" \
         | grep -oE '"browser_download_url": *"[^"]+/sha256sum\.txt"' \
         | cut -d'"' -f4 \
         | head -1
@@ -264,14 +297,20 @@ sums_url() {
 
 # verify_archive — сверить скачанный архив с sha256sum.txt выпуска: оборванная
 # и докачанная (curl -C -) закачка или подмена по дороге видны здесь, а не
-# падением службы после замены файлов. Несошедшаяся сумма — отказ до остановки
-# службы; выпуска без файла сумм — предупреждение.
+# падением службы после замены файлов. Всё, что не сверка, — отказ до остановки
+# службы: несошедшаяся сумма, неполученное описание выпуска, выпуск без файла
+# сумм (этот — кроме ключа -allow-unverified).
 verify_archive() {
     local file=$1 dir=$2 version=$3 sums
+    [ -n "$RELEASE_JSON" ] \
+        || die "описание выпуска $version с github не получено — сверить архив не с чем, не ставлю"
     sums=$(sums_url) || true
     if [ -z "$sums" ]; then
-        warn "в выпуске $version нет sha256sum.txt — архив не сверен"
-        return 0
+        if [ "$ALLOW_UNVERIFIED" = 1 ]; then
+            warn "в выпуске $version нет sha256sum.txt — архив не сверен (ключ -allow-unverified)"
+            return 0
+        fi
+        die "в выпуске $version нет sha256sum.txt — сверить архив не с чем, не ставлю. Поставить без сверки — ключ -allow-unverified"
     fi
     fetch "$sums" "$dir/sha256sum.txt" || die "не удалось скачать sha256sum.txt выпуска $version"
     (cd "$dir" && sha256sum -c --ignore-missing sha256sum.txt) >/dev/null 2>&1 \
@@ -286,8 +325,8 @@ verify_archive() {
 # и выбираем подходящий, предпочитая .tgz как более переносимый.
 # Варианты rocm, mlx и jetpack пропускаем: это сборки под другое железо.
 asset_url() {
-    local arch=$1 json
-    json=$(fetch_text "$(release_api)" 2>/dev/null) || return 1
+    local arch=$1 json=$RELEASE_JSON
+    [ -n "$json" ] || return 1
 
     local urls
     urls=$(printf '%s' "$json" \
@@ -702,6 +741,25 @@ install_ollama() {
     ok "распакована версия $got"
 }
 
+# upgrade_apt ВЕРСИЯ — обновить пакетную установку и проверить, что встало.
+#
+# apt ставит ту версию, что лежит в его источнике, а не названную ключом
+# -version. Без проверки «-version 0.40.11» молча давал бы любую другую,
+# а отчёт после установки выглядел бы успехом. С -version чужая версия —
+# отказ; без ключа — предупреждение: источник apt просто отстаёт от github.
+upgrade_apt() {
+    local want=$1 got
+    say "  установка пакетная, обновляю через apt…"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade "$SERVICE"
+    got=$(current_version || true)
+    [ "$got" = "$want" ] && return 0
+    if [ -n "$WANT_VERSION" ]; then
+        die "apt поставил версию ${got:-неизвестна}, а нужна $want (-version): apt берёт версию из своего источника. Список версий пакета — apt-cache madison $SERVICE; нужную — apt-get install $SERVICE=<версия пакета>"
+    fi
+    warn "apt поставил версию ${got:-неизвестна}, последняя на github — $want: источник apt отстаёт"
+}
+
 start_service() {
     systemctl daemon-reload
     systemctl enable "$SERVICE" >/dev/null 2>&1 || true
@@ -780,6 +838,8 @@ do_install_or_update() {
 
     local kind current latest
     kind=$(install_kind)
+    # Пустое описание даёт пустую версию, и отказ ниже говорит, почему.
+    load_release || true
     latest=$(latest_version) || true
     if [ -n "$WANT_VERSION" ]; then
         [ -n "$latest" ] || die "выпуска v$WANT_VERSION на github нет (или нет сети)"
@@ -835,9 +895,7 @@ do_install_or_update() {
 
     step "Обновление $current → $latest"
     if [ "$kind" = apt ]; then
-        say "  установка пакетная, обновляю через apt…"
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade "$SERVICE"
+        upgrade_apt "$latest"
     else
         # Обновление ручной установки — это замена файлов. Конфиги и модели
         # остаются на месте, поэтому копию снимаем на всякий случай, а не ради
