@@ -68,13 +68,26 @@ func vecDrift(stdout io.Writer, cfg *config.Config, collName string, n int, vs s
 	if main == nil {
 		return fmt.Errorf("эмбеддер не настроен: kb.embed_model")
 	}
+	// Размерность индекса — из паспорта векторов; у паспорта без неё —
+	// по сохранённому вектору.
+	dim := meta.Dim
+	if dim <= 0 && len(stored) > 0 {
+		dim = len(stored[0])
+	}
 	ctx := context.Background()
 	fmt.Fprintf(stdout, "эмбеддер: %s на %s\n", main.Model(), main.URL())
 	got, err := embedBatches(ctx, main, texts)
 	if err != nil {
 		return err
 	}
-	printDrift(stdout, "сервер из настроек против индекса", vsStored(got, stored))
+	if err := checkDim(main.URL(), got, dim); err != nil {
+		return err
+	}
+	cos, err := vsStored(got, stored)
+	if err != nil {
+		return err
+	}
+	printDrift(stdout, "сервер из настроек против индекса", cos)
 
 	if vs != "" {
 		second := mk(vs)
@@ -83,12 +96,37 @@ func vecDrift(stdout io.Writer, cfg *config.Config, collName string, n int, vs s
 		if err != nil {
 			return err
 		}
-		printDrift(stdout, "второй сервер против индекса", vsStored(got2, stored))
+		if err := checkDim(second.URL(), got2, dim); err != nil {
+			return err
+		}
+		cos, err := vsStored(got2, stored)
+		if err != nil {
+			return err
+		}
+		printDrift(stdout, "второй сервер против индекса", cos)
 		cross := make([]float64, len(got))
 		for i := range got {
-			cross[i] = cosineFloat(got[i], got2[i])
+			if cross[i], err = cosineFloat(got[i], got2[i]); err != nil {
+				return fmt.Errorf("кусок %d, сервер против сервера: %w", i+1, err)
+			}
 		}
 		printDrift(stdout, "сервер против сервера (до квантования)", cross)
+	}
+	return nil
+}
+
+// checkDim сверяет размерность векторов эмбеддера с размерностью индекса —
+// до счёта косинусов. Другая размерность — это другая модель под тем же
+// именем, ровно тот случай, ради которого прибор заведён; счёт по векторам
+// разной длины прежде либо падал паникой (вектор сервера длиннее), либо
+// давал правдоподобное число по префиксу (короче).
+func checkDim(url string, vecs [][]float32, dim int) error {
+	for i, v := range vecs {
+		if len(v) != dim {
+			return fmt.Errorf("эмбеддер %s отдал вектор размерности %d, а в индексе размерность %d "+
+				"(кусок %d из %d): это другая модель под тем же именем, сверять косинусы нечего",
+				url, len(v), dim, i+1, len(vecs))
+		}
 	}
 	return nil
 }
@@ -116,16 +154,29 @@ func embedBatches(ctx context.Context, e *kbembed.Embedder, texts []string) ([][
 }
 
 // vsStored — полный косинус нового (квантованного, как при записи) вектора
-// с сохранённым.
-func vsStored(got [][]float32, stored [][]int8) []float64 {
+// с сохранённым. Разная длина пары или разное число векторов — ошибка, а не
+// косинус по префиксу: vecstand.CosineRaw длину не сверяет.
+func vsStored(got [][]float32, stored [][]int8) ([]float64, error) {
+	if len(got) != len(stored) {
+		return nil, fmt.Errorf("векторов сервера %d, сохранённых %d", len(got), len(stored))
+	}
 	out := make([]float64, len(got))
 	for i := range got {
+		if len(got[i]) != len(stored[i]) {
+			return nil, fmt.Errorf("кусок %d: размерность вектора сервера %d, сохранённого %d",
+				i+1, len(got[i]), len(stored[i]))
+		}
 		out[i] = vecstand.CosineRaw(kb.Quantize(got[i]), stored[i])
 	}
-	return out
+	return out, nil
 }
 
-func cosineFloat(a, b []float32) float64 {
+// cosineFloat — косинус двух векторов до квантования. Разная размерность —
+// ошибка: косинус по префиксу выглядел бы правдоподобным числом.
+func cosineFloat(a, b []float32) (float64, error) {
+	if len(a) != len(b) {
+		return 0, fmt.Errorf("размерность векторов %d и %d", len(a), len(b))
+	}
 	var dot, na, nb float64
 	for i := range a {
 		dot += float64(a[i]) * float64(b[i])
@@ -133,9 +184,9 @@ func cosineFloat(a, b []float32) float64 {
 		nb += float64(b[i]) * float64(b[i])
 	}
 	if na == 0 || nb == 0 {
-		return 0
+		return 0, nil
 	}
-	return dot / math.Sqrt(na*nb)
+	return dot / math.Sqrt(na*nb), nil
 }
 
 // printDrift — распределение косинусов: худший, 1-й процентиль, медиана и
