@@ -1,9 +1,13 @@
 package kb
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/document"
 )
@@ -195,5 +199,273 @@ func TestSplitTextDropsDataURIs(t *testing.T) {
 	}
 	if !imageLine {
 		t.Error("строка с картинкой выпала из нумерации кусков")
+	}
+}
+
+// fakeBase64 — правдоподобное тело base64 длиной n знаков: псевдослучайное,
+// с обоими регистрами, цифрами и знаками «+/», как у настоящей картинки.
+// Повтор одной короткой строки сюда не годится: он не похож на сжатые данные.
+func fakeBase64(n int) string {
+	const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	var b strings.Builder
+	b.Grow(n)
+	x := uint32(2463534242)
+	for i := 0; i < n; i++ {
+		x ^= x << 13
+		x ^= x >> 17
+		x ^= x << 5
+		b.WriteByte(abc[x%64])
+	}
+	return b.String()
+}
+
+// wrapEvery режет строку на строки по width знаков — так base64 переносят
+// почта (76) и PEM (64).
+func wrapEvery(s string, width int) []string {
+	var out []string
+	for len(s) > width {
+		out = append(out, s[:width])
+		s = s[width:]
+	}
+	if s != "" {
+		out = append(out, s)
+	}
+	return out
+}
+
+// base64Chunks — сколько кусков несут «слово» из алфавита base64 длиной от 60
+// знаков: столько мусора дошло бы до словесного индекса и до векторов.
+func base64Chunks(chunks []Chunk) int {
+	n := 0
+	for _, c := range chunks {
+		for _, w := range strings.Fields(c.Text) {
+			w = strings.Trim(w, `"'(){}<>[],;:`)
+			if len(w) >= 60 && strings.Trim(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") == "" {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// proseLines — абзац обычного текста, которого хватает на целый кусок: без него
+// куски вокруг мусора были бы короче MinChars и выпали бы, и проверка «мусора
+// в кусках нет» проходила бы на пустом месте.
+func proseLines(tag string) []string {
+	var out []string
+	for i := 1; i <= 6; i++ {
+		out = append(out, fmt.Sprintf("%s %d: проверили сеть, диски и резервные копии стенда, замечаний нет.", tag, i))
+	}
+	return out
+}
+
+// TestSplitTextDropsBase64Forms — вставленные файлы в других формах тоже не
+// становятся кусками: base64, перенесённый по строкам (HTML и почта — по 76
+// знаков, PEM — по 64), data:-ссылка с параметром RFC 2397 перед `;base64,`
+// и сырой base64 без data: (поле JSON, PEM одной строкой). До правки каждая
+// из этих форм давала куски из одного base64 — их ловила только та data:-ссылка,
+// у которой между типом и `;base64,` ничего нет и тело стоит на той же строке.
+func TestSplitTextDropsBase64Forms(t *testing.T) {
+	body := fakeBase64(20000)
+	join := func(groups ...[]string) []string {
+		var out []string
+		for _, g := range groups {
+			out = append(out, g...)
+		}
+		return out
+	}
+	cases := []struct {
+		name  string
+		lines []string
+	}{
+		{"data: с переносом по 76 знаков", join(proseLines("начало"),
+			[]string{`<img src="data:image/png;base64,`}, wrapEvery(body, 76), []string{`">`}, proseLines("конец"))},
+		{"data: с переносом, первая строка на месте ссылки", join(proseLines("начало"),
+			wrapEvery("![](data:image/png;base64,"+body+")", 76), proseLines("конец"))},
+		{"параметр RFC 2397", join(proseLines("начало"),
+			[]string{"![](data:image/png;name=scheme.png;base64," + body + ")"}, proseLines("конец"))},
+		{"сырой base64 в JSON", join(proseLines("начало"),
+			[]string{`{"thumbnail": "` + body + `"}`}, proseLines("конец"))},
+		{"PEM одной строкой", join(proseLines("начало"),
+			[]string{"-----BEGIN CERTIFICATE-----" + body + "-----END CERTIFICATE-----"}, proseLines("конец"))},
+		{"PEM по 64 знака", join(proseLines("начало"),
+			[]string{"-----BEGIN CERTIFICATE-----"}, wrapEvery(body, 64), []string{"-----END CERTIFICATE-----"}, proseLines("конец"))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := SplitText(lineParts(strings.Join(tc.lines, "\n")), DefaultChunkOpts())
+			var all strings.Builder
+			for _, c := range chunks {
+				all.WriteString(c.Text)
+			}
+			if !strings.Contains(all.String(), "конец 6") || !strings.Contains(all.String(), "начало 1") {
+				t.Fatalf("текст вокруг вставленного файла пропал из кусков (кусков %d)", len(chunks))
+			}
+			if g := base64Chunks(chunks); g > 0 {
+				t.Errorf("кусков с телом base64: %d из %d", g, len(chunks))
+			}
+		})
+	}
+}
+
+// TestSplitTextKeepsHashesAndURLs — чистка base64 не задевает то, что похоже
+// на него, но им не является: хеши sha256 и sha512 (шестнадцатеричные, в том
+// числе столбцом по одному на строку, как в списке сумм), длинный адрес
+// в 200 знаков и длинное слово без цифр.
+func TestSplitTextKeepsHashesAndURLs(t *testing.T) {
+	sha256 := "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	sha512 := strings.Repeat("ee26b0dd4af7e749aa1a8ee3c10ae992", 4)
+	url := "https://docs.example.org/guide/" + strings.Repeat("section/", 20) + "page?token=" + strings.Repeat("Ab1", 10)
+	if len(url) < 200 {
+		t.Fatalf("адрес короче 200 знаков: %d", len(url))
+	}
+	lines := proseLines("начало")
+	lines = append(lines, "sha256: "+sha256, "sha512: "+sha512, "Адрес: "+url)
+	for i := 0; i < 12; i++ {
+		lines = append(lines, sha256) // столбец сумм: двенадцать строк по 64 знака
+	}
+	lines = append(lines, proseLines("конец")...)
+
+	chunks := SplitText(lineParts(strings.Join(lines, "\n")), DefaultChunkOpts())
+	var all strings.Builder
+	for _, c := range chunks {
+		all.WriteString(c.Text)
+	}
+	text := all.String()
+	for name, want := range map[string]string{"sha256": "sha256: " + sha256, "sha512": sha512, "адрес": url} {
+		if !strings.Contains(text, want) {
+			t.Errorf("%s пропал из кусков", name)
+		}
+	}
+	if got := strings.Count(text, sha256); got < 13 {
+		t.Errorf("строк с sha256 в кусках %d, а в тексте их 13", got)
+	}
+}
+
+// TestSplitTextDropsDataURIInHeading — картинка base64 в заголовке раздела
+// не размножается по кускам и не становится названием документа.
+//
+// Заголовок раздела тянется вниз по тексту (Part.Title), и withHeading
+// приклеивает его к каждому куску раздела; первый заголовок первого уровня —
+// название документа в реестре. Чистка base64 до правки шла только по Part.Text,
+// и `## Схема ![](data:…)` с картинкой в 200 КБ дал 18 кусков из 19 длиннее
+// 100 КБ — каждый с той же картинкой.
+func TestSplitTextDropsDataURIInHeading(t *testing.T) {
+	base, books := newBase(t)
+	if err := os.MkdirAll(books, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	img := fakeBase64(200 << 10)
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Отчёт о стенде ![](data:image/png;base64,%s)\n\n", img)
+	fmt.Fprintf(&b, "## Схема ![](data:image/png;base64,%s)\n\n", img)
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "Абзац %d про настройку таймаутов службы и проверку индекса книг по разделам.\n", i)
+	}
+	path := filepath.Join(books, "doc.md")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Куски — тем же путём, что у индексации: document.Parts, затем SplitText.
+	_, parts, err := document.Parts(path, 512<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opt := DefaultChunkOpts()
+	chunks := SplitText(parts, opt)
+	if len(chunks) < 10 {
+		t.Fatalf("кусков %d — текст раздела пропал", len(chunks))
+	}
+	headed := 0
+	for _, c := range chunks {
+		if n := len([]rune(c.Text)); n > 2*opt.Chars {
+			t.Fatalf("кусок строк %d–%d длиной %d знаков при размере куска %d: %.80q…",
+				c.UnitFrom, c.UnitTo, n, opt.Chars, c.Text)
+		}
+		if strings.Contains(c.Text, "‹ Схема") {
+			headed++
+		}
+	}
+	if g := base64Chunks(chunks); g > 0 {
+		t.Errorf("кусков с телом картинки из заголовка: %d из %d", g, len(chunks))
+	}
+	if headed == 0 {
+		t.Error("заголовок раздела пропал из кусков — чистить надо тело картинки, а не заголовок")
+	}
+
+	// Название документа в реестре — тоже без картинки.
+	c, err := base.Create("test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Add(context.Background(), []string{books}, IndexOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var rec BookRec
+	for _, d := range c.LiveBooks() {
+		rec = d
+	}
+	if len(rec.Title) > 200 || !strings.Contains(rec.Title, "Отчёт о стенде") {
+		t.Errorf("название в реестре — %d байт: %.80q…", len(rec.Title), rec.Title)
+	}
+}
+
+// splitLines — строки одинаковой длины в 1200 знаков: после splitLongLines
+// каждая даёт две части, и на каждую выходит по куску — так число кусков
+// растёт вместе с числом строк, и любой проход «от начала файла на кусок»
+// виден сразу.
+func splitLines(n int) []document.Part {
+	line := strings.Repeat("слово ", 200)
+	parts := make([]document.Part, n)
+	for i := range parts {
+		parts[i] = document.Part{Number: i + 1, Text: line}
+	}
+	return parts
+}
+
+// TestSplitTextLinearInLines — время нарезки растёт с числом строк линейно.
+//
+// До правки состояние ограждения кода (insideFence) считалось для каждого
+// куска заново от начала файла, и нарезка была квадратичной: 8192 строки —
+// 1,2 с, 32768 — 18,5 с (в 15 раз дольше при вчетверо большем входе), а сырой
+// base64 в 50 МБ резался 40 с. Порог — 8: среднее геометрическое между
+// линейным ростом (4) и квадратичным (16), так замер отличает одно от другого
+// с запасом на шум с обеих сторон.
+func TestSplitTextLinearInLines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("замер времени нарезки — долгий, в -short пропускается")
+	}
+	measure := func(n int) time.Duration {
+		parts := splitLines(n)
+		best := time.Duration(0)
+		for k := 0; k < 2; k++ {
+			start := time.Now()
+			SplitText(parts, DefaultChunkOpts())
+			if d := time.Since(start); best == 0 || d < best {
+				best = d
+			}
+		}
+		return best
+	}
+	small, big := measure(8<<10), measure(32<<10)
+	ratio := float64(big) / float64(small)
+	t.Logf("8192 строк — %v, 32768 строк — %v, отношение %.1f", small, big, ratio)
+	if ratio > 8 {
+		t.Errorf("вчетверо больший вход режется в %.1f раза дольше — рост не линейный", ratio)
+	}
+}
+
+// BenchmarkSplitTextLines — нарезка по числу строк: сравнивать время на
+// строку между размерами, при линейной нарезке оно одно и то же.
+func BenchmarkSplitTextLines(b *testing.B) {
+	for _, n := range []int{8 << 10, 16 << 10, 32 << 10} {
+		parts := splitLines(n)
+		b.Run(fmt.Sprintf("строк=%d", n), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				SplitText(parts, DefaultChunkOpts())
+			}
+		})
 	}
 }
