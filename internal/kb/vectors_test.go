@@ -8,10 +8,62 @@
 package kb
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestOpenVectorsMetaOverflow — паспорт векторов, у которого произведение
+// «кусков × размерность» не помещается в int64, — отказ с объяснением,
+// а не падение процесса.
+//
+// До правки ожидаемый размер файла считался умножением без проверки:
+// count = 3·2⁶¹ при dim = 2 давал отрицательное число, проверка «файл короче
+// обещанного» его пропускала, и make падал с «makeslice: len out of range».
+// Паспорт — файл на диске, его портят обрыв записи и чужие руки; служба,
+// открывающая коллекцию, падать из-за него не должна.
+func TestOpenVectorsMetaOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dim, count int64
+	}{
+		{"произведение переполняет int64", 2, int64(3) << 61},
+		{"размерность на грани", math.MaxInt64 / 2, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			meta := fmt.Sprintf(`{"magic":%q,"dim":%d,"count":%d}`, vecMagic, tc.dim, tc.count)
+			if err := os.WriteFile(filepath.Join(dir, "vectors.meta"), []byte(meta), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "vectors.dat"), []byte("xx"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var (
+				v   *Vectors
+				err error
+			)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("OpenVectors упал на паспорте с переполнением: %v", r)
+					}
+				}()
+				v, err = OpenVectors(dir)
+			}()
+			if err == nil || v != nil {
+				t.Fatalf("паспорт с переполнением принят: векторы %v, ошибка %v", v != nil, err)
+			}
+			if !strings.Contains(err.Error(), "vectors.meta") {
+				t.Errorf("ошибка не называет файл паспорта: %v", err)
+			}
+		})
+	}
+}
 
 // normOf — настоящая длина квантованного вектора.
 func normOf(q []int8) float64 {

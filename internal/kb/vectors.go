@@ -105,6 +105,15 @@ func ReadVecMeta(dir string) (meta VecMeta, ok bool, err error) {
 	if meta.Magic != vecMagic || meta.Dim <= 0 || meta.Count <= 0 {
 		return VecMeta{}, false, nil
 	}
+	// Файл векторов — Count×Dim байт. Паспорт, у которого произведение
+	// не помещается в int64, испорчен: до 04.11.2026 переполнение давало
+	// отрицательный размер, проверка «файл короче обещанного» его пропускала,
+	// и OpenVectors падал в make — вместе со службой, открывшей коллекцию.
+	if int64(meta.Count) > math.MaxInt64/int64(meta.Dim) {
+		return VecMeta{}, false, fmt.Errorf(
+			"%s испорчен: %d векторов по %d чисел не поместятся ни в один файл — посчитайте векторы(смыслы) заново",
+			filepath.Base(metaPath), meta.Count, meta.Dim)
+	}
 	return meta, true, nil
 }
 
