@@ -20,6 +20,15 @@ import (
 // Ollama урезает размер пачки) — это около 10 минут.
 const defaultChatTimeout = 30 * time.Minute
 
+// maxResponseBody — предел тела успешного ответа быстрых вызовов (Version,
+// Tags, PS, Show). Тело читалось без предела: сервер, отдавший список моделей
+// с именем в 16 МБ, принимался целиком, а имена потом уходили в текст ошибок
+// и в ленту. /api/show с model_info и /api/tags с сотнями моделей бывают
+// большими, поэтому предел взят с запасом, а не впритык (размер настоящих
+// ответов здесь не замерялся). Поток чата и эмбеддинги этим не ограничены:
+// у них своё чтение (stream.go, embed.go).
+const maxResponseBody = 64 << 20
+
 // Client — клиент одного сервера Ollama.
 type Client struct {
 	baseURL  string
@@ -30,6 +39,11 @@ type Client struct {
 	// stallTimeout — сколько поток ответа может молчать, прежде чем запрос
 	// будет оборван. Ноль выключает сторожа. См. stall.go.
 	stallTimeout time.Duration
+
+	// maxBody — предел тела ответа быстрых вызовов, maxResponseBody. Поле,
+	// а не постоянная, ради тестов: иначе проверка предела гоняла бы
+	// по 64 МиБ в каждом прогоне.
+	maxBody int64
 }
 
 // New создаёт клиент. baseURL — например "http://ollama.example:11434" (без /api).
@@ -61,6 +75,7 @@ func NewWithStall(baseURL string, timeout, chatTimeout, stall time.Duration,
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		headers:      headers,
 		stallTimeout: stall,
+		maxBody:      maxResponseBody,
 		http:         &http.Client{Transport: newTransport(timeout)},
 		chatHTTP:     &http.Client{Transport: newTransport(chatTimeout)},
 	}
@@ -130,7 +145,18 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// Предел — maxBody байт; читается на байт больше, чтобы отличить ответ
+	// ровно в предел от ответа длиннее него.
+	limit := c.maxBody
+	if limit <= 0 {
+		limit = maxResponseBody
+	}
+	lr := &io.LimitedReader{R: resp.Body, N: limit + 1}
+	err = json.NewDecoder(lr).Decode(out)
+	if lr.N <= 0 {
+		return fmt.Errorf("%s %s: ответ длиннее предела в %d байт — это не ответ Ollama", method, path, limit)
+	}
+	return err
 }
 
 // serverError читает тело ответа не-200 и собирает ошибку «сервер вернул …».
