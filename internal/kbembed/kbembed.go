@@ -124,12 +124,28 @@ func (e *Embedder) Stamp(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Ровно та модель, которой уйдут вопросы: Ollama читает имя без тега как
+	// «:latest». По началу имени («bge-m3:») находился первый тег в списке —
+	// и сверка проходила по весам bge-m3:567m-fp16, а векторы считала
+	// bge-m3:latest с другими весами (аудит этапа 123).
+	want := FullModelName(e.model)
 	for _, m := range tags {
-		if m.Name == e.model || strings.HasPrefix(m.Name, e.model+":") {
+		if FullModelName(m.Name) == want || FullModelName(m.Model) == want {
 			return m.Digest, nil
 		}
 	}
 	return "", fmt.Errorf("на сервере %s нет модели %q", e.client.BaseURL(), e.model)
+}
+
+// FullModelName — имя модели Ollama с тегом: без тега Ollama читает его как
+// «:latest» (bge-m3 → bge-m3:latest). Тег — двоеточие после последней косой
+// черты: у «host:5000/m» двоеточие принадлежит адресу реестра. Одно место
+// для сверки весов эмбеддера и для проверки модели сервера (roleserver).
+func FullModelName(name string) string {
+	if name == "" || strings.Contains(name[strings.LastIndex(name, "/")+1:], ":") {
+		return name
+	}
+	return name + ":latest"
 }
 
 // URL — адрес сервера эмбеддингов, для отчётов и подсказок.

@@ -25,6 +25,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,6 +37,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/kb"
 	"github.com/Cyber-Watcher/ollchat/internal/kbembed"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/textx"
 )
 
 // Kind — роль сервера, выбор которой пишется в конфиг.
@@ -112,12 +115,17 @@ type Result struct {
 // Job — всё, что нужно проверке, скопировано из конфига при создании:
 // Run идёт в фоне, а конфиг под ней меняет TUI.
 type Job struct {
-	Kind     Kind
-	Server   config.Server
-	graph    config.Graph
-	old      []graphex.Node
-	embed    kbembed.Options
-	collDirs []string
+	Kind   Kind
+	Server config.Server
+	// graphs — графы, которые запись [graph].server переведёт на сервер:
+	// рабочий ([graph]) первым и подразделы, идущие за ним. Не выбранный
+	// в сеансе граф (/graph use): пишется общий ключ, и сверять надо тех,
+	// кого он сдвинет (аудит этапа 123).
+	graphs     []config.Graph
+	old        []graphex.Node
+	oldHeaders map[string]string // заголовки, с которыми сборка говорит с old
+	embed      kbembed.Options
+	collDirs   []string
 }
 
 // NewJob готовит проверку сервера name для роли kind. collDirs — каталоги
@@ -131,8 +139,13 @@ func NewJob(cfg *config.Config, kind Kind, name string, collDirs []string) (Job,
 	j := Job{Kind: kind, Server: *srv, collDirs: append([]string(nil), collDirs...)}
 	switch kind {
 	case Graph:
-		j.graph = cfg.Graph
-		j.old = CurrentGraphNodes(cfg)
+		base := cfg.GraphFor("")
+		j.graphs = append(j.graphs, base)
+		for _, n := range cfg.GraphsFollowingServer() {
+			j.graphs = append(j.graphs, cfg.GraphFor(n))
+		}
+		j.old = GraphNodesOf(cfg, base)
+		j.oldHeaders = cfg.GraphHeadersFor(base)
 	case Embed:
 		j.embed = cfg.KB.EmbedOptions()
 	}
@@ -140,16 +153,31 @@ func NewJob(cfg *config.Config, kind Kind, name string, collDirs []string) (Job,
 }
 
 // Run проверяет сервер; вся проверка — не дольше Timeout.
-func (j Job) Run() Result {
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+func (j Job) Run() Result { return j.RunContext(context.Background()) }
+
+// RunContext — Run, которую можно снять: Esc в TUI отменяет ctx, и проверка
+// кончается сразу, а не через минуту. Текст отказа и замечаний — без
+// управляющих знаков (textx.TermSafe): в нём имена моделей и ответы чужого
+// сервера, а печатается он в ленту TUI и в терминал ключей --use-*-server.
+func (j Job) RunContext(ctx context.Context) Result {
+	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
+	var r Result
 	switch j.Kind {
 	case Embed:
-		return checkEmbed(ctx, j.embed, j.Server, j.collDirs)
+		r = checkEmbed(ctx, j.embed, j.Server, j.collDirs)
 	case Chat:
-		return checkChat(ctx, j.Server)
+		r = checkChat(ctx, j.Server)
+	default:
+		r = checkGraph(ctx, j.graphs, j.Server, j.old, j.oldHeaders, j.collDirs)
 	}
-	return checkGraph(ctx, j.graph, j.Server, j.old, j.collDirs)
+	if r.Err != nil {
+		r.Err = errors.New(textx.TermSafe(r.Err.Error()))
+	}
+	for i, n := range r.Notes {
+		r.Notes[i] = textx.TermSafe(n)
+	}
+	return r
 }
 
 // CollDirs — каталоги всех коллекций базы; базы нет — пусто.
@@ -254,43 +282,105 @@ func ServerNodes(s config.Server, workers int) []graphex.Node {
 }
 
 // CurrentGraphNodes — на чём сборка идёт сейчас: пул узлов или один адрес.
-func CurrentGraphNodes(cfg *config.Config) []graphex.Node {
-	if n := cfg.Graph.ExtractNodes(); len(n) > 0 {
+func CurrentGraphNodes(cfg *config.Config) []graphex.Node { return GraphNodesOf(cfg, cfg.Graph) }
+
+// GraphNodesOf — на чём идёт сборка графа с настройками g: пул узлов или
+// один адрес (пустой url — запасной адрес, так же берёт сборка, graphrun.go).
+func GraphNodesOf(cfg *config.Config, g config.Graph) []graphex.Node {
+	if n := g.ExtractNodes(); len(n) > 0 {
 		return n
 	}
-	url := cfg.Graph.URL
+	url := g.URL
 	if url == "" {
-		url = cfg.EmbedFallback() // так же берёт сборка (graphrun.go)
+		url = cfg.EmbedFallback()
 	}
 	if url == "" {
 		return nil
 	}
-	return []graphex.Node{{Name: "прежний", URL: url, Workers: cfg.Graph.Workers}}
+	return []graphex.Node{{Name: "прежний", URL: url, Workers: g.Workers}}
 }
 
-// checkGraph проверяет сервер s для сборки графа с настройками g.
-func checkGraph(ctx context.Context, g config.Graph, s config.Server, old []graphex.Node, collDirs []string) Result {
+// graphTitle — как назвать граф в отказе: раздел конфига, где его модель.
+func graphTitle(g config.Graph) string {
+	if g.Name == "" {
+		return "рабочий граф, [graph]"
+	}
+	return "граф " + g.Name + ", [graph." + g.Name + "]"
+}
+
+// checkGraph проверяет сервер s для сборки графов graphs (рабочий первым):
+// модель каждого — на всех узлах сервера и с одними весами. Графы с одной
+// моделью сверяются одним заходом. old — на чём рабочий граф собирается
+// сейчас, oldHeaders — заголовки, с которыми с ним говорит сборка.
+func checkGraph(ctx context.Context, graphs []config.Graph, s config.Server, old []graphex.Node,
+	oldHeaders map[string]string, collDirs []string) Result {
 	r := Result{Kind: Graph, Server: s.Name}
-	if g.Model == "" {
+	if len(graphs) == 0 || graphs[0].Model == "" {
 		r.Err = errors.New("graph.model пуст — сборка графа выключена, проверять нечем")
 		return r
 	}
-	nodes := ServerNodes(s, g.Workers)
-	opts := g.ExtractOptions()
-	p, err := graphex.NewPool(nodes, opts, s.TimeoutDuration(), s.Headers)
-	if err == nil {
-		err = p.Check(ctx)
+	nodes := ServerNodes(s, graphs[0].Workers)
+	checked := map[string]bool{}
+	for _, g := range graphs {
+		if g.Model == "" || checked[g.Model] {
+			continue
+		}
+		checked[g.Model] = true
+		var names []string
+		for _, o := range graphs {
+			if o.Model == g.Model {
+				names = append(names, graphTitle(o))
+			}
+		}
+		opts := g.ExtractOptions()
+		p, err := graphex.NewPool(nodes, opts, s.TimeoutDuration(), s.Headers)
+		if err == nil {
+			err = p.Check(ctx)
+		}
+		if err != nil {
+			r.Err = fmt.Errorf("модель %s (%s) на сервере %s: %w", g.Model, strings.Join(names, "; "), s.Name, err)
+			return r
+		}
+		r.Notes = append(r.Notes, p.Notes()...)
+		if note := compareOld(ctx, opts, old, oldHeaders, nodes, s); note != "" {
+			r.Notes = append(r.Notes, note)
+		}
 	}
-	if err != nil {
-		r.Err = fmt.Errorf("модель %s на сервере %s: %w", g.Model, s.Name, err)
-		return r
+	probe := false
+	for _, n := range nodes {
+		probe = probe || n.Probe != ""
 	}
-	r.Notes = append(r.Notes, p.Notes()...)
+	if !probe {
+		r.Notes = append(r.Notes, "у сервера "+s.Name+" нет probe (наблюдателя ollnode): "+
+			"занятость карты перед сборкой проверяться не будет")
+	}
+	for _, g := range graphs {
+		for _, dir := range collDirs {
+			if h, ok := graph.QuickHealth(dir, g.Name, 0); ok && h.Model != "" && h.Model != g.Model {
+				r.Notes = append(r.Notes, fmt.Sprintf("%s коллекции %s собран моделью %s, а в настройках %s — "+
+					"сборка откажет без --graph-allow-model-change", graphTitle(g), filepath.Base(dir), h.Model, g.Model))
+			}
+		}
+	}
+	return r
+}
 
-	// Штамп графа хранит одно имя модели: смену файла весов под тем же именем
-	// сборка не заметит. Поэтому новый сервер сверяется с прежним тем же пулом —
-	// как два узла одного захода.
-	if len(old) > 0 && !sameURLs(old, nodes) {
+// compareOld сверяет веса модели на новом сервере с прежним: штамп графа
+// хранит одно имя модели, и смену файла весов под тем же именем сборка не
+// заметит. Пусто — расхождения нет или сверять не с чем.
+//
+// С одними заголовками оба сервера идут одним пулом — как два узла одного
+// захода (Pool.Check сверяет файлы, рецепт и квантование). С разными один
+// пул нельзя: у него одни заголовки на все узлы, и прежний сервер за прокси
+// «расходился» сам с собой (аудит этапа 123). Тогда отпечатки снимаются
+// с каждого своими заголовками и сравниваются по весам и квантованию;
+// прежний не ответил — замечание «сверить не удалось», не отказ.
+func compareOld(ctx context.Context, opts graphex.Options, old []graphex.Node, oldHeaders map[string]string,
+	nodes []graphex.Node, s config.Server) string {
+	if len(old) == 0 || sameURLs(old, nodes) {
+		return ""
+	}
+	if maps.Equal(oldHeaders, s.Headers) {
 		both := make([]graphex.Node, 0, len(old)+len(nodes))
 		for _, n := range old {
 			n.Name = "было-" + n.Name
@@ -302,25 +392,36 @@ func checkGraph(ctx context.Context, g config.Graph, s config.Server, old []grap
 		}
 		if bp, err := graphex.NewPool(both, opts, s.TimeoutDuration(), s.Headers); err == nil {
 			if err := bp.Check(ctx); err != nil {
-				r.Notes = append(r.Notes, "сверка с прежним сервером сборки: "+err.Error())
+				return "сверка с прежним сервером сборки: " + err.Error()
 			}
 		}
+		return ""
 	}
-	probe := false
-	for _, n := range nodes {
-		probe = probe || n.Probe != ""
+	stamp := func(n graphex.Node, headers map[string]string) (graphex.ModelStamp, error) {
+		o := opts
+		o.URL = n.URL
+		return graphex.New(o, n.URL, s.TimeoutDuration(), headers).Stamp(ctx)
 	}
-	if !probe {
-		r.Notes = append(r.Notes, "у сервера "+s.Name+" нет probe (наблюдателя ollnode): "+
-			"занятость карты перед сборкой проверяться не будет")
+	was, err := stamp(old[0], oldHeaders)
+	if err != nil {
+		return "прежний сервер сборки сверить не удалось (" + old[0].URL + "): " + err.Error()
 	}
-	for _, dir := range collDirs {
-		if h, ok := graph.QuickHealth(dir, g.Name, 0); ok && h.Model != "" && h.Model != g.Model {
-			r.Notes = append(r.Notes, fmt.Sprintf("граф коллекции %s собран моделью %s, а graph.model = %s — "+
-				"сборка откажет без --graph-allow-model-change", filepath.Base(dir), h.Model, g.Model))
-		}
+	now, err := stamp(nodes[0], s.Headers)
+	if err != nil {
+		return "сверка с прежним сервером сборки: " + err.Error()
 	}
-	return r
+	switch {
+	case len(was.Files) > 0 && len(now.Files) > 0 && strings.Join(was.Files, " ") != strings.Join(now.Files, " "):
+		return fmt.Sprintf("сверка с прежним сервером сборки: модель %s — разные веса (файлы %s против %s)",
+			opts.Model, strings.Join(was.Files, " "), strings.Join(now.Files, " "))
+	case (len(was.Files) == 0 || len(now.Files) == 0) && was.Digest != "" && now.Digest != "" && was.Digest != now.Digest:
+		return fmt.Sprintf("сверка с прежним сервером сборки: модель %s — разные веса (digest %s против %s)",
+			opts.Model, shortDigest(was.Digest), shortDigest(now.Digest))
+	case was.Quant != now.Quant:
+		return fmt.Sprintf("сверка с прежним сервером сборки: модель %s — разное квантование (%s против %s)",
+			opts.Model, was.Quant, now.Quant)
+	}
+	return ""
 }
 
 // checkEmbed проверяет сервер s для векторов: модель есть, и её веса — те же,
@@ -369,7 +470,7 @@ func checkChat(ctx context.Context, s config.Server) Result {
 	r := Result{Kind: Chat, Server: s.Name}
 	models, err := ollama.New(s.URL, s.TimeoutDuration(), s.TimeoutDuration(), s.Headers).Tags(ctx)
 	if err != nil {
-		r.Err = fmt.Errorf("сервер %s (%s) не ответил на список моделей: %w", s.Name, s.URL, err)
+		r.Err = fmt.Errorf("сервер %s (%s) не ответил на список моделей: %w", s.Name, redacted(s.URL), err)
 		return r
 	}
 	if s.Model == "" {
@@ -383,18 +484,27 @@ func checkChat(ctx context.Context, s config.Server) Result {
 }
 
 // hasModel — есть ли модель name в списке /api/tags: имя без тега Ollama
-// читает как «:latest».
+// читает как «:latest» (kbembed.FullModelName — то же правило у сверки
+// весов эмбеддера).
 func hasModel(models []ollama.ModelInfo, name string) bool {
-	full := name
-	if !strings.Contains(name[strings.LastIndex(name, "/")+1:], ":") {
-		full += ":latest"
-	}
+	full := kbembed.FullModelName(name)
 	for _, m := range models {
-		if m.Name == name || m.Name == full || m.Model == name || m.Model == full {
+		if kbembed.FullModelName(m.Name) == full || kbembed.FullModelName(m.Model) == full {
 			return true
 		}
 	}
 	return false
+}
+
+// redacted — адрес для текста отказа без пароля из user:pass@. Загрузка
+// конфига такие адреса не принимает; это вторая преграда — на случай
+// сервера, собранного мимо неё.
+func redacted(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(адрес не разобран)"
+	}
+	return u.Redacted()
 }
 
 func sameURLs(a, b []graphex.Node) bool {
