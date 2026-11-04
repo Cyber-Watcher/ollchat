@@ -136,3 +136,31 @@ func TestAskSummarySameInputNoWrite(t *testing.T) {
 		t.Fatalf("вход замера и докатки различается:\nзамер:\n%s\nдокатка:\n%s", asked, described)
 	}
 }
+
+// AskSummary не берёт верхнюю тему: её вход у докатки — описания вложенных,
+// а здесь вложенных нет, и модель получила бы голый перечень понятий — не тот
+// вход, что пошёл бы в граф, то есть замер мерил бы не то. Модель при этом
+// не спрашивается вовсе.
+func TestAskSummaryRejectsUpperTopic(t *testing.T) {
+	g := lazyGraph(t)
+	c, err := g.LoadCommunities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upper *Community
+	for i := range c.List {
+		if c.List[i].Level > 0 {
+			upper = &c.List[i]
+		}
+	}
+	if upper == nil {
+		t.Fatal("в разбиении lazyGraph нет верхней темы")
+	}
+	m := &model{answer: okAnswer("Верх")}
+	if _, err := g.AskSummary(context.Background(), m, *upper, SummaryOpts{MinMembers: 5}); err == nil {
+		t.Error("верхняя тема принята")
+	}
+	if m.calls != 0 {
+		t.Errorf("модель спрошена %d раз про верхнюю тему", m.calls)
+	}
+}

@@ -301,11 +301,17 @@ type SummaryAnswer struct {
 // 01.11.2026): сравнивать модели можно только на одинаковом входе, а
 // Summarize и DescribeTopics пишут ответ в разбиение рабочего графа. Вход
 // модели собирается тем же askSummary, что у докатки, поэтому замер меряет
-// то, что пошло бы в граф. Верхние темы сюда не годятся: их вход — описания
-// вложенных, а здесь вложенных нет (opt.children пуст).
+// то, что пошло бы в граф. Верхние темы сюда не годятся и отвергаются
+// ошибкой до вопроса модели: их вход — описания вложенных, а здесь вложенных
+// нет (opt.children пуст).
 func (g *Graph) AskSummary(ctx context.Context, ex Extractor, com Community,
 	opt SummaryOpts) (SummaryAnswer, error) {
 
+	if com.Level > 0 {
+		return SummaryAnswer{}, fmt.Errorf("тема %d — верхнего уровня (%d): её описывают по вложенным, "+
+			"и вход модели здесь был бы не тот, что у докатки; замеру годятся только темы уровня 0",
+			com.ID, com.Level)
+	}
 	out, err := g.askSummary(ctx, ex, &com, opt.norm())
 	if err != nil {
 		return SummaryAnswer{}, err
