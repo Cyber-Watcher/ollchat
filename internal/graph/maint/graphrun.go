@@ -140,6 +140,11 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 	if err := ex.Check(context.Background()); err != nil {
 		return err
 	}
+	// Отпечаток весов — для сверки с паспортом графа в graph.Build (решение
+	// владельца 05.11.2026). У пула он снят Check, у одиночного сервера
+	// снимается здесь; не снялся — сверка пропускается, а не отказывает:
+	// одиночный путь отпечатка прежде не снимал вовсе.
+	weights := runWeights(stdout, ex)
 
 	chunks := coll.ChunkCount()
 	// Назначение и пометка проставляются только при создании: у графа, который
@@ -301,6 +306,7 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 		AllowModelChange:  allowModelChange,
 		AllowPromptChange: allowPromptChange,
 		RedoEmpty:         redoEmpty,
+		Weights:           weights,
 	}, graphProgress(logPath, poolLine(pool, named)))
 	fmt.Fprintln(os.Stderr)
 	// Карта книг графа — в конце каждого захода, даже прерванного: по ней граф
@@ -379,6 +385,31 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 			remaining, eta.Round(time.Minute))
 	}
 	return nil
+}
+
+// runWeights — отпечаток весов модели извлечения для сверки с паспортом
+// графа (graph.BuildOpts.Weights). Пул отдаёт эталон, снятый своей Check;
+// одиночный сервер снимает Stamp здесь же — после его же Check, только
+// /api/tags и /api/show, модель на карту не грузится. Не снялся — строка
+// об этом и пустой отпечаток: сверка пропускается, заход идёт, как шёл до
+// 05.11.2026.
+func runWeights(stdout io.Writer, ex buildExtractor) graph.Weights {
+	var w graph.Weights
+	switch e := ex.(type) {
+	case *graphex.Pool:
+		w = e.Weights()
+	case *graphex.Extractor:
+		st, err := e.Stamp(context.Background())
+		if err != nil {
+			fmt.Fprintf(stdout, "внимание: отпечаток весов модели не снят (%v) — с паспортом графа не сверяется\n", err)
+			return graph.Weights{}
+		}
+		w = st.Weights()
+	}
+	if w.IsZero() {
+		fmt.Fprintln(stdout, "внимание: сервер не назвал ни файлов весов, ни digest — веса с паспортом графа не сверяются")
+	}
+	return w
 }
 
 // printOpen печатает, во что обошлось открытие графа.

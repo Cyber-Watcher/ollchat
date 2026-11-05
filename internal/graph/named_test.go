@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -133,4 +134,99 @@ func TestTwoFormatsInOneProcess(t *testing.T) {
 		t.Fatalf("у рабочего графа подменилась версия: %d", g3.meta.Version)
 	}
 	_ = g3.Close()
+}
+
+// ── Отпечаток весов в паспорте ───────────────────────────────────────────────
+
+// Отпечаток весов модели извлечения (решение владельца 05.11.2026) ложится в
+// graph.meta и читается обратно обоими читателями паспорта: Open (сборка)
+// и QuickHealth (ключ --role-check, файлом без реестра). Версия формата от
+// него не меняется.
+func TestMetaWeightsRoundTrip(t *testing.T) {
+	coll := t.TempDir()
+	g, err := Create(coll, "books", 10, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := g.Meta().Version
+	want := Weights{Files: []string{"sha256-f5f1dd8920d4aaaa", "sha256-0123456789abbbbb"}, Digest: "aaaabbbbccccdddd"}
+	in := Weights{Files: slices.Clone(want.Files), Digest: want.Digest}
+	if err := g.SetWeights(in); err != nil {
+		t.Fatal(err)
+	}
+	in.Files[0] = "испорчено снаружи" // паспорт держит свою копию среза
+	if got := g.Meta().Weights.Files[0]; got != want.Files[0] {
+		t.Errorf("паспорт делит срез файлов с вызывающим: %q", got)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	g2, err := Open(coll, 10, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := g2.Meta()
+	_ = g2.Close()
+	if m.Weights == nil || !slices.Equal(m.Weights.Files, want.Files) || m.Weights.Digest != want.Digest {
+		t.Fatalf("Open: отпечаток %+v, записан %+v", m.Weights, want)
+	}
+	if m.Version != version {
+		t.Fatalf("версия формата сменилась от отпечатка: %d → %d", version, m.Version)
+	}
+	h, ok := QuickHealth(coll, "", 0)
+	if !ok || !slices.Equal(h.Weights.Files, want.Files) || h.Weights.Digest != want.Digest {
+		t.Fatalf("QuickHealth: отпечаток %+v (граф найден: %v), записан %+v", h.Weights, ok, want)
+	}
+	if got := h.Weights.String(); got != "файлы sha256-f5f1dd8920d4 sha256-0123456789ab, digest aaaabbbbcccc" {
+		t.Errorf("короткий вид отпечатка: %q", got)
+	}
+}
+
+// Паспорт до 05.11.2026 — без поля: читается, отпечаток пуст, и граф без
+// отпечатка не пишет в паспорт «weights: {}» — старый читатель видит
+// прежний файл.
+func TestMetaWithoutWeights(t *testing.T) {
+	coll := t.TempDir()
+	dir := Rules{}.Dir(coll)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"version":1,"collection":"books","model":"qwen3.8:latest","chunks":10,"covered":0,` +
+		`"entities":0,"edges":0,"mentions":0,"communities":0,` +
+		`"created":"2026-09-01T10:00:00Z","updated":"2026-09-01T10:00:00Z",` +
+		`"runs":[{"at":"2026-09-01T10:00:00Z","model":"qwen3.8:latest","prompt_id":"","format":1,"done":5,"covered":5,"seconds":1}]}`
+	if err := os.WriteFile(filepath.Join(dir, metaFile), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Stat(dir)
+	if err != nil {
+		t.Fatalf("старый паспорт не читается: %v", err)
+	}
+	if m.Weights != nil || m.Model != "qwen3.8:latest" {
+		t.Fatalf("старый паспорт: отпечаток %+v, модель %q", m.Weights, m.Model)
+	}
+	if len(m.Runs) != 1 || m.Runs[0].Weights != nil || m.Runs[0].Replaced != nil {
+		t.Fatalf("заход старого паспорта: %+v", m.Runs)
+	}
+	if h, ok := QuickHealth(coll, "", 0); !ok || !h.Weights.IsZero() || h.Model != "qwen3.8:latest" {
+		t.Fatalf("QuickHealth старого паспорта: %+v (граф найден: %v)", h, ok)
+	}
+
+	fresh := t.TempDir()
+	g, err := Create(fresh, "books", 10, Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetWeights(Weights{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = g.Close()
+	b, err := os.ReadFile(filepath.Join(Rules{}.Dir(fresh), metaFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"weights"`) {
+		t.Errorf("пустой отпечаток лёг в паспорт:\n%s", b)
+	}
 }

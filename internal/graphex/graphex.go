@@ -227,6 +227,12 @@ type ModelStamp struct {
 	Version string   // версия Ollama на сервере
 }
 
+// Weights — отпечаток весов из штампа: то, по чему пул судит «другие веса»
+// (compareStamps) и что сборка сверяет с паспортом графа (graph.MatchWeights).
+func (s ModelStamp) Weights() graph.Weights {
+	return graph.Weights{Files: append([]string(nil), s.Files...), Digest: s.Digest}
+}
+
 // Part — одна часть рецепта модели: шаблон, RENDERER/PARSER, системный
 // промпт, параметры. Имя — для отказа, который говорит, что именно разошлось.
 type Part struct {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -309,6 +311,97 @@ func TestModelChangeRefused(t *testing.T) {
 	if _, err := Build(context.Background(), chunksFor(8, "/AI/книга.pdf"), g, other,
 		BuildOpts{Workers: 2, AllowModelChange: true}, nil); err != nil {
 		t.Fatalf("с явным разрешением сборка должна идти: %v", err)
+	}
+}
+
+// Отпечаток весов (решение владельца 05.11.2026): имя то же, а файлы весов на
+// узлах другие (перетег на единственном узле) — отказ до первого запроса к
+// модели и до записи в паспорт. Паспорт без отпечатка заполняется первым
+// заходом; обход — тот же AllowModelChange: паспорт получает новый отпечаток,
+// заход — прежний в Replaced.
+func TestWeightsChangeRefused(t *testing.T) {
+	ctx := context.Background()
+	g, _ := graph(t)
+	m := &model{answer: func(int) (string, error) { return goodAnswer, nil }}
+	last := func() RunStamp {
+		t.Helper()
+		runs := g.Meta().Runs
+		if len(runs) == 0 {
+			t.Fatal("заход не записан в паспорт")
+		}
+		return runs[len(runs)-1]
+	}
+	same := func(w *Weights, want Weights) bool {
+		return w != nil && slices.Equal(w.Files, want.Files) && w.Digest == want.Digest
+	}
+
+	first := Weights{Files: []string{"sha256-f5f1dd8920d4aaaa"}, Digest: "aaaabbbbccccdddd"}
+	if _, err := Build(ctx, chunksFor(4, "/AI/книга.pdf"), g, m, BuildOpts{Workers: 2, Weights: first}, nil); err != nil {
+		t.Fatalf("первый заход при пустом отпечатке в паспорте: %v", err)
+	}
+	if !same(g.Meta().Weights, first) {
+		t.Fatalf("первый заход не записал отпечаток: %+v", g.Meta().Weights)
+	}
+	if r := last(); !same(r.Weights, first) || r.Replaced != nil {
+		t.Fatalf("отметка первого захода: веса %+v, сменено %+v", r.Weights, r.Replaced)
+	}
+
+	retag := Weights{Files: []string{"sha256-0123456789abbbbb"}, Digest: "eeeeffff00001111"}
+	before, err := os.ReadFile(filepath.Join(g.Dir(), metaFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	calls := m.calls
+	m.mu.Unlock()
+	covered := g.Progress().Count()
+	_, err = Build(ctx, chunksFor(8, "/AI/книга.pdf"), g, m, BuildOpts{Workers: 2, Weights: retag}, nil)
+	if err == nil {
+		t.Fatal("сборка другими весами под тем же именем должна была отказать")
+	}
+	for _, want := range []string{"проба", "sha256-f5f1dd8920d4", "sha256-0123456789ab", "--graph-allow-model-change"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("в отказе нет %q: %v", want, err)
+		}
+	}
+	m.mu.Lock()
+	asked := m.calls - calls
+	m.mu.Unlock()
+	if asked != 0 || g.Progress().Count() != covered {
+		t.Errorf("до отказа модели задано вопросов %d, разобрано кусков %d", asked, g.Progress().Count()-covered)
+	}
+	if after, err := os.ReadFile(filepath.Join(g.Dir(), metaFile)); err != nil || string(after) != string(before) {
+		t.Errorf("отказ изменил паспорт (%v):\nбыло %s\nстало %s", err, before, after)
+	}
+
+	// Файлы те же, digest манифеста другой (лицензия) — это не другие веса:
+	// правило пула, а не своё.
+	license := Weights{Files: first.Files, Digest: "9999888877776666"}
+	if _, err := Build(ctx, chunksFor(6, "/AI/книга.pdf"), g, m, BuildOpts{Workers: 2, Weights: license}, nil); err != nil {
+		t.Fatalf("те же файлы с другим digest: %v", err)
+	}
+	if !same(g.Meta().Weights, first) {
+		t.Errorf("совпавший отпечаток переписан: %+v", g.Meta().Weights)
+	}
+
+	// Обход: заход идёт, паспорт — с новым отпечатком, у захода — прежний.
+	if _, err := Build(ctx, chunksFor(8, "/AI/книга.pdf"), g, m,
+		BuildOpts{Workers: 2, Weights: retag, AllowModelChange: true}, nil); err != nil {
+		t.Fatalf("с явным разрешением сборка должна идти: %v", err)
+	}
+	if !same(g.Meta().Weights, retag) {
+		t.Errorf("обход не записал новый отпечаток: %+v", g.Meta().Weights)
+	}
+	if r := last(); !same(r.Weights, retag) || !same(r.Replaced, first) {
+		t.Errorf("отметка захода с обходом: веса %+v, сменено %+v", r.Weights, r.Replaced)
+	}
+
+	// Отпечаток не снят — сверка пропускается, паспорт не трогается.
+	if _, err := Build(ctx, chunksFor(10, "/AI/книга.pdf"), g, m, BuildOpts{Workers: 2}, nil); err != nil {
+		t.Fatalf("заход без отпечатка: %v", err)
+	}
+	if !same(g.Meta().Weights, retag) {
+		t.Errorf("заход без отпечатка стёр паспортный: %+v", g.Meta().Weights)
 	}
 }
 

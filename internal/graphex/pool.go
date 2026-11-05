@@ -250,7 +250,10 @@ func (p *Pool) Names() []string {
 // замер, а не догадка. Правила сверки — compareStamps.
 //
 // Удачная Check запоминает отпечаток первого узла эталоном захода: с ним
-// сверяется узел, возвращающийся в строй (revive).
+// сверяется узел, возвращающийся в строй (revive), и с паспортом графа его
+// сверяет сборка (Weights). Эталон ставится и при одном узле: перетег под тем
+// же именем на единственном узле — ровно тот случай, который имя не покажет
+// (решение владельца 05.11.2026).
 func (p *Pool) Check(ctx context.Context) error {
 	p.notes = nil
 	type res struct {
@@ -282,7 +285,7 @@ func (p *Pool) Check(ctx context.Context) error {
 	if len(bad) > 0 {
 		return fmt.Errorf("%s", strings.Join(bad, "\n"))
 	}
-	if len(out) < 2 {
+	if len(out) == 0 {
 		return nil
 	}
 	first := out[0]
@@ -302,6 +305,19 @@ func (p *Pool) Check(ctx context.Context) error {
 	return nil
 }
 
+// Weights — отпечаток весов эталона захода (первого узла удачной Check):
+// с ним сверены остальные узлы, и его же сборка сверяет с паспортом графа
+// (graph.BuildOpts.Weights). Пусто — Check не было, она не удалась или узел
+// не назвал ни файлов, ни digest.
+func (p *Pool) Weights() graph.Weights {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ref == nil {
+		return graph.Weights{}
+	}
+	return p.ref.Weights()
+}
+
 // compareStamps сверяет отпечатки одной модели на двух узлах. Ошибка — граф
 // собрался бы двумя моделями; notes — то, что сборку не останавливает, но о чём
 // человек должен узнать: веса сверить не удалось, версии Ollama разные.
@@ -313,6 +329,8 @@ func (p *Pool) Check(ctx context.Context) error {
 // расходится и от лицензии (ModelStamp), и отказ по нему был бы ложным.
 // Веса, не сверенные ни так, ни так, — заметка с именами узлов: тогда
 // сравниваются только квантование и рецепт, и молчать об этом нельзя.
+// Само правило — graph.MatchWeights: им же сборка сверяет узлы с паспортом
+// графа, чтобы «другие веса» не значили у пула и у паспорта разное.
 func compareStamps(aName, bName string, a, b ModelStamp) (notes []string, err error) {
 	model := a.Model
 	differ := func(what string) error {
@@ -323,15 +341,12 @@ func compareStamps(aName, bName string, a, b ModelStamp) (notes []string, err er
 				"Приведите модель к одной версии на обоих серверах",
 			aName, bName, model, what)
 	}
-	switch {
-	case len(a.Files) > 0 && len(b.Files) > 0:
-		if strings.Join(a.Files, " ") != strings.Join(b.Files, " ") {
-			return notes, differ(fmt.Sprintf("файлы %s против %s", shortFiles(a.Files), shortFiles(b.Files)))
-		}
-	case len(a.Files) == 0 && len(b.Files) == 0 && a.Digest != "" && b.Digest != "":
-		if a.Digest != b.Digest {
-			return notes, differ(fmt.Sprintf("digest %s против %s", short(a.Digest), short(b.Digest)))
-		}
+	switch graph.MatchWeights(a.Weights(), b.Weights()) {
+	case graph.WeightsSame:
+	case graph.WeightsOtherFiles:
+		return notes, differ(fmt.Sprintf("файлы %s против %s", shortFiles(a.Files), shortFiles(b.Files)))
+	case graph.WeightsOtherDigest:
+		return notes, differ(fmt.Sprintf("digest %s против %s", short(a.Digest), short(b.Digest)))
 	default:
 		why := "Modelfile не назвал файлов весов ни у одного узла, а digest манифеста пуст"
 		if len(a.Files) > 0 {
@@ -367,6 +382,13 @@ func compareStamps(aName, bName string, a, b ModelStamp) (notes []string, err er
 			aName, bName, model, a.Quant, b.Quant)
 	}
 	return notes, nil
+}
+
+// CompareStamps — compareStamps для сверки снаружи пула: ключ --role-check
+// (cmd/ollchat) сверяет узлы до постановки сборки теми же правилами, что Check
+// перед заходом, — чтобы проверка обвязки и пул не разошлись.
+func CompareStamps(aName, bName string, a, b ModelStamp) (notes []string, err error) {
+	return compareStamps(aName, bName, a, b)
 }
 
 // diffContext — сколько знаков показывать по обе стороны от расхождения.

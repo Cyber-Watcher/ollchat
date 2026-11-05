@@ -28,6 +28,9 @@ import (
 // Health — состояние графа в числах. Пустая структура означает, что графа нет.
 type Health struct {
 	Model string // чем извлекались понятия
+	// Weights — отпечаток весов модели извлечения из паспорта; пустой —
+	// паспорт его не хранит (до 05.11.2026), запишется первым заходом.
+	Weights Weights
 
 	// Kind — рабочий граф или опытный. У опытного советов не спрашивают:
 	// он неполон по замыслу.
@@ -76,6 +79,9 @@ func QuickHealth(collDir, name string, chunks int) (Health, bool) {
 	}
 	h := Health{Model: m.Model, Kind: m.Kind, Note: m.Note,
 		Chunks: chunks, Covered: m.Covered, Entities: m.Entities}
+	if m.Weights != nil {
+		h.Weights = *m.Weights
+	}
 	if h.Chunks == 0 {
 		h.Chunks = m.Chunks
 	}

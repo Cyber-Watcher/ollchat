@@ -48,7 +48,7 @@ var (
 	// архивов с ведущей машины; читателю разрешены.
 	flagsReading = []string{
 		"--version", "--init-config", "--kb-list", "--kb-doctor", "--kb-rebase",
-		"--graph-pending", "--nodes", "--role-servers", "--graph-doctor", "--graph-repartition-due",
+		"--graph-pending", "--nodes", "--role-servers", "--role-check", "--graph-doctor", "--graph-repartition-due",
 		// Пишут файл конфига, а не коллекцию и граф: читателю тоже нужен свой
 		// сервер чата и эмбеддера для вопросов (этап 123).
 		"--use-graph-server", "--use-embed-server", "--use-chat-server",

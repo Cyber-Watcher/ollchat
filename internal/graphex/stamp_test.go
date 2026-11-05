@@ -363,3 +363,22 @@ func TestCheckListsFewNamesQuoted(t *testing.T) {
 		t.Errorf("имена не в кавычках: %s", msg)
 	}
 }
+
+// Эталон захода — и при одном узле: его отпечаток сборка сверяет с паспортом
+// графа (решение владельца 05.11.2026), а перетег под тем же именем на
+// единственном узле — ровно тот случай, который имя модели не покажет. До
+// 05.11 Check с одним узлом эталона не ставил, и сверять было бы нечего.
+func TestPoolWeightsSingleNode(t *testing.T) {
+	a := newFakeNode(t, 0)
+	p := pool(t, Node{Name: "a", URL: a.srv.URL, Workers: 1})
+	if w := p.Weights(); !w.IsZero() {
+		t.Fatalf("до Check отпечаток уже есть: %s", w)
+	}
+	if err := p.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	w := p.Weights()
+	if len(w.Files) != 1 || w.Files[0] != a.weights || w.Digest != a.digest {
+		t.Fatalf("отпечаток единственного узла: %+v, ждали файл %s и digest %s", w, a.weights, a.digest)
+	}
+}

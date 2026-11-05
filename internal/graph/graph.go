@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,6 +152,18 @@ type Meta struct {
 	// поэтому она записана: иначе через месяц не ответить, что именно собрано.
 	Model string `json:"model,omitempty"`
 
+	// Weights — отпечаток весов модели извлечения (решение владельца
+	// 05.11.2026). Одно имя Model перетега не видит: под тем же
+	// `qwen3.8:latest` на узле могут лечь другие файлы весов, и граф
+	// дособирался бы ими молча. Сборка сверяет его с узлами до первого запроса
+	// к модели тем же правилом, каким пул сверяет узлы между собой
+	// (MatchWeights). При обходе --graph-allow-model-change перезаписывается
+	// новым, прежний остаётся у захода (RunStamp.Replaced).
+	//
+	// nil — паспорт до 05.11.2026 или сервер отпечатка не отдал: записывается
+	// первым заходом, как пустое имя модели, а не отказом.
+	Weights *Weights `json:"weights,omitempty"`
+
 	// Nodes — имена узлов сборки, участвовавших хоть в одном заходе
 	// (этап 95). Пусто — граф собран одним сервером, как было до 05.09.2026.
 	//
@@ -233,6 +246,11 @@ type RunStamp struct {
 	Covered  int       `json:"covered"` // сколько всего разобрано после него
 	Seconds  float64   `json:"seconds"`
 	Nodes    []string  `json:"nodes,omitempty"`
+	Weights  *Weights  `json:"weights,omitempty"` // отпечаток весов модели захода; nil — не снят
+	// Replaced — отпечаток, который этот заход сменил в паспорте обходом
+	// --graph-allow-model-change: по нему видно, с какого захода граф
+	// дособирается другими весами. nil — паспорт не менялся.
+	Replaced *Weights `json:"replaced_weights,omitempty"`
 }
 
 // maxRunStamps — сколько заходов помнит паспорт.
@@ -253,6 +271,98 @@ func (g *Graph) NoteRun(r RunStamp) error {
 		g.meta.Runs = append([]RunStamp(nil), g.meta.Runs[n-maxRunStamps:]...)
 	}
 	return g.saveMeta()
+}
+
+// Weights — отпечаток весов модели извлечения: то, по чему решается, те же
+// это веса или другие. Снимается с узла (graphex.ModelStamp.Weights),
+// хранится в паспорте графа (Meta.Weights) и у захода (RunStamp.Weights).
+type Weights struct {
+	// Files — блобы весов и проектора (FROM и ADAPTER из Modelfile),
+	// «sha256-…»: имя блоба — sha256 его содержимого, а каталог моделей у
+	// каждого сервера свой. Главный признак.
+	Files []string `json:"files,omitempty"`
+	// Digest — digest манифеста из /api/tags: справка и замена Files, когда
+	// сервер файлов не назвал. Манифест меняется и от лицензии (03.11.2026 на
+	// двух серверах разошёлся при тех же файлах), поэтому при названных
+	// файлах он не сверяется.
+	Digest string `json:"digest,omitempty"`
+}
+
+// IsZero — отпечатка нет: ни файлов, ни digest.
+func (w Weights) IsZero() bool { return len(w.Files) == 0 && w.Digest == "" }
+
+// String — отпечаток для отказа и строки сверки: блобы — «sha256-» и 12
+// знаков, digest — 12 знаков; пустой — «нет».
+func (w Weights) String() string {
+	var parts []string
+	if len(w.Files) > 0 {
+		files := make([]string, len(w.Files))
+		for i, f := range w.Files {
+			if strings.HasPrefix(f, "sha256-") && len(f) > 19 {
+				f = f[:19]
+			}
+			files[i] = f
+		}
+		parts = append(parts, "файлы "+strings.Join(files, " "))
+	}
+	if d := strings.TrimPrefix(w.Digest, "sha256:"); d != "" {
+		if len(d) > 12 {
+			d = d[:12]
+		}
+		parts = append(parts, "digest "+d)
+	}
+	if len(parts) == 0 {
+		return "нет"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// clone — копия для паспорта: срез файлов не делится с вызывающим. Пустой
+// отпечаток — nil, чтобы в паспорт не легло «weights: {}».
+func (w Weights) clone() *Weights {
+	if w.IsZero() {
+		return nil
+	}
+	c := Weights{Files: slices.Clone(w.Files), Digest: w.Digest}
+	return &c
+}
+
+// WeightsMatch — итог сверки двух отпечатков весов.
+type WeightsMatch int
+
+const (
+	// WeightsUnchecked — сверить нечем: файлы назвала одна сторона или ни
+	// одной, а digest есть не у обеих. Несделанная проверка, а не провал.
+	WeightsUnchecked   WeightsMatch = iota
+	WeightsSame                     // те же веса
+	WeightsOtherFiles               // файлы весов разные
+	WeightsOtherDigest              // файлов не назвал никто, digest манифеста разный
+)
+
+// MatchWeights сверяет два отпечатка весов. Правило одно на пул узлов
+// (graphex.compareStamps: узел против узла, с 03.11.2026 по весам, а не по
+// манифесту, docs/plan/stage095.md) и на паспорт графа (Build и ключ
+// --role-check: узел против паспорта) — чтобы «другие веса» не значили в двух
+// местах разное.
+//
+// По файлам — когда их назвали обе стороны. По digest манифеста — только
+// когда файлов не назвала ни одна, а digest есть у обеих: при названных
+// файлах digest расходится и от лицензии, и отказ по нему был бы ложным.
+// Файлы только у одной стороны digest не заменяет — WeightsUnchecked.
+func MatchWeights(a, b Weights) WeightsMatch {
+	switch {
+	case len(a.Files) > 0 && len(b.Files) > 0:
+		if slices.Equal(a.Files, b.Files) {
+			return WeightsSame
+		}
+		return WeightsOtherFiles
+	case len(a.Files) == 0 && len(b.Files) == 0 && a.Digest != "" && b.Digest != "":
+		if a.Digest == b.Digest {
+			return WeightsSame
+		}
+		return WeightsOtherDigest
+	}
+	return WeightsUnchecked
 }
 
 type PromptStamp struct {
@@ -723,6 +833,13 @@ func (g *Graph) Stats(chunks int) Stats {
 // SetModel записывает в паспорт модель извлечения.
 func (g *Graph) SetModel(model string) error {
 	g.meta.Model = model
+	return g.saveMeta()
+}
+
+// SetWeights записывает в паспорт отпечаток весов модели извлечения; пустой
+// стирает его (nil). Сверку с прежним делает Build — здесь только запись.
+func (g *Graph) SetWeights(w Weights) error {
+	g.meta.Weights = w.clone()
 	return g.saveMeta()
 }
 

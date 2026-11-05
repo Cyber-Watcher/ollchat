@@ -163,6 +163,7 @@ type cliFlags struct {
 	graphIgnoreBusy       *bool
 	nodes                 *bool
 	roleServers           *bool
+	roleCheck             *string
 	useGraphServer        *string
 	useEmbedServer        *string
 	useChatServer         *string
@@ -515,6 +516,11 @@ func parseFlagsNoParse() *cliFlags {
 	f.roleServers = flag.Bool("role-servers", false,
 		"куда пойдут сборка графа и счёт векторов по этому конфигу: строки graph, node, embed\n"+
 			"через табуляцию (для обвязки; [graph].server и kb.embed_server уже подставлены)")
+	f.roleCheck = flag.String("role-check", "",
+		"сверить модель извлечения на узлах сборки с паспортом графа коллекции, ничего не записывая:\n"+
+			"имя в паспорте против graph.model, тег на каждом узле, веса каждого узла против отпечатка\n"+
+			"в паспорте, веса узлов между собой; код 1 — расходится, 3 — узел не ответил (для обвязки:\n"+
+			"graph put, books и folder зовут его до архива и очереди)")
 	f.useGraphServer = flag.String("use-graph-server", "",
 		"записать в конфиг сервер сборки графа ([graph].server), проверив модель и веса на его узлах;\n"+
 			"под идущей работой с коллекцией — отказ; как /graph-server в TUI")
@@ -529,8 +535,10 @@ func parseFlagsNoParse() *cliFlags {
 	f.graphLog = flag.String("graph-log", "",
 		"с --graph-build: дозаписывать ход в этот файл строками с отметкой времени")
 	f.graphNewModel = flag.Bool("graph-allow-model-change", false,
-		"с --graph-build: досбирать граф моделью, отличной от той, которой он начат;\n"+
-			"по умолчанию это отказ — смешанный граф выглядит исправным и не чинится")
+		"с --graph-build: досбирать граф моделью, отличной от той, которой он начат, — и весами,\n"+
+			"отличными от отпечатка в паспорте (тот же тег, перезалитый файл); по умолчанию это отказ —\n"+
+			"смешанный граф выглядит исправным и не чинится; с ключом отпечаток в паспорте\n"+
+			"перезаписывается новым, прежний остаётся у захода")
 	f.graphNewPrompt = flag.Bool("graph-allow-prompt-change", false,
 		"с --graph-build: досбирать граф промптом, отличным от записанного в паспорте;\n"+
 			"по умолчанию это отказ — граф двумя схемами выглядит исправным и не чинится")
@@ -943,6 +951,7 @@ func commands(f *cliFlags) []cliCommand {
 		{name: "--graph-pending", on: str(f.graphPending)},
 		{name: "--nodes", on: on(f.nodes)},
 		{name: "--role-servers", on: on(f.roleServers)},
+		{name: "--role-check", on: str(f.roleCheck)},
 		{name: "--use-graph-server", on: str(f.useGraphServer)},
 		{name: "--use-embed-server", on: str(f.useEmbedServer)},
 		{name: "--use-chat-server", on: str(f.useChatServer)},
@@ -1317,6 +1326,8 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 		return true, gmaint.Nodes(os.Stdout, cfg)
 	case *f.roleServers:
 		return true, printRoleServers(os.Stdout, cfg)
+	case *f.roleCheck != "":
+		return true, checkRoleModel(os.Stdout, os.Stderr, cfg, *f.roleCheck)
 	case *f.useGraphServer != "":
 		return true, useRoleServer(os.Stdout, os.Stderr, cfg, roleserver.Graph, *f.useGraphServer, *f.useForce)
 	case *f.useEmbedServer != "":

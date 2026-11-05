@@ -81,6 +81,12 @@ type BuildOpts struct {
 	// которой он начат. По умолчанию это отказ: смешанный граф выглядит
 	// исправным и не чинится ничем, кроме полной пересборки.
 	AllowModelChange bool
+	// Weights — отпечаток весов модели извлечения на узлах, снятый перед
+	// заходом (graphex.Pool.Weights после Check; у одиночного сервера —
+	// Stamp). Сверяется с паспортом графа до первого запроса к модели;
+	// расходится — отказ, обход тот же AllowModelChange. Пусто — отпечаток не
+	// известен: сверка пропускается, паспорт не трогается.
+	Weights Weights
 	// AllowPromptChange — то же для версии промпта (graph.PromptID): без него
 	// сборка промптом, отличным от записанного в паспорте, отказывается идти.
 	AllowPromptChange bool
@@ -203,12 +209,11 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 	// у 63% понятий, у glm-4.7-flash — у 3–19%, и по ним связывается русский
 	// вопрос с английской книгой. Молчаливое продолжение чужой моделью
 	// испортило бы работу, которую уже нельзя переделать иначе как целиком.
+	setModel := false
 	switch have := g.Meta().Model; {
 	case ex.Model() == "":
 	case have == "":
-		if err := g.SetModel(ex.Model()); err != nil {
-			return res, err
-		}
+		setModel = true
 	case have != ex.Model() && !opt.AllowModelChange:
 		return res, fmt.Errorf(
 			"граф собран моделью %s, а в настройках сейчас %s.\n"+
@@ -217,6 +222,24 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 				"Либо верните %s в graph.model, либо соберите граф заново — "+
 				"отложите каталог %s и запустите сборку сначала",
 			have, ex.Model(), have, g.Dir())
+	}
+	// Тот же довод — для весов под тем же именем (решение владельца
+	// 05.11.2026): перетег `ollama pull` на единственном узле имя не меняет,
+	// а граф дальше собирался бы другими весами. Сверка — до любой записи
+	// и до первого запроса к модели; правило то же, что у пула (MatchWeights).
+	replaced, setWeights, werr := checkWeights(g.Meta(), ex.Model(), opt)
+	if werr != nil {
+		return res, werr
+	}
+	if setModel {
+		if err := g.SetModel(ex.Model()); err != nil {
+			return res, err
+		}
+	}
+	if setWeights {
+		if err := g.SetWeights(opt.Weights); err != nil {
+			return res, err
+		}
 	}
 	// Промпт — по формату графа: у формата 2 свой текст и свой PromptID,
 	// чтобы его ужесточение не трогало рабочий граф формата 1.
@@ -460,10 +483,45 @@ send:
 	if nerr := g.NoteRun(RunStamp{
 		At: time.Now(), Model: ex.Model(), PromptID: PromptIDFor(g.Meta().Version), Format: g.Meta().Version,
 		Done: done, Covered: g.Progress().Count(), Seconds: time.Since(started).Seconds(),
+		Weights: opt.Weights.clone(), Replaced: replaced,
 	}); nerr != nil && firstErr == nil {
 		firstErr = nerr
 	}
 	return res, firstErr
+}
+
+// checkWeights сверяет отпечаток весов узлов (opt.Weights) с паспортом графа,
+// ничего не записывая: Build пишет сам, когда сверка прошла. setWeights —
+// записать opt.Weights в паспорт: там пусто (паспорт до 05.11.2026, первый
+// заход) или веса другие и это разрешено AllowModelChange; replaced — прежний
+// отпечаток для отметки захода, когда разрешённый обход его сменил.
+//
+// Не сверить нечем (отпечаток узлов не снят, или файлы назвала одна сторона,
+// а digest есть не у обеих) — пропуск без отказа и без записи, как у паспорта
+// векторов (kb.VecMeta.SameWeights): отказ из-за неснятого отпечатка хуже
+// несделанной проверки, а сверку с паспортом показывает --role-check.
+func checkWeights(m Meta, model string, opt BuildOpts) (replaced *Weights, setWeights bool, err error) {
+	if opt.Weights.IsZero() {
+		return nil, false, nil
+	}
+	if m.Weights == nil || m.Weights.IsZero() {
+		return nil, true, nil
+	}
+	switch MatchWeights(*m.Weights, opt.Weights) {
+	case WeightsSame, WeightsUnchecked:
+		return nil, false, nil
+	}
+	if opt.AllowModelChange {
+		return m.Weights.clone(), true, nil
+	}
+	return nil, false, fmt.Errorf(
+		"граф собран другими весами модели %s: в паспорте %s, на узлах сборки %s.\n"+
+			"Имя то же, веса разные (тег перезалит, другое квантование): продолжать нельзя — "+
+			"граф окажется собран двумя моделями, и различить их потом будет невозможно.\n"+
+			"Либо верните на узлы прежние веса, либо соберите граф заново; "+
+			"продолжить новыми весами сознательно — --graph-allow-model-change "+
+			"(отпечаток в паспорте перезапишется, заход отметится в паспорте)",
+		model, *m.Weights, opt.Weights)
 }
 
 // takesChunk — возьмёт ли сборка этот кусок в работу. Одно правило на сборку
