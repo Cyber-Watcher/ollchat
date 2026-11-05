@@ -29,8 +29,8 @@ func fakeLookup(names map[string][]string) lookupFunc {
 func TestLoopbackOnly(t *testing.T) {
 	lookup := fakeLookup(map[string][]string{
 		"localhost": {"127.0.0.1", "::1"},
-		"kb.corp":   {"10.0.0.5"},
-		"mixed":     {"127.0.0.1", "192.168.1.7"},
+		"kb.corp":   {"198.51.100.5"},
+		"mixed":     {"127.0.0.1", "198.51.100.7"},
 		"mapped":    {"::ffff:127.0.0.1"},
 	})
 	cases := []struct {
@@ -45,8 +45,8 @@ func TestLoopbackOnly(t *testing.T) {
 		{":8377", false},
 		{"0.0.0.0:8377", false},
 		{"[::]:8377", false},
-		{"192.168.1.5:8377", false},
-		{"[::ffff:10.0.0.1]:8377", false},
+		{"198.51.100.5:8377", false},
+		{"[::ffff:198.51.100.1]:8377", false},
 		{"kb.corp:8377", false},
 		{"mixed:8377", false},   // хоть один адрес в сети — уже не петля
 		{"unknown:8377", false}, // не разрешилось — не петля

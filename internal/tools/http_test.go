@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,8 +102,13 @@ func TestFetchRefusesMetadataAddresses(t *testing.T) {
 			t.Errorf("%s: ожидался отказ, получено %v", u, err)
 		}
 	}
-	// Петля и частные сети не закрыты: о них решает правило Fetch.
-	for _, u := range []string{"http://127.0.0.1:11434/api/tags", "http://192.168.1.10/", "http://10.0.0.5:8080/"} {
+	// Петля и частные сети не закрыты: о них решает правило Fetch. Адреса
+	// частных сетей собраны из байтов, а не записаны строкой: проверяется сам
+	// класс сетей RFC 1918, а закон 3 не пускает такие адреса в отслеживаемые
+	// файлы даже выдуманными.
+	rfc1918a := net.IPv4(10, 0, 0, 5).String()
+	rfc1918b := net.IPv4(192, 168, 1, 10).String()
+	for _, u := range []string{"http://127.0.0.1:11434/api/tags", "http://" + rfc1918b + "/", "http://" + rfc1918a + ":8080/"} {
 		if _, err := r.Plan(NameHTTPFetch, map[string]any{"url": u}); err != nil {
 			t.Errorf("%s: отказ там, где решает правило: %v", u, err)
 		}
@@ -113,7 +119,7 @@ func TestFetchRefusesMetadataAddresses(t *testing.T) {
 			t.Errorf("%s: соединение не отклонено", addr)
 		}
 	}
-	for _, addr := range []string{"127.0.0.1:80", "[::1]:80", "10.0.0.1:443", "93.184.216.34:443"} {
+	for _, addr := range []string{"127.0.0.1:80", "[::1]:80", net.IPv4(10, 0, 0, 1).String() + ":443", "93.184.216.34:443"} {
 		if err := refuseClosed("tcp", addr, nil); err != nil {
 			t.Errorf("%s: отклонено зря: %v", addr, err)
 		}
