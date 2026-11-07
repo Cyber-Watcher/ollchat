@@ -1089,6 +1089,13 @@ type Graph struct {
 	// 0 — умолчание (500), отрицательное — не запрещать.
 	ChainHubLimit int `toml:"chain_hub_limit"`
 
+	// HierarchyMajority — правило перевеса (этап 126, Я1, вариант б): у
+	// встречной пары «является» или «часть» слабая сторона не отдаётся при
+	// чтении, если у сильной записей не меньше чем в K раз больше. Граф на
+	// диске не меняется, только выдача. 0 — умолчание (3), отрицательное —
+	// выключить.
+	HierarchyMajority int `toml:"hierarchy_majority"`
+
 	// WeightsByOrigins — веса связей в разбиении тем считать по источникам,
 	// а не по кускам: соседние куски одной книги перекрываются на треть, и
 	// фраза из перекрытия подтверждает связь дважды (этап 101, Г9: 16%
@@ -2457,26 +2464,27 @@ func (g Graph) Rules() graph.Rules {
 		mode = graph.GroupOff
 	}
 	return graph.Rules{
-		Name:             g.Name,
-		StemMinLen:       g.StemMinLen,
-		SharedAliasLimit: g.SharedAliasLimit,
-		StemMinBooks:     g.StemMinBooks,
-		EntryStopWords:   g.EntryStopWords,
-		SenseTie:         g.SenseTie,
-		SenseMargin:      g.SenseMargin,
-		VectorAliases:    g.VectorAliases,
-		VectorDesc:       g.VectorDesc,
-		MaxEvidences:     g.MaxEvidences,
-		PathFlow:         g.PathFlow,
-		TripleLimit:      g.TripleLimit,
-		TripleMinOrigins: g.TripleMinOrigins,
-		TripleQuota:      g.TripleQuota,
-		ChainHubLimit:    g.ChainHubLimit,
-		WeightsByOrigins: g.WeightsByOrigins,
-		RelatedWeight:    g.RelatedWeight,
-		Groups:           mode,
-		MergesOff:        g.MergesEnabled != nil && !*g.MergesEnabled,
-		Format:           g.Format,
+		Name:              g.Name,
+		StemMinLen:        g.StemMinLen,
+		SharedAliasLimit:  g.SharedAliasLimit,
+		StemMinBooks:      g.StemMinBooks,
+		EntryStopWords:    g.EntryStopWords,
+		SenseTie:          g.SenseTie,
+		SenseMargin:       g.SenseMargin,
+		VectorAliases:     g.VectorAliases,
+		VectorDesc:        g.VectorDesc,
+		MaxEvidences:      g.MaxEvidences,
+		PathFlow:          g.PathFlow,
+		TripleLimit:       g.TripleLimit,
+		TripleMinOrigins:  g.TripleMinOrigins,
+		TripleQuota:       g.TripleQuota,
+		ChainHubLimit:     g.ChainHubLimit,
+		HierarchyMajority: g.HierarchyMajority,
+		WeightsByOrigins:  g.WeightsByOrigins,
+		RelatedWeight:     g.RelatedWeight,
+		Groups:            mode,
+		MergesOff:         g.MergesEnabled != nil && !*g.MergesEnabled,
+		Format:            g.Format,
 	}
 }
 

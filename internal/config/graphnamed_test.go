@@ -147,6 +147,38 @@ stem_min_books = 7
 	}
 }
 
+// Правило перевеса (этап 126, Я1): ключ hierarchy_majority доходит до правил
+// графа из [graph] и из [graph.<имя>], подраздел без ключа наследует общий;
+// без ключа вовсе — ноль, то есть умолчание кода 3 при открытии.
+func TestHierarchyMajoritySetting(t *testing.T) {
+	if got := writeCfg(t, baseCfg).Graph.Rules(); got.HierarchyMajority != 0 || got.Normalized().HierarchyMajority != graph.DefaultHierarchyMajority {
+		t.Fatalf("без ключа K=%d (после умолчаний %d), ожидалось 0 и %d",
+			got.HierarchyMajority, got.Normalized().HierarchyMajority, graph.DefaultHierarchyMajority)
+	}
+	cfg := writeCfg(t, baseCfg+`hierarchy_majority = -1
+
+[graph.lab]
+hierarchy_majority = 2
+
+[graph.other]
+model = "qwen3.8:latest"
+`)
+	if got := cfg.Graph.Rules().HierarchyMajority; got != -1 {
+		t.Fatalf("[graph] hierarchy_majority = -1 дал %d", got)
+	}
+	for name, want := range map[string]int{"lab": 2, "other": -1} {
+		if err := cfg.UseGraph(name); err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Graph.Rules().HierarchyMajority; got != want {
+			t.Errorf("граф %s: K=%d, ожидалось %d", name, got, want)
+		}
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("ключ назван неизвестным: %v", cfg.Warnings)
+	}
+}
+
 // Формат 2 — только у именованного графа: в общем разделе он означал бы
 // заведение рабочего графа новой схемой (решение владельца 04.09.2026).
 func TestGraphFormatOnlyForNamedGraph(t *testing.T) {

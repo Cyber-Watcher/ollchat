@@ -5,8 +5,11 @@
 # Смысл: доктор — это суждение о состоянии, и верить ему на слово нельзя.
 # Если два независимых счёта расходятся, виноват один из них, и это надо знать.
 #
-#   ollscripts/graphdoctorcheck.py [коллекция] [имя графа] [--kb-dir КАТАЛОГ] [-c НАСТРОЙКИ]
+#   ollscripts/graphdoctorcheck.py [коллекция] [имя графа] [--kb-dir КАТАЛОГ] [-c НАСТРОЙКИ] [--majority K]
 # Второй аргумент — именованный граф рядом с рабочим (lab → каталог graph-lab).
+# --majority K — правило перевеса «является»/«часть», как graph.hierarchy_majority
+# у доктора (умолчание 3, 0 — тоже 3, отрицательное — выключено); из настроек
+# не читается: если там другое K, его надо назвать ключом.
 #
 # Каталог базы знаний ищется так же, как его находит сам ollchat: ключ --kb-dir,
 # иначе kb.dir из файла настроек (-c, иначе переменная OLLCHAT_CONFIG, иначе
@@ -62,6 +65,9 @@ ap.add_argument("name", nargs="?", default="books", help="коллекция (п
 ap.add_argument("gname", nargs="?", default="", help="имя графа рядом с рабочим (lab → graph-lab)")
 ap.add_argument("--kb-dir", help="каталог базы знаний (по умолчанию — kb.dir из настроек ollchat)")
 ap.add_argument("-c", "--config", help="файл настроек ollchat (по умолчанию — как у самого ollchat)")
+ap.add_argument("--majority", type=int, default=3, metavar="K",
+                help="K правила перевеса «является»/«часть», как graph.hierarchy_majority: "
+                     "по умолчанию 3, 0 — тоже 3, отрицательное — правило выключено")
 args = ap.parse_args()
 name, gname = args.name, args.gname
 
@@ -175,6 +181,133 @@ edges = size_of(gdir/"edges.log") // 24
 ments = size_of(gdir/"mentions.log") // 12
 print(f"связей (edges.log / 24 байта): {edges}")
 print(f"упоминаний (mentions.log / 12 байт): {ments}")
+
+# --- встречные пары и круги в «является» и «часть» (этап 126, Я1) ------------
+# Тот же счёт, что у доктора (Graph.HierarchyCheck), но по сырым файлам: концы
+# связи переведены к выжившему склейки (в круге склеек выживает наименьший
+# номер), петли отброшены, встречная пара считается раз. Запись edges.log —
+# 24 байта: src u32, dst u32, тип — байт 8.
+_res = {}
+
+
+def resolve(x):
+    if x in _res:
+        return _res[x]
+    seen, cur = [], x
+    while cur in to and cur not in seen:
+        seen.append(cur)
+        cur = to[cur]
+    if cur in seen:
+        cur = min(seen[seen.index(cur):])
+    for s in seen + [x]:
+        _res[s] = cur
+    return cur
+
+
+def scc_sizes(adj):
+    """Размеры компонент сильной связности: Тарьян без рекурсии."""
+    index, low, on, stack, sizes = {}, {}, set(), [], []
+    for root in adj:
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on.add(root)
+        work = [(root, iter(adj.get(root, ())))]
+        while work:
+            v, it = work[-1]
+            w = next(it, None)
+            if w is not None:
+                if w not in index:
+                    index[w] = low[w] = len(index)
+                    stack.append(w)
+                    on.add(w)
+                    work.append((w, iter(adj.get(w, ()))))
+                elif w in on:
+                    low[v] = min(low[v], index[w])
+                continue
+            work.pop()
+            if work:
+                u = work[-1][0]
+                low[u] = min(low[u], low[v])
+            if low[v] == index[v]:
+                n = 0
+                while True:
+                    w = stack.pop()
+                    on.discard(w)
+                    n += 1
+                    if w == v:
+                        break
+                sizes.append(n)
+    return sizes
+
+
+hier = {1: {}, 2: {}}
+# Все записи после склеек, и с началом вне реестра: по ним программа считает
+# правило перевеса (countMajority в internal/graph/hierarchy.go), а связь
+# с таким началом видна чтению входящих.
+allrec = {1: {}, 2: {}}
+ep = gdir/"edges.log"
+if ep.exists():
+    with ep.open("rb") as f:
+        while True:
+            buf = f.read(24 * 65536)
+            if not buf:
+                break
+            for off in range(0, len(buf) - 23, 24):
+                t = buf[off + 8]
+                if t not in hier:
+                    continue
+                a, b = struct.unpack_from("<II", buf, off)
+                a, b = resolve(a), resolve(b)
+                if a == b:
+                    continue
+                allrec[t][(a, b)] = allrec[t].get((a, b), 0) + 1
+                # Выживший начала не в реестре — связь не видна ни доктору, ни поиску:
+                # они обходят живые понятия. На books 07.11.2026 так 20 записей
+                # «является» и 49 «часть»: склейка ведёт к номеру, которого нет
+                # в entities.jsonl.
+                if a in live:
+                    hier[t][(a, b)] = hier[t].get((a, b), 0) + 1
+
+
+def print_hier(lead, by_type):
+    both = {}
+    for m in by_type.values():
+        for p, n in m.items():
+            both[p] = both.get(p, 0) + n
+    for name, pairs in (("является", by_type[1]), ("часть", by_type[2]), ("оба вместе", both)):
+        mutual = sum(1 for (a, b) in pairs if a < b and (b, a) in pairs)
+        adj = {}
+        for (a, b) in pairs:
+            adj.setdefault(a, []).append(b)
+        comps = [n for n in scc_sizes(adj) if n > 1]
+        share = 100 * mutual / len(pairs) if pairs else 0
+        print(f"{lead}{name}: записей {sum(pairs.values())}, направленных пар {len(pairs)}, "
+              f"встречных {mutual} ({share:.2f}%); кругов {len(comps)}, "
+              f"понятий в них {sum(comps)}, крупнейший {max(comps, default=0)}")
+
+
+print_hier("", hier)
+# Правило перевеса (этап 126, Я1, вариант б) — тем же правилом, что
+# majority_filter в privatescripts/graphloops.py: у встречной пары одного типа
+# слабая сторона (b, a) при ab ≥ K·ba, или (a, b) при ba ≥ K·ab, прячется.
+k = args.majority or 3
+if k > 0:
+    hidden = {}
+    for t, m in allrec.items():
+        for (a, b), ab in m.items():
+            ba = m.get((b, a), 0)
+            if a < b and ba:
+                weak = (b, a) if ab >= k * ba else (a, b) if ba >= k * ab else None
+                if weak:
+                    hidden[(t,) + weak] = m[weak]
+    lead = f"в выдаче с правилом перевеса K={k}"
+    print(f"{lead}: скрыто слабых сторон {len(hidden)}, записей в них {sum(hidden.values())}")
+    print_hier(lead + ", ", {t: {p: n for p, n in m.items() if (t,) + p not in hidden}
+                             for t, m in hier.items()})
+else:
+    print("правило перевеса выключено — выдача как записано (--majority < 0)")
 
 # --- разбор кусков ------------------------------------------------------------
 # Тем же правилом, что доктор после правки 07.10.2026: по кускам ЖИВЫХ книг,

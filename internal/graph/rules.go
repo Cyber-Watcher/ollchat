@@ -134,6 +134,14 @@ type Rules struct {
 	// описания изменившихся тем (карта).
 	RelatedWeight float64
 
+	// HierarchyMajority — K правила перевеса (этап 126, Я1, вариант б): у
+	// встречной пары «является» или «часть» слабая сторона при чтении не
+	// отдаётся, если у сильной записей не меньше чем в K раз больше. Файлы
+	// графа не меняются — только выдача (hierarchy.go). 0 — умолчание (3),
+	// отрицательное — выключить. Замер K=3 на books: убрано 4270 сторон из
+	// 12634 встречных пар, выборка 30 глазами — верно в 27.
+	HierarchyMajority int
+
 	// Groups — режим групп «про одно»: GroupOff, GroupUnion, GroupExpand.
 	// Пусто или незнакомое — off: молчаливо ничего не делать безопаснее,
 	// чем гадать.
@@ -193,6 +201,11 @@ func (r Rules) norm() Rules {
 	}
 	if r.ChainHubLimit == 0 {
 		r.ChainHubLimit = DefaultChainHubLimit
+	}
+	// Отрицательное остаётся отрицательным: правила открытого графа можно
+	// передать в Open снова, и выключенное правило не должно включиться.
+	if r.HierarchyMajority == 0 {
+		r.HierarchyMajority = DefaultHierarchyMajority
 	}
 	switch r.Groups {
 	case GroupOff, GroupUnion, GroupExpand:

@@ -65,6 +65,11 @@ type Merges struct {
 	// size — сколько байт журнала прочитано: по нему снятие склеек узнаёт,
 	// что журнал дописали, пока оно готовило подмену (см. undo).
 	size int64
+
+	// gen — поколение разрешения: растёт при каждой пересборке (rebuild).
+	// По нему счёт правила перевеса (hierarchy.go) узнаёт, что склейки
+	// поменялись и стороны пар надо считать заново.
+	gen uint64
 }
 
 // openMerges читает журнал склеек. Отсутствие файла — обычное состояние.
@@ -130,6 +135,7 @@ func (m *Merges) reload() error {
 
 // rebuild собирает разрешение номеров по журналу.
 func (m *Merges) rebuild() {
+	m.gen++
 	m.to = make(map[uint32]uint32, len(m.recs))
 	m.from = make(map[uint32][]uint32, len(m.recs))
 	for _, r := range m.recs {
@@ -245,6 +251,16 @@ func (m *Merges) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.gone
+}
+
+// generation — поколение разрешения номеров (см. поле gen); у nil — ноль.
+func (m *Merges) generation() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.gen
 }
 
 // inJournal — участвует ли понятие в журнале склеек поглощённым или

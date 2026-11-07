@@ -136,10 +136,105 @@ func TestGraphDoctorCheckScriptAgreesOnShift(t *testing.T) {
 	}
 }
 
-// doctorAndCheck — вывод доктора и второго прибора на одной фикстуре.
+// Встречные пары и круги «является» и «часть» (этап 126, Я1): доктор и сверка
+// вторым путём называют одни и те же числа, и склейка в них учтена — круг
+// «часть» из трёх замыкается только через поглощённое понятие.
+//
+// Оба счёта — как записано и в выдаче с правилом перевеса (Я1, вариант б).
+// Слабая сторона «часть» Cluster → Pod записана под поглощённым «кластер»:
+// правило обязано считать стороны после склейки, иначе 3 против 1 не сложится.
+func TestGraphDoctorCheckScriptAgreesOnHierarchy(t *testing.T) {
+	f := newMaintFixture(t)
+	g, err := graph.Open(f.coll, 0, f.cfg.Graph.Rules())
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(name string) uint32 {
+		id, _, err := g.Entities().Add(name, graph.TypeConcept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	pod, node, cluster, dup := add("Pod"), add("Node"), add("Cluster"), add("кластер")
+	k := graph.ChunkKey{Doc: f.keep, Ord: f.keepOrds[0]}
+	for _, ed := range []graph.Edge{
+		{Src: pod, Dst: node, Type: graph.RelPart, Weight: 1, Evidence: k},
+		{Src: node, Dst: cluster, Type: graph.RelPart, Weight: 1, Evidence: k},
+		{Src: dup, Dst: pod, Type: graph.RelPart, Weight: 1, Evidence: k},
+		{Src: pod, Dst: node, Type: graph.RelIs, Weight: 1, Evidence: k},
+		{Src: node, Dst: pod, Type: graph.RelIs, Weight: 1, Evidence: k},
+		// Перевес: «является» Node → Pod 3 против 1, «часть» Pod → Cluster
+		// 3 против 1 у Cluster → Pod (через «кластер»).
+		{Src: node, Dst: pod, Type: graph.RelIs, Weight: 1, Evidence: k},
+		{Src: node, Dst: pod, Type: graph.RelIs, Weight: 1, Evidence: k},
+		{Src: pod, Dst: cluster, Type: graph.RelPart, Weight: 1, Evidence: k},
+		{Src: pod, Dst: cluster, Type: graph.RelPart, Weight: 1, Evidence: k},
+		{Src: pod, Dst: cluster, Type: graph.RelPart, Weight: 1, Evidence: k},
+	} {
+		if err := g.Edges().Add(ed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.Merges().Add([]graph.MergeRec{{From: dup, To: cluster, Cos: 0.95, Verdict: "ДА", Why: "фикстура"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Как записано: «является» Pod → Node 1, Node → Pod 3; «часть» Pod → Node,
+	// Node → Cluster, Cluster → Pod по 1 и Pod → Cluster 3. Правило K=3 прячет
+	// «является» Pod → Node и «часть» Cluster → Pod — круг «часть» размыкается,
+	// в «оба вместе» остаётся круг Pod ↔ Node из «часть» туда и «является» обратно.
+	const lead = "в выдаче с правилом перевеса K=3"
+	written := []struct{ prefix, want string }{
+		{"является:", "является: записей 4, направленных пар 2, встречных 1 (50.00%); кругов 1, понятий в них 2, крупнейший 2"},
+		{"часть:", "часть: записей 6, направленных пар 4, встречных 1 (25.00%); кругов 1, понятий в них 3, крупнейший 3"},
+		{"оба вместе:", "оба вместе: записей 10, направленных пар 5, встречных 2 (40.00%); кругов 1, понятий в них 3, крупнейший 3"},
+	}
+	doctor, check := doctorAndCheck(t, f)
+	for _, c := range append(written, []struct{ prefix, want string }{
+		{lead + ":", lead + ": скрыто слабых сторон 2, записей в них 2"},
+		{lead + ", является:", lead + ", является: записей 3, направленных пар 1, встречных 0 (0.00%); кругов 0, понятий в них 0, крупнейший 0"},
+		{lead + ", часть:", lead + ", часть: записей 5, направленных пар 3, встречных 0 (0.00%); кругов 0, понятий в них 0, крупнейший 0"},
+		{lead + ", оба вместе:", lead + ", оба вместе: записей 8, направленных пар 4, встречных 1 (25.00%); кругов 1, понятий в них 2, крупнейший 2"},
+	}...) {
+		if got := lineWith(doctor, c.prefix); got != c.want {
+			t.Errorf("доктор: %q, ожидалось %q", got, c.want)
+		}
+	}
+	agree(t, doctor, check, "является:", "часть:", "оба вместе:",
+		lead+":", lead+", является:", lead+", часть:", lead+", оба вместе:")
+	if t.Failed() {
+		t.Logf("доктор:\n%s\nсверка:\n%s", doctor, check)
+	}
+
+	// Правило выключено отрицательным K — в настройках у доктора и ключом у
+	// сверки: строки как записано те же, строк выдачи с правилом нет ни у кого.
+	f.cfg.Graph.HierarchyMajority = -1
+	doctor, check = doctorAndCheck(t, f, "--majority", "-1")
+	for _, c := range written {
+		if got := lineWith(doctor, c.prefix); got != c.want {
+			t.Errorf("доктор без правила: %q, ожидалось %q", got, c.want)
+		}
+	}
+	for name, out := range map[string]string{"доктор": doctor, "сверка": check} {
+		if lineWith(out, "правило перевеса выключено") == "" {
+			t.Errorf("%s без правила не сказал, что оно выключено:\n%s", name, out)
+		}
+		if strings.Contains(out, "в выдаче с правилом перевеса") {
+			t.Errorf("%s без правила печатает строки выдачи с правилом:\n%s", name, out)
+		}
+	}
+	agree(t, doctor, check, "является:", "часть:", "оба вместе:", "правило перевеса выключено")
+}
+
+// doctorAndCheck — вывод доктора и второго прибора на одной фикстуре;
+// args — дополнительные ключи второго прибора (--majority).
 // Нет python3 — тест пропускается: прибор вспомогательный, а тесты
 // не должны требовать ничего сверх Go.
-func doctorAndCheck(t *testing.T, f *maintFixture) (doctor, check string) {
+func doctorAndCheck(t *testing.T, f *maintFixture, args ...string) (doctor, check string) {
 	t.Helper()
 	py, err := exec.LookPath("python3")
 	if err != nil {
@@ -153,7 +248,7 @@ func doctorAndCheck(t *testing.T, f *maintFixture) (doctor, check string) {
 	if err := DoctorTo(&out, io.Discard, f.cfg, f.name); err != nil {
 		t.Fatal(err)
 	}
-	got, err := exec.Command(py, "-I", script, f.name, "--kb-dir", f.cfg.KB.Dir).CombinedOutput()
+	got, err := exec.Command(py, append([]string{"-I", script, f.name, "--kb-dir", f.cfg.KB.Dir}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("сверка упала: %v\n%s", err, got)
 	}

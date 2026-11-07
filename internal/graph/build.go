@@ -792,9 +792,10 @@ func writeFacts(ctx context.Context, g *Graph, key ChunkKey, f Facts, link *Link
 }
 
 // pairFromChunk — есть ли уже связь этой пары (в любую сторону), взятая
-// из названного куска.
+// из названного куска. Читается как записано, без правила перевеса: иначе
+// правило выдачи решало бы, что писать в граф.
 func (g *Graph) pairFromChunk(a, b uint32, from ChunkKey) bool {
-	for _, ed := range g.Edges().Between(a, b) {
+	for _, ed := range g.Edges().betweenAsWritten(a, b) {
 		if ed.Evidence == from {
 			return true
 		}

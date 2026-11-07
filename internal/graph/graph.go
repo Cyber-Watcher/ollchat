@@ -743,6 +743,8 @@ func openWith(dir string, m Meta, rules Rules, cb func(OpenProgress)) (*Graph, e
 	g.alias.useMerges(g.merges)
 	g.edge.useMerges(g.merges)
 	g.ment.useMerges(g.merges)
+	// Правило перевеса — тоже при чтении (hierarchy.go): файлы не трогаются.
+	g.edge.useMajority(g.rules.HierarchyMajority)
 
 	elapsed := time.Since(started) // время меряется до сборки мусора: она не часть чтения
 

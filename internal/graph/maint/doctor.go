@@ -279,6 +279,29 @@ func DoctorTo(stdout, progress io.Writer, cfg *config.Config, name string) error
 			shape.Largest, shape.LargestShare(), shape.Parts)
 		fmt.Fprintf(stdout, "    связей различных %d, из них на одном подтверждении %d (%d%%)\n",
 			shape.Pairs, shape.PairsOnce, shape.OnceShare())
+		// «является» и «часть» асимметричны: встречная пара или круг — перепутанное
+		// направление, не тот тип или ложная склейка (этап 126, Я1). Только показ.
+		// Дважды: как записано и как отдаёт выдача с правилом перевеса
+		// (graph.hierarchy_majority) — правило прячет слабую сторону пары.
+		stage.say("ищу встречные пары и круги в «является» и «часть»")
+		raw, shown := g.HierarchyCheckAsWritten(), g.HierarchyCheck()
+		sides, recs := g.MajorityHidden()
+		stage.done()
+		printHier := func(lead string, hier []graph.Hierarchy) {
+			for _, h := range hier {
+				fmt.Fprintf(stdout, "    %s%s: записей %d, направленных пар %d, встречных %d (%.2f%%); кругов %d, понятий в них %d, крупнейший %d\n",
+					lead, h.Name, h.Records, h.Pairs, h.Mutual, h.MutualShare(), h.Cycles, h.InCycles, h.Largest)
+			}
+		}
+		printHier("", raw)
+		if k := g.Rules().HierarchyMajority; k > 0 {
+			lead := fmt.Sprintf("в выдаче с правилом перевеса K=%d", k)
+			fmt.Fprintf(stdout, "    %s: скрыто слабых сторон %d, записей в них %d\n", lead, sides, recs)
+			printHier(lead+", ", shown)
+		} else {
+			fmt.Fprintln(stdout, "    правило перевеса выключено — выдача как записано (graph.hierarchy_majority < 0)")
+		}
+		fmt.Fprintln(stdout, "      иерархия не должна замыкаться; сверка вторым путём: python3 ollscripts/graphdoctorcheck.py")
 		// По источникам, а не по кускам (этап 101, Г9): соседние куски одной
 		// книги перекрываются, и фраза из перекрытия подтверждает связь дважды.
 		corr := g.Corroboration()

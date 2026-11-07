@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Упоминания и связи.
@@ -365,6 +366,14 @@ type Edges struct {
 	// Память: тот же список ссылок второй раз, единицы мегабайт на нашем графе.
 	byDst map[uint32][]Edge
 	count int
+
+	// majority — правило перевеса для «является» и «часть» (Rules.HierarchyMajority,
+	// hierarchy.go): у встречной пары слабая сторона при чтении не отдаётся.
+	// Ноль и меньше — правило выключено. snap — посчитанные скрытые стороны,
+	// hmu — чтобы их считал один читатель, а не все разом.
+	majority int
+	hmu      sync.Mutex
+	snap     atomic.Pointer[majoritySnap]
 }
 
 func openEdges(dir string) (*Edges, error) {
@@ -493,7 +502,13 @@ func (e *Edges) useMerges(m *Merges) { e.merges = m }
 // Ради этого склейка и делается: у «сборщика мусора» и `Garbage collection`
 // было по половине связей, и только сойдясь у одного узла они дают целое.
 // Петли отбрасываются: связь понятия с самим собой после склейки бессмысленна.
-func (e *Edges) outgoing(src uint32) []Edge {
+// Слабая сторона встречной пары «является»/«часть» не отдаётся по правилу
+// перевеса (hierarchy.go) — тем же проходом, что и петли.
+func (e *Edges) outgoing(src uint32) []Edge { return e.outgoingHide(src, e.hiddenSides()) }
+
+// outgoingHide — outgoing с явным набором скрытых сторон; nil — без правила
+// перевеса, как записано (после склеек).
+func (e *Edges) outgoingHide(src uint32, hidden map[hierSide]int) []Edge {
 	src = e.merges.Resolve(src)
 	e.mu.RLock()
 	list := append([]Edge(nil), e.bySrc[src]...)
@@ -502,13 +517,13 @@ func (e *Edges) outgoing(src uint32) []Edge {
 	}
 	e.mu.RUnlock()
 
-	if e.merges.Count() == 0 {
+	if e.merges.Count() == 0 && len(hidden) == 0 {
 		return list
 	}
 	out := list[:0]
 	for _, ed := range list {
 		ed.Src, ed.Dst = src, e.merges.Resolve(ed.Dst)
-		if ed.Src == ed.Dst {
+		if ed.Src == ed.Dst || isHidden(hidden, ed) {
 			continue
 		}
 		out = append(out, ed)
@@ -519,6 +534,13 @@ func (e *Edges) outgoing(src uint32) []Edge {
 // Of возвращает связи, исходящие из сущности.
 func (e *Edges) Of(src uint32) []Edge {
 	return e.outgoing(src)
+}
+
+// OfAsWritten — то же, что Of, но без правила перевеса: склейки наложены,
+// петли отброшены, слабые стороны встречных пар на месте. Для приборов,
+// которые меряют сам граф, а не выдачу (сырые строки доктора, этап 126, Я1).
+func (e *Edges) OfAsWritten(src uint32) []Edge {
+	return e.outgoingHide(src, nil)
 }
 
 // ofRaw — связи без наложения склеек. Нужен там, где граф читается как есть.
@@ -557,9 +579,12 @@ func (e *Edges) toRaw(dst uint32) []Edge {
 	return append([]Edge(nil), e.byDst[dst]...)
 }
 
-// incoming — связи, ведущие К сущности. Зеркало outgoing, включая склейки:
-// поглощённые узлы отдают свои входящие связи выжившему.
-func (e *Edges) incoming(dst uint32) []Edge {
+// incoming — связи, ведущие К сущности. Зеркало outgoing, включая склейки
+// и правило перевеса: поглощённые узлы отдают свои входящие связи выжившему.
+func (e *Edges) incoming(dst uint32) []Edge { return e.incomingHide(dst, e.hiddenSides()) }
+
+// incomingHide — incoming с явным набором скрытых сторон (см. outgoingHide).
+func (e *Edges) incomingHide(dst uint32, hidden map[hierSide]int) []Edge {
 	dst = e.merges.Resolve(dst)
 	e.mu.RLock()
 	list := append([]Edge(nil), e.byDst[dst]...)
@@ -568,7 +593,7 @@ func (e *Edges) incoming(dst uint32) []Edge {
 	}
 	e.mu.RUnlock()
 
-	if e.merges.Count() == 0 {
+	if e.merges.Count() == 0 && len(hidden) == 0 {
 		return list
 	}
 	out := list[:0]
@@ -577,6 +602,9 @@ func (e *Edges) incoming(dst uint32) []Edge {
 		ed.Dst = e.merges.Resolve(ed.Dst)
 		if ed.Src == ed.Dst {
 			continue // петля после склейки
+		}
+		if isHidden(hidden, ed) {
+			continue // слабая сторона встречной пары (hierarchy.go)
 		}
 		out = append(out, ed)
 	}
@@ -666,18 +694,25 @@ func hasType(list []uint8, t uint8) bool {
 // До 17.09.2026 читались сырые списки: связь, записанная под поглощённым
 // номером, из ответа выпадала. Пользуются функцией только замеры, и ошибались
 // они молча: «год не известен», «прямой связи нет» (аудит обвязки, S8).
-func (e *Edges) Between(a, b uint32) []Edge {
+func (e *Edges) Between(a, b uint32) []Edge { return e.betweenHide(a, b, e.hiddenSides()) }
+
+// betweenAsWritten — Between без правила перевеса. Нужен сборке: решение,
+// писать ли связь, не должно зависеть от правила выдачи, иначе выдача
+// меняла бы сам граф (pairFromChunk в build.go).
+func (e *Edges) betweenAsWritten(a, b uint32) []Edge { return e.betweenHide(a, b, nil) }
+
+func (e *Edges) betweenHide(a, b uint32, hidden map[hierSide]int) []Edge {
 	a, b = e.merges.Resolve(a), e.merges.Resolve(b)
 	if a == b {
 		return nil
 	}
 	var out []Edge
-	for _, ed := range e.outgoing(a) {
+	for _, ed := range e.outgoingHide(a, hidden) {
 		if ed.Dst == b {
 			out = append(out, ed)
 		}
 	}
-	for _, ed := range e.outgoing(b) {
+	for _, ed := range e.outgoingHide(b, hidden) {
 		if ed.Dst == a {
 			out = append(out, ed)
 		}
