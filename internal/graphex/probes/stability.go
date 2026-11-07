@@ -7,6 +7,10 @@
 // устойчивости. Разное — что меняется между прогонами: температура запроса
 // (ось temp) или починка текста куска перед отправкой (ось textfix). Ничего
 // не пишет ни в граф, ни в коллекцию; карта нужна.
+//
+// **Третья ось, prompt** (07.11.2026, этап 126), устроена иначе: прогоны идут
+// параллельно через общий пул askpool.go и сравниваются два промпта, а не две
+// температуры — она лежит в promptaxis.go.
 package probes
 
 import (
@@ -27,16 +31,19 @@ import (
 )
 
 // runStability — разбор оси и вызов нужной ветки.
-func runStability(stdout io.Writer, cfg *config.Config, collName, axis string, n int, out string, cold, warm float64, minWraps int, timeout time.Duration) error {
+func runStability(stdout io.Writer, cfg *config.Config, collName, axis string, n int, out string, cold, warm float64, minWraps int, timeout time.Duration, pa promptAxisArgs) error {
 	switch axis {
 	case "temp":
 		return stabilityTemp(stdout, cfg, collName, n, out, cold, warm, timeout)
 	case "textfix":
 		return stabilityTextfix(stdout, cfg, collName, n, out, minWraps, timeout)
+	case "prompt":
+		pa.N, pa.Out, pa.Timeout = n, out, timeout
+		return stabilityPrompt(stdout, cfg, collName, pa)
 	case "":
-		return fmt.Errorf("режиму stability нужна ось: -axis temp|textfix")
+		return fmt.Errorf("режиму stability нужна ось: -axis temp|textfix|prompt")
 	}
-	return fmt.Errorf("неизвестная ось %q; есть: temp, textfix", axis)
+	return fmt.Errorf("неизвестная ось %q; есть: temp, textfix, prompt", axis)
 }
 
 // jaccard — сходство двух наборов написаний (мера устойчивости между

@@ -60,12 +60,12 @@ func TestRunStabilityUnknownAxis(t *testing.T) {
 }
 
 // TestModeNames — список режимов для сообщений об ошибке не пуст и содержит
-// все четыре режима (compare добавлен 03.11.2026).
+// все пять режимов (compare добавлен 03.11.2026, direction — 07.11.2026).
 func TestModeNames(t *testing.T) {
 	names := modeNames()
-	want := map[string]bool{"stability": true, "seq": true, "det": true, "compare": true}
+	want := map[string]bool{"stability": true, "seq": true, "det": true, "compare": true, "direction": true}
 	if len(names) != len(want) {
-		t.Fatalf("modeNames() = %v, хочу четыре режима", names)
+		t.Fatalf("modeNames() = %v, хочу пять режимов", names)
 	}
 	for _, n := range names {
 		if !want[n] {

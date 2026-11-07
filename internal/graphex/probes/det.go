@@ -52,12 +52,14 @@ func runDet(stdout io.Writer, cfg *config.Config, collName, gname, cname string,
 		}
 		return out
 	}
-	// Связи куска: (имена src, имена dst, тип) — как EdgeSet ядра.
+	// Связи куска: (имена src, имена dst, тип) — как EdgeSet ядра. Как
+	// записано, без правила перевеса выдачи: оно судит по всему графу, и у
+	// двух графов спрятало бы разное там, где сборка дала одно и то же.
 	edgesOf := func(g *graph.Graph, key graph.ChunkKey, ids []uint32) []EdgeSet {
 		var out []EdgeSet
 		seen := map[string]bool{}
 		for _, id := range ids {
-			for _, ed := range g.Edges().Of(id) {
+			for _, ed := range g.Edges().OfAsWritten(id) {
 				if ed.Evidence != key {
 					continue
 				}
