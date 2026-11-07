@@ -534,6 +534,10 @@ type GraphMap struct {
 	Result graph.SearchResult
 	Chain  []graph.PathStep
 
+	// ChainMore — другие пути между теми же понятиями, 2…MapOpts.PathCount
+	// (этап 126, Я2.1). nil — один путь или служба прежней сборки.
+	ChainMore [][]graph.PathStep
+
 	// Years — год самой свежей книги у каждой связи Result.Relations, в том же
 	// порядке; 0 — года нет. nil — служба прежней сборки или годов нет вовсе:
 	// у связей тогда нет «свежайшее N г.», остальное то же.
@@ -554,6 +558,11 @@ type MapOpts struct {
 	// как настроено у службы: поля в запросе нет.
 	Rank       *graph.NeighborRank
 	SenseEntry *bool
+
+	// PathCount — сколько путей между понятиями вопроса класть в ответ
+	// (graph.path_count клиента при mix.chain, этап 126, Я2.1). 0 и 1 — одна
+	// цепочка, и поля в запросе нет.
+	PathCount int
 }
 
 // GraphMap отдаёт разбираемый результат поиска по графу, цепочку между двумя
@@ -573,10 +582,17 @@ type MapOpts struct {
 //
 // Цепочку служба считает тем же find.Chain по своему графу (этап 121, А6).
 // Служба прежней сборки поля chain не отдаёт — цепочка пустая, карта та же.
+//
+// Другие пути (o.PathCount ≥ 2, этап 126, Я2.1) приходят полем chain_more.
+// Служба прежней сборки поле path_count пропускает и chain_more не шлёт —
+// у клиента одна цепочка, без ошибки.
 func (c *Client) GraphMap(ctx context.Context, collection, query string, o MapOpts) (GraphMap, error) {
 	req := graphSearchRequest{
 		Collection: collection, Query: query, Entities: o.Entities, Neighbors: o.Neighbors,
 		SenseEntry: o.SenseEntry,
+	}
+	if o.PathCount > 1 {
+		req.PathCount = o.PathCount
 	}
 	if o.Rank != nil {
 		w := o.Rank.SenseWeight
@@ -591,7 +607,11 @@ func (c *Client) GraphMap(ctx context.Context, collection, query string, o MapOp
 	if len(years) != len(resp.Result.Relations) {
 		years = nil // не по связям — года не к чему приложить
 	}
-	return GraphMap{Result: resp.Result, Chain: resp.Chain, Years: years,
+	more := resp.ChainMore
+	if len(resp.Chain) == 0 {
+		more = nil // других путей без первого не бывает
+	}
+	return GraphMap{Result: resp.Result, Chain: resp.Chain, ChainMore: more, Years: years,
 		Queued: time.Duration(resp.QueuedMS) * time.Millisecond}, nil
 }
 
@@ -651,11 +671,13 @@ type graphSearchRequest struct {
 	SenseEntry  *bool    `json:"sense_entry,omitempty"`
 	SenseWeight *float64 `json:"sense_weight,omitempty"`
 	Pool        int      `json:"pool,omitempty"`
+	PathCount   int      `json:"path_count,omitempty"`
 }
 
 type graphSearchResponse struct {
 	Result        graph.SearchResult `json:"result"`
 	Chain         []graph.PathStep   `json:"chain"`
+	ChainMore     [][]graph.PathStep `json:"chain_more"`
 	RelationYears []int              `json:"relation_years,omitempty"`
 	QueuedMS      int64              `json:"queued_ms,omitempty"`
 }

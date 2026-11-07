@@ -570,6 +570,10 @@ func Mount(mux *http.ServeMux, o Opts) {
 		// Пул кандидатов — множитель к числу связей: без предела чужой клиент
 		// заставил бы службу ранжировать весь граф.
 		req.Pool = clampPositive(req.Pool, maxTopK)
+		// Число путей — тоже клиента и тоже в пределах службы (этап 126, Я2.1):
+		// перебор путей ограничен в графе (pathsWorkLimit), а длину ответа
+		// без потолка выбирал бы чужой клиент.
+		req.PathCount = clampPositive(req.PathCount, maxTopK)
 		res, err := o.Graph.Search(r.Context(), req)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err)
@@ -700,6 +704,11 @@ type GraphToolResponse struct {
 // карту по своему конфигу, и текст карты совпадал с прямым режимом только
 // при одинаковых конфигах. nil и ноль — по настройкам службы; вес ноль
 // осмыслен («не пересортировывать»), поэтому он указатель.
+//
+// PathCount — сколько путей между понятиями вопроса нужно клиенту (его
+// graph.path_count при mix.chain, этап 126, Я2.1). Ноль и единица — одна
+// цепочка, как было, а не path_count службы: клиент прежней сборки поля
+// не шлёт и других путей не читает.
 type GraphSearchRequest struct {
 	Collection  string   `json:"collection"`
 	Query       string   `json:"query"`
@@ -708,11 +717,16 @@ type GraphSearchRequest struct {
 	SenseEntry  *bool    `json:"sense_entry,omitempty"`
 	SenseWeight *float64 `json:"sense_weight,omitempty"`
 	Pool        int      `json:"pool,omitempty"`
+	PathCount   int      `json:"path_count,omitempty"`
 }
 
 // GraphSearchResponse — карта понятий по вопросу и цепочка между двумя его
 // понятиями (find.Chain по графу службы, этап 121, А6). Клиент прежней сборки
 // поле chain не читает — ответ совместим.
+//
+// ChainMore — пути 2…PathCount запроса (этап 126, Я2.1); первый — Chain.
+// Пусто при одном пути. Служба прежней сборки поля не шлёт — у клиента одна
+// цепочка, как было.
 //
 // RelationYears — год самой свежей книги, подтвердившей связь, по связям
 // Result.Relations в том же порядке; 0 — года нет. Прямой режим берёт его
@@ -723,6 +737,7 @@ type GraphSearchRequest struct {
 type GraphSearchResponse struct {
 	Result        graph.SearchResult `json:"result"`
 	Chain         []graph.PathStep   `json:"chain,omitempty"`
+	ChainMore     [][]graph.PathStep `json:"chain_more,omitempty"`
 	RelationYears []int              `json:"relation_years,omitempty"`
 	QueuedMS      int64              `json:"queued_ms,omitempty"` // ожидание в очереди, мс
 }

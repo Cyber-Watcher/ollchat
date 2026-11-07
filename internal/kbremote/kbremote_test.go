@@ -546,6 +546,54 @@ func TestGraphSearchOldServiceWithoutChain(t *testing.T) {
 	}
 }
 
+// Число путей клиента уходит службе полем path_count, пути 2…K приходят полем
+// chain_more (этап 126, Я2.1). 0 и 1 — поля в запросе нет: служба прежней
+// сборки видит прежний запрос.
+func TestGraphMapSendsPathCount(t *testing.T) {
+	f := &fakeServer{graphResp: `{"result":{"Entities":[{"Name":"горутина"}]},` +
+		`"chain":[{"From":"горутина","To":"канал"},{"From":"канал","To":"рантайм"}],` +
+		`"chain_more":[[{"From":"горутина","To":"планировщик"},{"From":"планировщик","To":"рантайм"}]]}`}
+	cl, _ := newFake(t, f)
+	m, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{PathCount: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(f.graphBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["path_count"] != float64(2) {
+		t.Errorf("службе ушло: %s", f.graphBody)
+	}
+	if len(m.Chain) != 2 || len(m.ChainMore) != 1 || len(m.ChainMore[0]) != 2 || m.ChainMore[0][0].To != "планировщик" {
+		t.Errorf("пути не разобрались: первая %+v, другие %+v", m.Chain, m.ChainMore)
+	}
+
+	for _, k := range []int{0, 1} {
+		if _, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{PathCount: k}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(f.graphBody), "path_count") {
+			t.Errorf("при %d путях поле path_count ушло службе: %s", k, f.graphBody)
+		}
+	}
+}
+
+// Служба прежней сборки поле path_count пропускает и chain_more не шлёт —
+// у нового клиента одна цепочка, без ошибки.
+func TestGraphMapOldServiceWithoutChainMore(t *testing.T) {
+	f := &fakeServer{graphResp: `{"result":{"Entities":[{"Name":"горутина"}]},` +
+		`"chain":[{"From":"горутина","To":"канал"},{"From":"канал","To":"рантайм"}]}`}
+	cl, _ := newFake(t, f)
+	m, err := cl.GraphMap(context.Background(), "books", "q", MapOpts{PathCount: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Chain) != 2 || m.ChainMore != nil {
+		t.Errorf("ответ прежней службы: цепочка %+v, другие пути %+v", m.Chain, m.ChainMore)
+	}
+}
+
 // Ключ в адресе службы не поддерживается (решение владельца 23.10.2026):
 // учётные данные, строка запроса и якорь в kb.server_url — отказ при заведении
 // клиента, и в тексте отказа самого ключа нет. FromConfig отказывает до

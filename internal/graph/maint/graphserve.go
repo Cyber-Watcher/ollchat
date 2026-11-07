@@ -81,9 +81,10 @@ func (g *GraphService) Tool(ctx context.Context, collection, name string, args m
 // должен тот, кто за контекст платит. Поэтому размер карты — из запроса
 // (mix.entities и mix.neighbors клиента), а ноль — свои настройки службы.
 //
-// Цепочка — тот же find.Chain, которым подмешивание считает её у себя
+// Цепочка — тот же find.Chains, которым подмешивание считает её у себя
 // (mixer.Build): у клиента, берущего карту у службы, своего графа нет,
 // и без цепочки отсюда вопрос «как связаны X и Y» терял бы её (этап 121, А6).
+// Других путей (ChainMore) — до req.PathCount клиента (этап 126, Я2.1).
 //
 // Годы связей (RelationYears) — тот же «свежайшее N г.», что прямой режим
 // печатает по своей коллекции: у клиента службы кусков нет (находка 11 аудита
@@ -128,9 +129,16 @@ func (g *GraphService) Search(ctx context.Context, req kbserve.GraphSearchReques
 		Rank:         graph.RankWith(coll),
 		QueryVector:  qv,
 	})
-	chain := find.Chain(gr, res.Entities, res.Relations, find.Opts{})
-	return kbserve.GraphSearchResponse{Result: res, Chain: chain,
-		RelationYears: RelationYears(coll, res.Relations)}, nil
+	// Путей — сколько просит клиент (req.PathCount), а не graph.path_count
+	// службы: без поля — одна цепочка, ровно прежний find.Chain.
+	resp := kbserve.GraphSearchResponse{Result: res, RelationYears: RelationYears(coll, res.Relations)}
+	if paths := find.Chains(gr, res.Entities, res.Relations, find.Opts{PathCount: max(req.PathCount, 1)}); len(paths) > 0 {
+		resp.Chain = paths[0]
+		if len(paths) > 1 {
+			resp.ChainMore = paths[1:]
+		}
+	}
+	return resp, nil
 }
 
 // requestRank — ранжирование связей для карты: присланное клиентом поверх

@@ -23,6 +23,13 @@ import (
 // путём, что в работе.
 func serveFixture(t *testing.T) *GraphService {
 	t.Helper()
+	return serveGraph(t, false)
+}
+
+// serveGraph — serveFixture; detour добавляет второй путь той же длины
+// «горутина → планировщик → рантайм» (этап 126, Я2.1).
+func serveGraph(t *testing.T, detour bool) *GraphService {
+	t.Helper()
 	root := t.TempDir()
 	books := filepath.Join(root, "books")
 	if err := os.MkdirAll(books, 0o755); err != nil {
@@ -69,15 +76,24 @@ func serveFixture(t *testing.T) *GraphService {
 		return id
 	}
 	a, mid, b := add("горутина"), add("канал"), add("рантайм")
-	for _, e := range []graph.Edge{
+	ids := []uint32{a, mid, b}
+	edges := []graph.Edge{
 		{Src: a, Dst: mid, Type: graph.RelUses, Weight: 2, Evidence: keys[0]},
 		{Src: mid, Dst: b, Type: graph.RelPart, Weight: 2, Evidence: keys[1]},
-	} {
+	}
+	if detour {
+		alt := add("планировщик")
+		ids = append(ids, alt)
+		edges = append(edges,
+			graph.Edge{Src: a, Dst: alt, Type: graph.RelUses, Weight: 2, Evidence: keys[2]},
+			graph.Edge{Src: alt, Dst: b, Type: graph.RelPart, Weight: 2, Evidence: keys[2]})
+	}
+	for _, e := range edges {
 		if err := g.Edges().Add(e); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, id := range []uint32{a, mid, b} {
+	for _, id := range ids {
 		for _, k := range keys[:3] {
 			g.Entities().Touch(id, true)
 			if err := g.Mentions().Add(id, k); err != nil {
@@ -234,6 +250,46 @@ func TestGraphServiceSearchReturnsChain(t *testing.T) {
 	ends := map[string]bool{first.From: true, last.To: true}
 	if !ends["горутина"] || !ends["рантайм"] {
 		t.Errorf("цепочка не между понятиями вопроса: %+v", resp.Chain)
+	}
+}
+
+// Другие пути (этап 126, Я2.1): сколько — решает запрос клиента, а не
+// graph.path_count службы. Без поля path_count (клиент прежней сборки) —
+// одна цепочка, хотя у самой службы стоит 3, и поля chain_more в ответе нет;
+// с path_count = 2 первая цепочка та же, под ней путь через другую середину.
+func TestGraphServiceSearchPathCountFromRequest(t *testing.T) {
+	svc := serveGraph(t, true)
+	svc.Cfg.Graph.PathCount = 3
+	req := kbserve.GraphSearchRequest{Collection: "books", Query: "как связаны горутина и рантайм", Entities: 6}
+	one, err := svc.Search(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one.Chain) != 2 || len(one.ChainMore) != 0 {
+		t.Fatalf("без path_count в запросе ждали одну цепочку из 2 шагов: %+v, другие %+v", one.Chain, one.ChainMore)
+	}
+	raw, err := json.Marshal(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "chain_more") {
+		t.Errorf("при одной цепочке поле chain_more ушло клиенту: %s", raw)
+	}
+
+	req.PathCount = 2
+	two, err := svc.Search(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(two.Chain) != fmt.Sprint(one.Chain) {
+		t.Errorf("первая цепочка изменилась от path_count: %+v против %+v", two.Chain, one.Chain)
+	}
+	if len(two.ChainMore) != 1 || len(two.ChainMore[0]) != 2 {
+		t.Fatalf("path_count = 2: ждали ещё один путь из 2 шагов, пришло %+v", two.ChainMore)
+	}
+	mids := map[string]bool{one.Chain[0].To: true, two.ChainMore[0][0].To: true}
+	if !mids["канал"] || !mids["планировщик"] {
+		t.Errorf("пути не через канал и планировщик: %+v и %+v", one.Chain, two.ChainMore[0])
 	}
 }
 

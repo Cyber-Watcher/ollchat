@@ -70,11 +70,12 @@ func remoteFixture(t *testing.T) (*kb.Base, *kb.Collection, *graph.Graph) {
 }
 
 // fakeMap — служба, считающая карту по тому же графу тем же поиском, что
-// подмешивание по своему графу, и цепочку тем же find.Chain
-// (gmaint.GraphService.Search устроен так же).
+// подмешивание по своему графу, и пути тем же find.Chains с числом путей
+// клиента (gmaint.GraphService.Search устроен так же).
 type fakeMap struct {
 	g   *graph.Graph
 	err error
+	old bool // служба прежней сборки: path_count не знает, путь один (Я2.1)
 
 	calls               int
 	coll                string
@@ -98,8 +99,18 @@ func (f *fakeMap) GraphMap(ctx context.Context, coll, query string, o kbremote.M
 	}
 	res := f.g.Search(query, graph.SearchOpts{TopEntities: o.Entities, TopNeighbors: o.Neighbors,
 		TopChunks: 1, MinMentions: 2, Neighbors: rank})
-	return kbremote.GraphMap{Result: res, Chain: find.Chain(f.g, res.Entities, res.Relations, find.Opts{}),
-		Queued: f.queued}, nil
+	k := max(o.PathCount, 1)
+	if f.old {
+		k = 1
+	}
+	m := kbremote.GraphMap{Result: res, Queued: f.queued}
+	if paths := find.Chains(f.g, res.Entities, res.Relations, find.Opts{PathCount: k}); len(paths) > 0 {
+		m.Chain = paths[0]
+		if len(paths) > 1 {
+			m.ChainMore = paths[1:]
+		}
+	}
+	return m, nil
 }
 
 // errDown — так kbremote сообщает об отказе в соединении: адрес в тексте,
@@ -189,6 +200,125 @@ func TestServiceMapMatchesOwnGraph(t *testing.T) {
 	}
 	if remote.Remote != "" {
 		t.Errorf("служба ответила, а заметка о ней есть: %q", remote.Remote)
+	}
+}
+
+// Несколько путей в карте подмешивания (этап 126, Я2.1). На графе с двумя
+// путями «горутина → канал | планировщик → рантайм» при path_count 0 и 1
+// карта побайтно та, что давала прежняя формула: карта без цепочки и под ней
+// RenderPath одной цепочки find.Chain — второго пути в ней нет.
+func TestMixPathCountOneKeepsMap(t *testing.T) {
+	_, coll, g := datedGraph(t, true)
+	s := remoteSettings()
+	if paths, _, _ := g.Paths("горутина", "рантайм", 3, 2); len(paths) != 2 {
+		t.Fatalf("подготовка: в графе нет второго пути: %+v", paths)
+	}
+	s.Chain = false
+	plain := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+	res := g.Search(pairQuestion, graph.SearchOpts{TopEntities: s.Entities, TopNeighbors: s.Neighbors,
+		TopChunks: 1, MinMentions: 2})
+	chain := find.Chain(g, res.Entities, res.Relations, find.Opts{})
+	if plain.Empty() || len(chain) == 0 {
+		t.Fatalf("подготовка: карта %q, цепочка %+v", plain.Text, chain)
+	}
+	want := plain.Text + "\n" + graph.RenderPath(nil, chain[0].From, chain[len(chain)-1].To, chain, true,
+		graph.RenderOpts{Collection: s.Collection})
+
+	s.Chain = true
+	for _, k := range []int{0, 1} {
+		s.PathCount = k
+		got := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+		if got.Text != want {
+			t.Errorf("path_count = %d: карта изменилась:\n--- стало ---\n%s\n--- было ---\n%s", k, got.Text, want)
+		}
+	}
+}
+
+// path_count = 2: под первой цепочкой тем же видом «Другой путь из 2 шагов»,
+// и карта одна и та же по своему графу, через подставную службу и через
+// настоящую (kbserve + gmaint.GraphService за httptest и клиент kbremote) —
+// как карта службы со своей в Д4 этапа 121. Клиент без числа путей (прежней
+// сборки) получает от новой службы одну цепочку.
+func TestMixPathCountSameLocalAndService(t *testing.T) {
+	base, coll, g := datedGraph(t, true)
+	s := remoteSettings()
+	one := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+	s.PathCount = 2
+	local := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+	t.Logf("карта с двумя путями:\n%s", local.Text)
+
+	rest, ok := strings.CutPrefix(local.Text, one.Text)
+	if !ok || !strings.HasPrefix(rest, "\nДругой путь из 2 шагов:\n") || strings.Count(rest, "\n  ") != 2 {
+		t.Fatalf("второй путь не под первым тем же видом:\n--- одна цепочка ---\n%s\n--- две ---\n%s", one.Text, local.Text)
+	}
+	paths := local.Text[strings.Index(local.Text, "Путь из"):]
+	if strings.Count(paths, "канал") != 2 || strings.Count(paths, "планировщик") != 2 {
+		t.Errorf("пути не через канал и планировщик:\n%s", paths)
+	}
+	if local.Chain != one.Chain {
+		t.Errorf("шагов первой цепочки %d, при одной цепочке %d", local.Chain, one.Chain)
+	}
+
+	fm := &fakeMap{g: g}
+	if remote := Build(pairQuestion, Deps{Coll: coll, Map: fm, GraphOn: true}, s); remote.Text != local.Text {
+		t.Errorf("подставная служба:\n--- служба ---\n%s\n--- свой граф ---\n%s", remote.Text, local.Text)
+	}
+	if fm.opts.PathCount != 2 {
+		t.Errorf("службе ушло путей %d, ждали 2", fm.opts.PathCount)
+	}
+
+	client := serviceClient(t, base, nil, 0)
+	src, err := kb.Fallback{Remote: client}.Source("books")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := Build(pairQuestion, Deps{Coll: src, Map: client, GraphOn: true}, s)
+	if served.Text != local.Text || served.Remote != "" {
+		t.Errorf("настоящая служба (заметка %q):\n--- служба ---\n%s\n--- свой граф ---\n%s",
+			served.Remote, served.Text, local.Text)
+	}
+	s.PathCount = 0
+	if old := Build(pairQuestion, Deps{Coll: src, Map: client, GraphOn: true}, s); old.Text != one.Text {
+		t.Errorf("без числа путей служба дала не одну цепочку:\n%s", old.Text)
+	}
+}
+
+// mix.chain = false — путей в карте нет при любом path_count, и службе уходит
+// один путь: его ждёт только привратник MapPairOnly.
+func TestMixPathCountWithoutChain(t *testing.T) {
+	_, coll, g := datedGraph(t, true)
+	s := remoteSettings()
+	s.Chain = false
+	want := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+	s.PathCount = 3
+	got := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+	if got.Text != want.Text || strings.Contains(got.Text, "Путь из") || got.Chain != 0 {
+		t.Errorf("mix.chain = false, path_count = 3: карта изменилась или в ней путь:\n%s", got.Text)
+	}
+	fm := &fakeMap{g: g}
+	if remote := Build(pairQuestion, Deps{Coll: coll, Map: fm, GraphOn: true}, s); remote.Text != want.Text {
+		t.Errorf("через службу карта разошлась:\n%s", remote.Text)
+	}
+	if fm.opts.PathCount != 1 {
+		t.Errorf("без цепочки в карте службе ушло путей %d, ждали 1", fm.opts.PathCount)
+	}
+}
+
+// Служба прежней сборки path_count не знает и отдаёт одну цепочку: карта
+// нового клиента с path_count = 3 — та же, что при одной цепочке, без ошибки
+// и без заметки о службе.
+func TestMixPathCountOldService(t *testing.T) {
+	_, coll, g := datedGraph(t, true)
+	s := remoteSettings()
+	one := Build(pairQuestion, Deps{Coll: coll, Graph: g, GraphOn: true}, s)
+	s.PathCount = 3
+	fm := &fakeMap{g: g, old: true}
+	remote := Build(pairQuestion, Deps{Coll: coll, Map: fm, GraphOn: true}, s)
+	if remote.Text != one.Text || remote.Remote != "" {
+		t.Errorf("служба прежней сборки (заметка %q):\n--- стало ---\n%s\n--- ждали ---\n%s", remote.Remote, remote.Text, one.Text)
+	}
+	if fm.opts.PathCount != 3 {
+		t.Errorf("службе ушло путей %d, ждали 3", fm.opts.PathCount)
 	}
 }
 
@@ -319,6 +449,13 @@ func serviceClient(t *testing.T, base *kb.Base, gs kbserve.GraphServer, timeout 
 // подтверждает обе связи.
 func datedFixture(t *testing.T) (*kb.Base, *kb.Collection, *graph.Graph) {
 	t.Helper()
+	return datedGraph(t, false)
+}
+
+// datedGraph — datedFixture; detour добавляет второй путь той же длины
+// «горутина → планировщик → рантайм» (этап 126, Я2.1).
+func datedGraph(t *testing.T, detour bool) (*kb.Base, *kb.Collection, *graph.Graph) {
+	t.Helper()
 	root := t.TempDir()
 	books := filepath.Join(root, "books")
 	if err := os.MkdirAll(books, 0o755); err != nil {
@@ -370,16 +507,25 @@ func datedFixture(t *testing.T) (*kb.Base, *kb.Collection, *graph.Graph) {
 		return id
 	}
 	a, mid, b := add("горутина"), add("канал"), add("рантайм")
-	for _, e := range []graph.Edge{
+	ids := []uint32{a, mid, b}
+	edges := []graph.Edge{
 		{Src: a, Dst: mid, Type: graph.RelUses, Weight: 2, Evidence: old},
 		{Src: a, Dst: mid, Type: graph.RelUses, Weight: 2, Evidence: fresh},
 		{Src: mid, Dst: b, Type: graph.RelPart, Weight: 2, Evidence: old},
-	} {
+	}
+	if detour {
+		alt := add("планировщик")
+		ids = append(ids, alt)
+		edges = append(edges,
+			graph.Edge{Src: a, Dst: alt, Type: graph.RelUses, Weight: 2, Evidence: fresh},
+			graph.Edge{Src: alt, Dst: b, Type: graph.RelPart, Weight: 2, Evidence: old})
+	}
+	for _, e := range edges {
 		if err := g.Edges().Add(e); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, id := range []uint32{a, mid, b} {
+	for _, id := range ids {
 		for _, k := range keys {
 			g.Entities().Touch(id, true)
 			if err := g.Mentions().Add(id, k); err != nil {

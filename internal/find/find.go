@@ -71,6 +71,11 @@ type Opts struct {
 	// прочесть её человеку уже трудно.
 	ChainHops int
 
+	// PathCount — сколько путей отдаёт Chains; 0 и меньше — по правилу графа
+	// (graph.path_count). Подмешивание карты и служба карты ставят его сами:
+	// число путей там решает клиент, а не граф службы (этап 126, Я2.1).
+	PathCount int
+
 	// ExpandLimit — сколько понятий графа дописывать к запросу для книг;
 	// 0 — все найденные (так ищет /search), 3 — так ищут инструмент и подмес.
 	ExpandLimit int
@@ -311,12 +316,20 @@ func Chain(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation,
 	return paths[0]
 }
 
-// Chains — то же, что Chain, но до graph.path_count путей (этап 126, Я2):
-// первый — ровно ответ Chain, следующие — другие простые пути (graph.Paths).
-// Зовёт поиск (/search и инструмент search модели); подмешивание карты
-// и служба карты берут одну цепочку через Chain.
+// Chains — то же, что Chain, но до o.PathCount путей, а без него — до
+// graph.path_count (этап 126, Я2): первый — ровно ответ Chain, следующие —
+// другие простые пути (graph.Paths). Зовут поиск (/search и инструмент search
+// модели), подмешивание карты и служба карты (Я2.1; эти двое — с o.PathCount
+// клиента).
 func Chains(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation, o Opts) [][]graph.PathStep {
-	return chains(g, ents, rels, o, g.Rules().PathCount)
+	if g == nil {
+		return nil
+	}
+	k := o.PathCount
+	if k <= 0 {
+		k = g.Rules().PathCount
+	}
+	return chains(g, ents, rels, o, k)
 }
 
 // setChains раскладывает пути Chains по полям выдачи: первый — Chain,

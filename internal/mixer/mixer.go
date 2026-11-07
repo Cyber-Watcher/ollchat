@@ -55,6 +55,12 @@ type Settings struct {
 	// (этап 101, D1). Настройка mix.chain; пусто в конфиге — включено.
 	Chain bool
 
+	// PathCount — сколько путей между понятиями вопроса класть в карту при
+	// Chain (graph.path_count клиента, этап 126, Я2.1): первый — та же цепочка,
+	// под ним — «Другой путь». Через службу число уходит в запрос: путей решает
+	// клиент, как и размер карты. 0 и 1 — одна цепочка, карта прежняя.
+	PathCount int
+
 	// RelationYears — печатать у связей карты год самой свежей подтверждающей
 	// книги (mix.relation_years; этап 104, П10.3). Цитат это не добавляет.
 	RelationYears bool
@@ -232,6 +238,17 @@ func serviceTimeout(s Settings) time.Duration {
 	return defaultServiceTimeout
 }
 
+// chainPaths — сколько путей между понятиями вопроса считать (этап 126, Я2.1):
+// s.PathCount, когда цепочка идёт в карту, иначе один — он нужен только
+// привратнику MapPairOnly, и лишние пути считать незачем. Одно место на оба
+// режима: свой граф и запрос к службе берут одно и то же число.
+func chainPaths(s Settings) int {
+	if !s.Chain || s.PathCount < 1 {
+		return 1
+	}
+	return s.PathCount
+}
+
 // searchProbe — сигналы первого поиска по книгам за один Build. Поисков за
 // вопрос бывает два (проба привратника и сами выдержки) по тому же вопросу и
 // с тем же реранкером; в журнал идёт первый, чтобы вопрос не считался дважды.
@@ -336,13 +353,14 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 
 	var res graph.SearchResult
 	var chain []graph.PathStep
-	var years []int // годы связей от службы (kbremote.GraphMap.Years)
-	served := false // карта и цепочка пришли от службы готовыми
+	var more [][]graph.PathStep // другие пути при s.PathCount ≥ 2 (Я2.1)
+	var years []int             // годы связей от службы (kbremote.GraphMap.Years)
+	served := false             // карта и цепочка пришли от службы готовыми
 	if fromService {
 		var release func()
 		var sm kbremote.GraphMap
 		sm, served, g, release, remote = serviceMap(question, d, s)
-		res, chain, years = sm.Result, sm.Chain, sm.Years
+		res, chain, more, years = sm.Result, sm.Chain, sm.ChainMore, sm.Years
 		svc.queued += sm.Queued
 		if release != nil {
 			defer release()
@@ -444,9 +462,12 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 
 	// Цепочка между двумя понятиями вопроса считается заранее: она нужна
 	// и карте (s.Chain), и решению «вопрос ли это о связи» (MapPairOnly).
-	// От службы она приходит вместе с картой, посчитанная тем же find.Chain.
+	// От службы она приходит вместе с картой, посчитанная тем же find.Chains
+	// с тем же числом путей (chainPaths).
 	if (s.Chain || s.MapPairOnly) && !served {
-		chain = find.Chain(g, res.Entities, res.Relations, find.Opts{})
+		if paths := find.Chains(g, res.Entities, res.Relations, find.Opts{PathCount: chainPaths(s)}); len(paths) > 0 {
+			chain, more = paths[0], paths[1:]
+		}
 	}
 	if s.MapPairOnly && !aboutPair(res, chain) {
 		// Вопрос об одном понятии: карта ему не нужна, только книги.
@@ -509,9 +530,14 @@ func Build(question string, d Deps, s Settings) (mixed Result) {
 	// Подтверждения (книга и страница) намеренно не печатаются: в карте понятий
 	// цитат нет вовсе, и строка со страницей провоцировала бы ссылаться на то,
 	// что модель не читала. За цитатами — kb_search, так и написано в шапке.
+	//
+	// Путей — до s.PathCount (этап 126, Я2.1): под первым тем же видом идут
+	// «Другой путь из N шагов». RenderPaths с одним путём — побайтно прежний
+	// RenderPath, так что при path_count = 1 карта не меняется.
 	if s.Chain && len(chain) > 0 {
 		b.WriteString("\n")
-		b.WriteString(graph.RenderPath(nil, chain[0].From, chain[len(chain)-1].To, chain, true,
+		paths := append([][]graph.PathStep{chain}, more...)
+		b.WriteString(graph.RenderPaths(nil, chain[0].From, chain[len(chain)-1].To, paths, true,
 			graph.RenderOpts{Collection: s.Collection}))
 		out.Chain = len(chain)
 	}
@@ -581,6 +607,7 @@ func serviceMap(question string, d Deps, s Settings) (m kbremote.GraphMap,
 		rank, sense := s.Rank, s.SenseEntry
 		m, err = d.Map.GraphMap(ctx, d.Coll.Name(), question, kbremote.MapOpts{
 			Entities: s.Entities, Neighbors: s.Neighbors, Rank: &rank, SenseEntry: &sense,
+			PathCount: chainPaths(s),
 		})
 		cancel()
 		if err == nil {

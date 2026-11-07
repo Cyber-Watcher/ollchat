@@ -415,6 +415,7 @@ func askThink(srv *config.Server, o askOpts) *bool {
 func askSettings(cfg *config.Config, o askOpts) mixer.Settings {
 	s := mixer.Settings{
 		Chain:         cfg.Mix.Chain,
+		PathCount:     cfg.Graph.PathCount,
 		RelationYears: cfg.Mix.RelationYears,
 		MapPlain:      cfg.Mix.MapStyle == "plain",
 		MapPairOnly:   cfg.Mix.MapWhen == "pair",

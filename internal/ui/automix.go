@@ -114,6 +114,7 @@ func (m *Model) mixPlan() (mixJob, bool) {
 		},
 		set: mixer.Settings{
 			Chain:              m.cfg.Mix.Chain,
+			PathCount:          m.cfg.Graph.PathCount,
 			RelationYears:      m.cfg.Mix.RelationYears,
 			MapPlain:           m.cfg.Mix.MapStyle == "plain",
 			MapPairOnly:        m.cfg.Mix.MapWhen == "pair",
@@ -405,6 +406,7 @@ func (m *Model) autoMix(question string) mixResult {
 		Entities:           m.cfg.Mix.Entities,
 		Neighbors:          m.cfg.Mix.Neighbors,
 		Chain:              m.cfg.Mix.Chain,
+		PathCount:          m.cfg.Graph.PathCount,
 		RelationYears:      m.cfg.Mix.RelationYears,
 		MapPlain:           m.cfg.Mix.MapStyle == "plain",
 		MapPairOnly:        m.cfg.Mix.MapWhen == "pair",
