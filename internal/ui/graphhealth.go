@@ -32,12 +32,23 @@ const healthEvery = 10 * time.Minute
 // оказаться сетевым или спящим. Интерфейс не должен ждать ничего.
 func (m *Model) checkGraphHealthCmd() tea.Cmd {
 	base, use := m.kb.base, m.kb.use
+	if base == nil || use == "" {
+		return nil
+	}
 	// Библиотека через службу (kb.server_url): свой граф и свою коллекцию TUI
 	// не открывает, здоровье графа — забота службы. Проверка же открывала
 	// коллекцию и держала её до выхода: замер 22.10.2026 — TUI без своего графа
 	// занимал 1 332 296 КБ, открыты chunks.dat и словесный индекс books.
-	if base == nil || use == "" || m.kb.lib != nil {
-		return nil
+	//
+	// Очередь разбора пар остаётся: она читается из одного файла журнала, без
+	// коллекции и графа, а пары разбирает человек здесь же, в /graph review.
+	// До 07.11.2026 с библиотекой молчала и она — владелец заметил, что
+	// подсказка про неразобранные пары пропала (этап 126).
+	if m.kb.lib != nil {
+		graphDir := (graph.Rules{Name: m.cfg.Graph.Name}).Dir(base.CollectionDir(use))
+		return func() tea.Msg {
+			return graphHealthMsg{advice: linkQueueAdvice(graphDir)}
+		}
 	}
 	return func() tea.Msg {
 		return graphHealthMsg{advice: healthAdvice(base, use, m.cfg.Graph.Name)}
@@ -77,12 +88,7 @@ func healthAdvice(base *kb.Base, use, graphName string) []string {
 	}
 	// Векторы самих кусков коллекции: их состояние знает коллекция, а не граф.
 	adv := h.Advice(use)
-	// Пары, ждущие человека (связывание при сборке и ночной разбор двойников):
-	// по файлу журнала, без открытия графа.
-	if n := graph.LinkQueueSize((graph.Rules{Name: graphName}).Dir(coll.Dir())); n > 0 {
-		adv = append(adv, fmt.Sprintf("в очереди разбора %d %s — /graph review",
-			n, plural(n, "пара", "пары", "пар")))
-	}
+	adv = append(adv, linkQueueAdvice((graph.Rules{Name: graphName}).Dir(coll.Dir()))...)
 	if st := coll.Stats(); st.Vectors > 0 && st.Vectors < st.Chunks {
 		n := st.Chunks - st.Vectors
 		adv = append(adv, fmt.Sprintf(
@@ -90,6 +96,18 @@ func healthAdvice(base *kb.Base, use, graphName string) []string {
 			n, plural(n, "куска", "кусков", "кусков"), use))
 	}
 	return adv
+}
+
+// linkQueueAdvice — совет о парах, ждущих человека (связывание при сборке и
+// ночной разбор двойников): по файлу журнала в graphDir, без открытия графа.
+// Пусто — очереди нет.
+func linkQueueAdvice(graphDir string) []string {
+	n := graph.LinkQueueSize(graphDir)
+	if n <= 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("в очереди разбора %d %s — /graph review",
+		n, plural(n, "пара", "пары", "пар"))}
 }
 
 // healthHintText — то же советами, но одним блоком для ленты.

@@ -138,14 +138,41 @@ func TestWarmGraphSkippedWithLibrary(t *testing.T) {
 // Проверка здоровья графа при запуске открывает свою коллекцию; с библиотекой
 // её нет — замер 22.10.2026: TUI без своего графа держал коллекцию books,
 // 1 332 296 КБ.
+//
+// Очередь разбора пар при этом видна (07.11.2026, этап 126): она читается из
+// журнала links.jsonl, без коллекции и графа.
 func TestGraphHealthSkippedWithLibrary(t *testing.T) {
 	m, coll := remoteTestModel(t)
 	if m.checkGraphHealthCmd() == nil {
 		t.Fatal("подготовка: без библиотеки проверка здоровья не запущена")
 	}
+	g, err := graph.Open(coll.Dir(), coll.ChunkCount(), graph.Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc, _, _ := g.Entities().Add("Garbage collection", graph.TypeConcept)
+	sm, _, _ := g.Entities().Add("сборщик мусора", graph.TypeConcept)
+	if err := g.Links().Add(graph.LinkRec{Norm: "сборщик мусора", Name: "сборщик мусора", From: sm, Cand: gc,
+		CandName: "Garbage collection", Cos: 0.91, Verdict: graph.LinkDoubt, By: graph.LinkByJudge, Source: graph.LinkFromDoubles}); err != nil {
+		t.Fatal(err)
+	}
+	g.Close()
+
 	m.SetLibrary(&fakeService{t: t, coll: coll})
-	if m.checkGraphHealthCmd() != nil {
-		t.Error("с общей библиотекой проверка здоровья открывает свою коллекцию")
+	before := openFilesUnder(t, coll.Dir())
+	cmd := m.checkGraphHealthCmd()
+	if cmd == nil {
+		t.Fatal("с общей библиотекой очередь разбора пар не проверяется")
+	}
+	msg, ok := cmd().(graphHealthMsg)
+	if !ok {
+		t.Fatalf("проверка вернула %T", cmd())
+	}
+	if len(msg.advice) != 1 || !strings.Contains(msg.advice[0], "в очереди разбора 1 пара — /graph review") {
+		t.Errorf("с библиотекой ждали одну строку об очереди разбора, а не полную проверку: %q", msg.advice)
+	}
+	if after := openFilesUnder(t, coll.Dir()); after > before {
+		t.Errorf("с общей библиотекой проверка открыла файлы коллекции: было %d, стало %d", before, after)
 	}
 }
 
