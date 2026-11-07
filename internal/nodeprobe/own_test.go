@@ -80,6 +80,35 @@ func TestDescendantOfStopsOnLoop(t *testing.T) {
 
 // Свой процесс, которого служба не запускала: наш реранкер поднят контейнером
 // и виден как /app/llama-server. Родство его не ловит — ловит список путей.
+// llama.cpp сборки графа на сервере 2×3090 поднят своей службой мимо Ollama
+// (журнал очереди 06.11.2026: «чужое на карте: llama-server (20256 МиБ)» и
+// «слотов 4» при шести слотах узла). Каталог движков в списке своих делает его
+// своим, а слоты в строке названы слотами службы, а не узла.
+func TestLineNamesServiceSlotsAndOwnLlamaCpp(t *testing.T) {
+	old := procParent
+	t.Cleanup(func() { procParent = old })
+	procParent = func(int) int { return 1 }
+
+	rep := Report{
+		Service:  Service{Name: "ollama", MainPID: 4242, Env: map[string]string{"OLLAMA_NUM_PARALLEL": "4"}},
+		GPUs:     []GPU{{Name: "NVIDIA GeForce RTX 3090", MemUsed: 21252, MemTotal: 24576}},
+		GPUProcs: []GPUProc{{PID: 777, Name: "/opt/engines/llama.cpp-src/build-no-nccl/bin/llama-server", UsedMiB: 20256}},
+	}
+	if busy := rep.Busy(0); !strings.Contains(busy, "llama-server") {
+		t.Fatalf("без списка своих llama.cpp обязан быть чужим: %q", busy)
+	}
+	rep.markOwnGPUProcs([]string{"/usr/bin/ollama", "/opt/engines/llama.cpp-src/"})
+	if busy := rep.Busy(0); busy != "" {
+		t.Errorf("llama.cpp из списка своих всё ещё чужой: %q", busy)
+	}
+	if line := rep.Line(); !strings.Contains(line, "слотов службы ollama 4") {
+		t.Errorf("слоты не названы слотами службы: %q", line)
+	}
+	if line := (&Report{Service: Service{Env: map[string]string{"OLLAMA_NUM_PARALLEL": "2"}}}).Line(); !strings.Contains(line, "слотов 2") {
+		t.Errorf("без имени службы — прежнее «слотов N»: %q", line)
+	}
+}
+
 func TestMarkOwnGPUProcsByOwnList(t *testing.T) {
 	old := procParent
 	t.Cleanup(func() { procParent = old })

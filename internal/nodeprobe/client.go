@@ -155,8 +155,16 @@ func (r *Report) Line() string {
 	if st := r.Service.State; st != "" && st != "active" {
 		parts = append(parts, "служба "+st)
 	}
+	// Слоты — службы, за которой следит наблюдатель (OLLAMA_NUM_PARALLEL), а не
+	// узла сборки: узел-переходник к llama.cpp на той же карте работает своими
+	// слотами (-np), и голое «слотов 4» при 6 в строке сборки читалось как
+	// ошибка настройки (журнал очереди 06.11.2026). Поэтому служба названа.
 	if n := r.Service.Slots(); n > 0 {
-		parts = append(parts, fmt.Sprintf("слотов %d", n))
+		if name := r.Service.Name; name != "" {
+			parts = append(parts, fmt.Sprintf("слотов службы %s %d", name, n))
+		} else {
+			parts = append(parts, fmt.Sprintf("слотов %d", n))
+		}
 	}
 	if h := r.Host; h != nil {
 		parts = append(parts, fmt.Sprintf("ОЗУ свободно %d МиБ", h.RAMFreeMiB))
