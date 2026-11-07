@@ -998,6 +998,242 @@ func buildPath(g *Graph, visited map[uint32]link, from, to uint32) []PathStep {
 	return steps
 }
 
+// Paths — до k простых цепочек между двумя понятиями вместо одной (этап 126,
+// Я2: «we find k-simple shortest paths from the subject to the object… as its
+// knowledge segment» — «находим k простых кратчайших путей от субъекта
+// к объекту; они и есть сегмент знаний для связи», books/861#124, стр. 54).
+//
+// Первая цепочка — ровно ответ Path при тех же правилах, по шагам или по
+// потоку (Rules.PathFlow). Остальные — другие простые пути (узел не
+// повторяется) длиной от первой до первой плюс шаг, в пределах maxHops:
+// сперва той же длины, потом на шаг длиннее. Внутри одной длины первыми идут
+// пути с более узкими серединами — сумма степеней середин по возрастанию,
+// мерой pathByFlow и запрета хабов (`len(neighbors)`, пары {сосед,
+// направление}); при равенстве — по номерам узлов, чтобы порядок не плясал.
+// Путь — последовательность узлов: те же середины в том же порядке с другими
+// типами связей между ними — один путь; связь шага — первая в порядке around,
+// как у Path. Правила обхода те же, что у Path: связи в обе стороны
+// со склейками и правилом перевеса (around), отброшенные книги не видны, хаб
+// в середине запрещён тем же порогом Rules.ChainHubLimit и той же мерой.
+//
+// Цена. Перебор не слепой: обход в ширину от конца на (предел−1) шагов даёт
+// узлам расстояние до конца, и обход в глубину от начала заходит только туда,
+// откуда конец достижим в оставшиеся шаги; на последнем шаге середина
+// проверяется по этому расстоянию, без чтения её связей. При пределе 3 шага
+// читаются связи начала, конца и их соседей (у соседа-хаба — один раз, ради
+// степени; дальше через него не идут) — по расчёту того же порядка, что обход
+// Path, который так же меряет степень каждого найденного узла; не замерено. При пределе
+// 4+ простых путей становится как произведение степеней, поэтому прочитанных
+// связей не больше pathsWorkLimit: упёрлись — cut, и отдано лучшее из
+// просмотренного, полноты порядка нет.
+//
+// ok — как у Path: false, если понятия нет или цепочка не найдена; одно и то
+// же понятие — (nil, false, true). k ≤ 1 — ровно ответ Path.
+func (g *Graph) Paths(from, to string, maxHops, k int) (paths [][]PathStep, cut, ok bool) {
+	first, ok := g.Path(from, to, maxHops)
+	if !ok || len(first) == 0 {
+		return nil, false, ok
+	}
+	paths = [][]PathStep{first}
+	if k <= 1 {
+		return paths, false, true
+	}
+	if maxHops <= 0 {
+		maxHops = 4 // то же умолчание, что у Path
+	}
+	a, _ := g.ents.Lookup(from)
+	b, _ := g.ents.Lookup(to)
+	low, top := len(first), min(len(first)+1, maxHops)
+	hubLimit := g.rules.ChainHubLimit
+
+	work := 0
+	degs := map[uint32]int{}
+	deg := func(id uint32) int {
+		d, seen := degs[id]
+		if !seen {
+			d = len(g.neighbors(id)) // мера Path и pathByFlow
+			degs[id] = d
+			work += d
+		}
+		return d
+	}
+	hub := func(id uint32) bool { return hubLimit > 0 && deg(id) >= hubLimit }
+	around := func(id uint32) []Edge {
+		eds := g.around(id)
+		work += len(eds)
+		return eds
+	}
+
+	// Расстояние до конца через середины-не-хабы; начало серединой не бывает.
+	distB := map[uint32]int{b.ID: 0}
+	frontier := []uint32{b.ID}
+	for d := 0; d < top-1 && len(frontier) > 0 && !cut; d++ {
+		var next []uint32
+		for _, x := range frontier {
+			if work > pathsWorkLimit {
+				cut = true
+				break
+			}
+			if x != b.ID && hub(x) {
+				continue // хаб записан, но путь дальше через него не идёт
+			}
+			for _, e := range around(x) {
+				y, _ := otherEnd(e, x)
+				if y == a.ID {
+					continue
+				}
+				if _, seen := distB[y]; !seen {
+					distB[y] = d + 1
+					next = append(next, y)
+				}
+			}
+		}
+		frontier = next
+	}
+
+	type cand struct {
+		ids  []uint32 // узлы от начала до конца
+		cost int      // сумма степеней середин
+	}
+	var best []cand
+	less := func(x, y cand) bool {
+		if len(x.ids) != len(y.ids) {
+			return len(x.ids) < len(y.ids)
+		}
+		if x.cost != y.cost {
+			return x.cost < y.cost
+		}
+		for i := range x.ids {
+			if x.ids[i] != y.ids[i] {
+				return x.ids[i] < y.ids[i]
+			}
+		}
+		return false
+	}
+	// Хранятся k лучших, а не все найденные: путей через узлы конца с сотнями
+	// соседей бывают тысячи. k, а не k−1: первая цепочка среди них может быть.
+	trim := func() {
+		sort.Slice(best, func(i, j int) bool { return less(best[i], best[j]) })
+		if len(best) > k {
+			best = best[:k]
+		}
+	}
+	path := []uint32{a.ID}
+	onPath := map[uint32]bool{a.ID: true}
+	record := func(tail ...uint32) {
+		ids := append(append(make([]uint32, 0, len(path)+len(tail)), path...), tail...)
+		cost := 0
+		for _, id := range ids[1 : len(ids)-1] {
+			cost += deg(id)
+		}
+		best = append(best, cand{ids: ids, cost: cost})
+		if len(best) >= 4*k+64 {
+			trim()
+		}
+	}
+	var walk func(u uint32, used int)
+	walk = func(u uint32, used int) {
+		left := top - used // шагов осталось из u
+		seen := map[uint32]bool{}
+		for _, e := range around(u) {
+			if work > pathsWorkLimit {
+				cut = true
+				return
+			}
+			v, _ := otherEnd(e, u)
+			if seen[v] {
+				continue // вторая связь к тому же соседу — тот же путь
+			}
+			seen[v] = true
+			if v == b.ID {
+				if used+1 >= low {
+					record(v)
+				}
+				continue
+			}
+			if left < 2 || onPath[v] {
+				continue
+			}
+			if dv, near := distB[v]; !near || dv > left-1 || hub(v) {
+				continue
+			}
+			if left == 2 { // из v остался шаг: v — сосед конца (distB 1)
+				if used+2 >= low {
+					record(v, b.ID)
+				}
+				continue
+			}
+			path = append(path, v)
+			onPath[v] = true
+			walk(v, used+1)
+			onPath[v] = false
+			path = path[:len(path)-1]
+			if cut {
+				return
+			}
+		}
+	}
+	if !cut {
+		walk(a.ID, 0)
+	}
+	trim()
+
+	for _, c := range best {
+		if len(paths) == k {
+			break
+		}
+		visited := map[uint32]link{}
+		for i := 1; i < len(c.ids); i++ {
+			u, v := c.ids[i-1], c.ids[i]
+			for _, e := range g.around(u) {
+				if other, back := otherEnd(e, u); other == v {
+					visited[v] = link{prev: u, edge: e, back: back}
+					break
+				}
+			}
+		}
+		if len(visited) != len(c.ids)-1 {
+			// Связь видна с одного конца и не видна с другого — такого быть
+			// не должно; без неё buildPath ушёл бы по нулевому prev в цикл.
+			continue
+		}
+		steps := buildPath(g, visited, a.ID, b.ID)
+		if sameNodes(steps, first) {
+			continue // первая цепочка уже стоит первой
+		}
+		paths = append(paths, steps)
+	}
+	return paths, cut, true
+}
+
+// pathsWorkLimit — сколько связей Paths читает на одну пару, прежде чем
+// остановить перебор. Величина взята с запасом и не замерена: нужна как
+// страховка от предела 4+ шагов между хабами, а не как ручка настройки.
+const pathsWorkLimit = 1 << 24
+
+// otherEnd — второй конец связи при обходе из cur и признак «шли против
+// направления» — так же, как в Path и pathByFlow.
+func otherEnd(e Edge, cur uint32) (uint32, bool) {
+	if e.Dst == cur {
+		return e.Src, true
+	}
+	return e.Dst, false
+}
+
+// sameNodes — две цепочки идут через одни и те же узлы в том же порядке
+// (типы и направления связей не в счёт).
+func sameNodes(x, y []PathStep) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	for i := range x {
+		if x[i].From != y[i].From || x[i].To != y[i].To {
+			return false
+		}
+	}
+	return true
+}
+
 // booksOf считает, в скольких книгах встречается понятие; отброшенные
 // книги не в счёт (dropbook.go).
 func booksOf(g *Graph, id uint32) int {

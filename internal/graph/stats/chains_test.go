@@ -54,7 +54,7 @@ func TestChainsListCountsEachEdgeOnce(t *testing.T) {
 	if err := os.WriteFile(set, []byte("[[case]]\nquery = \"как связаны\"\nconcept_a = \"горутина\"\nconcept_b = \"канал\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out := captureStdout(t, func() { chainStats(g, set, 3, true, nil, nil) })
+	out := captureStdout(t, func() { chainStats(g, set, 3, true, 0, nil, nil) })
 	want := fmt.Sprintf("горутина | канал\tпрямая\t%v", map[string]int{graph.RelName(graph.RelRelated): 2})
 	if !strings.Contains(out, want) {
 		t.Errorf("строка пары:\n%s\nожидалась %q — две связи, по одной в каждую сторону", out, want)
@@ -95,7 +95,7 @@ func TestChainsEfficiency(t *testing.T) {
 	if err := os.WriteFile(set, []byte("[[case]]\nquery = \"как связаны\"\nconcept_a = \"старт\"\nconcept_b = \"финиш\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out := captureStdout(t, func() { chainStats(g, set, 3, false, nil, nil) })
+	out := captureStdout(t, func() { chainStats(g, set, 3, false, 0, nil, nil) })
 	if !strings.Contains(out, "средняя длина 3.00") {
 		t.Fatalf("рабочая цепочка должна обойти хаб в 3 шага:\n%s", out)
 	}
@@ -137,15 +137,80 @@ func TestChainsListEvidenceCos(t *testing.T) {
 	}
 	// Векторы коллекции нормированы до длины 127 — kb.Cosine делит на 127×127.
 	apart := testVecs{{1, 1}: {127, 0}, {2, 1}: {0, 127}}
-	if out := captureStdout(t, func() { chainStats(g, set, 2, true, nil, apart) }); !strings.Contains(out, "кн., cos 0.00]") {
+	if out := captureStdout(t, func() { chainStats(g, set, 2, true, 0, nil, apart) }); !strings.Contains(out, "кн., cos 0.00]") {
 		t.Errorf("подтверждения о разном, ждали cos 0.00:\n%s", out)
 	}
 	same := testVecs{{1, 1}: {127, 0}, {2, 1}: {127, 0}}
-	if out := captureStdout(t, func() { chainStats(g, set, 2, true, nil, same) }); !strings.Contains(out, "кн., cos 1.00]") {
+	if out := captureStdout(t, func() { chainStats(g, set, 2, true, 0, nil, same) }); !strings.Contains(out, "кн., cos 1.00]") {
 		t.Errorf("подтверждения об одном, ждали cos 1.00:\n%s", out)
 	}
 	half := testVecs{{1, 1}: {127, 0}}
-	if out := captureStdout(t, func() { chainStats(g, set, 2, true, nil, half) }); strings.Contains(out, "cos") {
+	if out := captureStdout(t, func() { chainStats(g, set, 2, true, 0, nil, half) }); strings.Contains(out, "cos") {
 		t.Errorf("у куска нет вектора, а косинус напечатан:\n%s", out)
+	}
+}
+
+// -chains-k (этап 126, Я2): под строкой пары — пути 2…K с номером, первая
+// строка та же, что без ключа, в конце сводка. Две середины дают вторую
+// цепочку той же длины, обход «икс → игрек» — третью, на шаг длиннее.
+func TestChainsListPathsK(t *testing.T) {
+	g, err := graph.OpenOrCreate(t.TempDir(), "проба", 10, graph.Rules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	id := func(name string) uint32 {
+		v, _, err := g.Entities().Add(name, "понятие")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	ord := uint32(0)
+	link := func(a, b uint32) {
+		ord++
+		if err := g.Edges().Add(graph.Edge{Src: a, Dst: b, Weight: 1, Evidence: graph.ChunkKey{Doc: 1, Ord: ord}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start, finish := id("старт"), id("финиш")
+	for _, m := range []uint32{id("середина-а"), id("середина-б")} {
+		link(start, m)
+		link(m, finish)
+	}
+	x, y := id("икс"), id("игрек")
+	link(start, x)
+	link(x, y)
+	link(y, finish)
+	set := filepath.Join(t.TempDir(), "chains.toml")
+	if err := os.WriteFile(set, []byte("[[case]]\nquery = \"как связаны\"\nconcept_a = \"старт\"\nconcept_b = \"финиш\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	one := captureStdout(t, func() { chainStats(g, set, 3, true, 0, nil, nil) })
+	three := captureStdout(t, func() { chainStats(g, set, 3, true, 3, nil, nil) })
+	t.Logf("без ключа:\n%s\nс -chains-k 3:\n%s", one, three)
+
+	firstLine := strings.SplitN(one, "\n", 2)[0]
+	if !strings.HasPrefix(firstLine, "старт | финиш\tцепочка 2\t") {
+		t.Fatalf("строка пары без ключа: %q", firstLine)
+	}
+	if strings.SplitN(three, "\n", 2)[0] != firstLine {
+		t.Fatalf("с -chains-k первая строка изменилась:\n%q\n%q", strings.SplitN(three, "\n", 2)[0], firstLine)
+	}
+	if strings.Contains(one, "2) ") || strings.Contains(one, "Я2.") {
+		t.Fatalf("без ключа напечатаны лишние цепочки или сводка:\n%s", one)
+	}
+	for _, want := range []string{
+		"\n  2) цепочка 2\tстарт ",
+		"\n  3) цепочка 3\tстарт —" + graph.RelName(graph.RelRelated) + "→ икс [",
+		"вторых той же длины, что первая: 1 из 1",
+	} {
+		if !strings.Contains(three, want) {
+			t.Errorf("с -chains-k 3 нет %q:\n%s", want, three)
+		}
+	}
+	if strings.Contains(three, "4) ") {
+		t.Errorf("K=3, а напечатана четвёртая цепочка:\n%s", three)
 	}
 }

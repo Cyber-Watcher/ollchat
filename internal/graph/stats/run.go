@@ -147,6 +147,7 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 	ppr := fs.String("ppr", "", "замер персонализированного ранга по набору пар: -ppr docs/eval/graph_relations.toml")
 	hops := fs.Int("hops", 3, "с -chains: предел длины цепочки")
 	chainsList := fs.Bool("chains-list", false, "с -chains: печатать построчно каждую пару — прямая (типы), цепочка, нет")
+	chainsK := fs.Int("chains-k", 0, "с -chains -chains-list: до K простых цепочек на пару (graph.Paths, этап 126, Я2) — пути 2…K строками «  2) …» под строкой пары, в конце сводка; 0 и 1 — одна цепочка")
 	cardChk := fs.String("cardcheck", "", "видно ли понятие в выдержках карточки graph_entity: -cardcheck docs/eval/graph_card_concepts.txt (этап 112, О5)")
 	typeSmp := fs.String("typesample", "", "связи одного типа с выдержкой для разметки точности типа: -typesample противопоставлено (этап 112, О3)")
 	typeSmpN := fs.Int("typesample-n", 100, "с -typesample: сколько связей показать")
@@ -208,7 +209,12 @@ func run(stdout io.Writer, cfg *config.Config, collName string, args []string) {
 				onlyDocs[b.ID] = true
 			}
 		}
-		chainStats(g, *chains, *hops, *chainsList, onlyDocs, c)
+		// Пути 2…K печатаются только построчно: без -chains-list ключ молча
+		// ничего бы не сделал.
+		if *chainsK >= 2 && !*chainsList {
+			die(fmt.Errorf("-chains-k %d печатает цепочки под строкой пары и работает только вместе с -chains-list", *chainsK))
+		}
+		chainStats(g, *chains, *hops, *chainsList, *chainsK, onlyDocs, c)
 		return
 	}
 	if *doubles {
@@ -1086,8 +1092,9 @@ func evidenceCos(vecs graph.ChunkVectors, a, b graph.ChunkKey) (float64, bool) {
 //
 // Карта не нужна: понятия в наборе уже названы, вход по вопросу не считается.
 // vecs — векторы кусков коллекции для косинуса подтверждений в -chains-list;
-// nil — без него.
-func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs map[uint32]bool, vecs graph.ChunkVectors) {
+// nil — без него. pathsK — сколько цепочек на пару печатать в -chains-list
+// (этап 126, Я2, graph.Paths): 0 и 1 — одну, как прежде.
+func chainStats(g *graph.Graph, path string, hops int, listOnly bool, pathsK int, onlyDocs map[uint32]bool, vecs graph.ChunkVectors) {
 	var set struct {
 		Case []struct {
 			Query     string `toml:"query"`
@@ -1149,6 +1156,40 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 	var widerExamples []string
 	// КПД цепочки (О12): сумма отношений, число пар и пар с той же длиной.
 	effSum, effN, effSame := 0.0, 0, 0
+	// Несколько цепочек (Я2): withNth[j] — у скольких пар нашлась j-я
+	// цепочка (j от 2), secondSame — вторых той же длины, что первая,
+	// pathsCut — пар, где перебор упёрся в предел работы graph.Paths.
+	withNth := make([]int, max(pathsK, 1)+1)
+	secondSame, pathsCut := 0, 0
+
+	// chainLine — цепочка строкой: «X —тип→ середина [пар/уник. св., N кн.] ←тип— Y».
+	chainLine := func(start string, steps []graph.PathStep) string {
+		// Сама цепочка, а не только её длина (25.09.2026). Прежде здесь
+		// печаталось «цепочка 2», и по такому файлу нельзя было выполнить
+		// собственный же пункт плана «просмотреть пути глазами»: чем
+		// оказалась середина, из него не видно. У середины показаны обе
+		// меры степени и число книг — общее понятие видно сразу.
+		line := start
+		for i, st := range steps {
+			arrow := "—" + st.Type + "→"
+			if st.Back {
+				arrow = "←" + st.Type + "—"
+			}
+			line += " " + arrow + " " + st.To
+			if i < len(steps)-1 { // середина, не конец пути
+				// Косинус двух подтверждений, сходящихся в середине (этап 112,
+				// О4): омоним вроде «TF» (term frequency и Terraform) держит
+				// цепочку кусками о разном, общее понятие — кусками о близком.
+				sim := ""
+				if c, ok := evidenceCos(vecs, st.Evidence, steps[i+1].Evidence); ok {
+					sim = fmt.Sprintf(", cos %.2f", c)
+				}
+				line += fmt.Sprintf(" [%d/%d св., %d кн.%s]",
+					deg(st.To), degUniq(st.To), books(st.To), sim)
+			}
+		}
+		return line
+	}
 
 	for _, c := range set.Case {
 		a, okA := g.Entities().Lookup(c.ConceptA)
@@ -1185,7 +1226,24 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 			}
 			continue
 		}
-		steps, ok := g.Path(c.ConceptA, c.ConceptB, hops)
+		// Несколько цепочек — только в построчном выводе: первая из Paths —
+		// ровно ответ Path, поэтому сводка ниже от ключа не меняется.
+		var steps []graph.PathStep
+		var more [][]graph.PathStep
+		ok := false
+		if listOnly && pathsK >= 2 {
+			var all [][]graph.PathStep
+			var cut bool
+			all, cut, ok = g.Paths(c.ConceptA, c.ConceptB, hops, pathsK)
+			if cut {
+				pathsCut++
+			}
+			if len(all) > 0 {
+				steps, more = all[0], all[1:]
+			}
+		} else {
+			steps, ok = g.Path(c.ConceptA, c.ConceptB, hops)
+		}
 		if !ok || len(steps) == 0 {
 			missing++
 			if listOnly {
@@ -1195,31 +1253,14 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 		}
 		found++
 		if listOnly {
-			// Сама цепочка, а не только её длина (25.09.2026). Прежде здесь
-			// печаталось «цепочка 2», и по такому файлу нельзя было выполнить
-			// собственный же пункт плана «просмотреть пути глазами»: чем
-			// оказалась середина, из него не видно. У середины показаны обе
-			// меры степени и число книг — общее понятие видно сразу.
-			line := c.ConceptA
-			for i, st := range steps {
-				arrow := "—" + st.Type + "→"
-				if st.Back {
-					arrow = "←" + st.Type + "—"
-				}
-				line += " " + arrow + " " + st.To
-				if i < len(steps)-1 { // середина, не конец пути
-					// Косинус двух подтверждений, сходящихся в середине (этап 112,
-					// О4): омоним вроде «TF» (term frequency и Terraform) держит
-					// цепочку кусками о разном, общее понятие — кусками о близком.
-					sim := ""
-					if c, ok := evidenceCos(vecs, st.Evidence, steps[i+1].Evidence); ok {
-						sim = fmt.Sprintf(", cos %.2f", c)
-					}
-					line += fmt.Sprintf(" [%d/%d св., %d кн.%s]",
-						deg(st.To), degUniq(st.To), books(st.To), sim)
-				}
+			fmt.Printf("%s | %s\tцепочка %d\t%s\n", c.ConceptA, c.ConceptB, len(steps), chainLine(c.ConceptA, steps))
+			for j, p := range more {
+				fmt.Printf("  %d) цепочка %d\t%s\n", j+2, len(p), chainLine(c.ConceptA, p))
+				withNth[j+2]++
 			}
-			fmt.Printf("%s | %s\tцепочка %d\t%s\n", c.ConceptA, c.ConceptB, len(steps), line)
+			if len(more) > 0 && len(more[0]) == len(steps) {
+				secondSame++
+			}
 		}
 		lenSum += len(steps)
 		// КПД цепочки (этап 112, О12; «Efficiency = ShortestPathLength /
@@ -1300,6 +1341,17 @@ func chainStats(g *graph.Graph, path string, hops int, listOnly bool, onlyDocs m
 	}
 
 	if listOnly {
+		if pathsK >= 2 {
+			fmt.Printf("\nЯ2. Несколько цепочек на пару (-chains-k %d, предел %d шага): пар с цепочкой %d\n",
+				pathsK, hops, found)
+			for j := 2; j <= pathsK; j++ {
+				fmt.Printf("  нашлась %d-я цепочка   %3d (%4.1f%% от пар с цепочкой)\n", j, withNth[j], pct(withNth[j], found))
+			}
+			fmt.Printf("  вторых той же длины, что первая: %d из %d\n", secondSame, withNth[2])
+			if pathsCut > 0 {
+				fmt.Printf("  перебор упёрся в предел работы у %d пар — порядок путей у них неполный\n", pathsCut)
+			}
+		}
 		return
 	}
 
