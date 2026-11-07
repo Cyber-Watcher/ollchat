@@ -284,27 +284,70 @@ func RenderPath(src Chunks, from, to string, steps []PathStep, ok bool, opt Rend
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Путь из %d шагов:\n", len(steps))
+	writePathSteps(&b, src, steps, opt, nil)
+	return b.String()
+}
+
+// RenderPaths печатает несколько цепочек между двумя понятиями (этап 126, Я2):
+// первая — ровно как RenderPath, следующие — под ней тем же видом с подписью
+// «Другой путь». Одна цепочка (или ни одной) — побайтно RenderPath: ключ
+// graph.path_count = 1 выдачу не меняет.
+//
+// Подтверждение шага, уже показанного в цепочке выше (та же связь), не
+// повторяется — вместо строки с книгой короткое «подтверждение — выше»:
+// пути одной пары часто делят первый или последний шаг, и та же книга
+// дважды только удлиняет выдачу.
+func RenderPaths(src Chunks, from, to string, paths [][]PathStep, ok bool, opt RenderOpts) string {
+	if len(paths) <= 1 {
+		var first []PathStep
+		if len(paths) == 1 {
+			first = paths[0]
+		}
+		return RenderPath(src, from, to, first, ok, opt)
+	}
+	opt = opt.norm()
+	shown := map[PathStep]bool{}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Путь из %d шагов:\n", len(paths[0]))
+	writePathSteps(&b, src, paths[0], opt, shown)
+	for _, steps := range paths[1:] {
+		fmt.Fprintf(&b, "\nДругой путь из %d шагов:\n", len(steps))
+		writePathSteps(&b, src, steps, opt, shown)
+	}
+	return b.String()
+}
+
+// writePathSteps — шаги одной цепочки со строкой подтверждения под каждым.
+// shown — шаги с уже напечатанным подтверждением (nil — печатать все);
+// повторный шаг получает «подтверждение — выше».
+func writePathSteps(b *strings.Builder, src Chunks, steps []PathStep, opt RenderOpts, shown map[PathStep]bool) {
 	for i, s := range steps {
 		// Обратный шаг печатается стрелкой влево: в графе связь записана
 		// в другую сторону, и рисовать её «как удобно» значит врать
 		// о содержимом графа (этап 101, D1).
 		if s.Back {
-			fmt.Fprintf(&b, "  %d. %s ←%s— %s\n", i+1, s.From, s.Type, s.To)
+			fmt.Fprintf(b, "  %d. %s ←%s— %s\n", i+1, s.From, s.Type, s.To)
 		} else {
-			fmt.Fprintf(&b, "  %d. %s —%s→ %s\n", i+1, s.From, s.Type, s.To)
+			fmt.Fprintf(b, "  %d. %s —%s→ %s\n", i+1, s.From, s.Type, s.To)
 		}
 		if src == nil {
 			continue
 		}
+		if shown[s] {
+			b.WriteString("     подтверждение — выше\n")
+			continue
+		}
 		if info, found := src.ChunkByRef(s.Evidence.Doc, s.Evidence.Ord); found {
-			fmt.Fprintf(&b, "     подтверждение: %s", bookLine(info))
+			fmt.Fprintf(b, "     подтверждение: %s", bookLine(info))
 			if opt.Collection != "" {
-				fmt.Fprintf(&b, " · id=%s/%d#%d", opt.Collection, s.Evidence.Doc, s.Evidence.Ord)
+				fmt.Fprintf(b, " · id=%s/%d#%d", opt.Collection, s.Evidence.Doc, s.Evidence.Ord)
 			}
 			b.WriteString("\n")
+			if shown != nil {
+				shown[s] = true
+			}
 		}
 	}
-	return b.String()
 }
 
 // bookLine — «Книга · Автор · стр. 40».

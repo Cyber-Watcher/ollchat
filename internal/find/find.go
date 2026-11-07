@@ -177,6 +177,11 @@ type Result struct {
 	// Пусто, когда понятие одно, прямая связь уже показана или пути нет.
 	Chain []graph.PathStep
 
+	// ChainMore — другие пути между теми же понятиями, когда правило графа
+	// просит больше одного (graph.path_count, этап 126, Я2); печатаются под
+	// Chain. Пусто при path_count = 1 — и тогда поля нет и в --graph-json.
+	ChainMore [][]graph.PathStep `json:",omitempty"`
+
 	// Evidence — подтверждения графа как их отобрал поиск, до слияния
 	// с выдержками книг: после слияния они обрезаются по TopK вслед за
 	// книгами, и по Excerpts их не пересчитать. Читают замеры, чтобы мерить
@@ -299,6 +304,35 @@ func Expand(query string, ents []graph.FoundEntity, o Opts) string {
 // Длина ограничена: цепочка из шести шагов формально объясняет связь, но
 // прочесть её нельзя. Предел берётся из Opts.ChainHops (0 — три шага).
 func Chain(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation, o Opts) []graph.PathStep {
+	paths := chains(g, ents, rels, o, 1)
+	if len(paths) == 0 {
+		return nil
+	}
+	return paths[0]
+}
+
+// Chains — то же, что Chain, но до graph.path_count путей (этап 126, Я2):
+// первый — ровно ответ Chain, следующие — другие простые пути (graph.Paths).
+// Зовёт поиск (/search и инструмент search модели); подмешивание карты
+// и служба карты берут одну цепочку через Chain.
+func Chains(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation, o Opts) [][]graph.PathStep {
+	return chains(g, ents, rels, o, g.Rules().PathCount)
+}
+
+// setChains раскладывает пути Chains по полям выдачи: первый — Chain,
+// остальные — ChainMore (при одном пути поле пусто, как до этапа 126).
+func (r *Result) setChains(paths [][]graph.PathStep) {
+	if len(paths) == 0 {
+		return
+	}
+	r.Chain = paths[0]
+	if len(paths) > 1 {
+		r.ChainMore = paths[1:]
+	}
+}
+
+// chains — общее тело Chain и Chains: k путей между двумя первыми понятиями.
+func chains(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation, o Opts, k int) [][]graph.PathStep {
 	if g == nil || len(ents) < 2 || o.ChainHops < 0 {
 		return nil
 	}
@@ -312,11 +346,11 @@ func Chain(g *graph.Graph, ents []graph.FoundEntity, rels []graph.FoundRelation,
 	if hops == 0 {
 		hops = 3
 	}
-	steps, ok := g.Path(a, b, hops)
+	paths, _, ok := g.Paths(a, b, hops, k)
 	if !ok {
 		return nil
 	}
-	return steps
+	return paths
 }
 
 // Empty сообщает, что показывать нечего.
@@ -397,7 +431,7 @@ func Search(ctx context.Context, d Deps, query string, o Opts) (Result, error) {
 		res.Evidence = gres.Chunks
 		// Цепочка — часть работы графа, и в ms_graph она входит: обход в ширину
 		// на три шага стоит заметно, и прятать его от журнала шагов нельзя.
-		res.Chain = Chain(d.Graph, res.Entities, res.Relations, o)
+		res.setChains(Chains(d.Graph, res.Entities, res.Relations, o))
 		msGraph = time.Since(tGraph).Milliseconds()
 		res.Excerpts = fromGraph(d.Coll, gres.Chunks, o)
 

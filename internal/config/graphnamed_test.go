@@ -179,6 +179,39 @@ model = "qwen3.8:latest"
 	}
 }
 
+// Число цепочек «как связаны X и Y» (этап 126, Я2): ключ path_count доходит
+// до правил графа из [graph] и из [graph.<имя>], подраздел без ключа наследует
+// общий; без ключа — ноль, при открытии 1. Отрицательное при открытии тоже 1:
+// выключать нечего.
+func TestPathCountSetting(t *testing.T) {
+	if got := writeCfg(t, baseCfg).Graph.Rules(); got.PathCount != 0 || got.Normalized().PathCount != graph.DefaultPathCount {
+		t.Fatalf("без ключа путей %d (после умолчаний %d), ожидалось 0 и %d",
+			got.PathCount, got.Normalized().PathCount, graph.DefaultPathCount)
+	}
+	cfg := writeCfg(t, baseCfg+`path_count = 3
+
+[graph.lab]
+path_count = -1
+
+[graph.other]
+model = "qwen3.8:latest"
+`)
+	if got := cfg.Graph.Rules(); got.PathCount != 3 || got.Normalized().PathCount != 3 {
+		t.Fatalf("[graph] path_count = 3 дал %d (после умолчаний %d)", got.PathCount, got.Normalized().PathCount)
+	}
+	for name, want := range map[string]int{"lab": 1, "other": 3} {
+		if err := cfg.UseGraph(name); err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Graph.Rules().Normalized().PathCount; got != want {
+			t.Errorf("граф %s: путей %d, ожидалось %d", name, got, want)
+		}
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("ключ назван неизвестным: %v", cfg.Warnings)
+	}
+}
+
 // Формат 2 — только у именованного графа: в общем разделе он означал бы
 // заведение рабочего графа новой схемой (решение владельца 04.09.2026).
 func TestGraphFormatOnlyForNamedGraph(t *testing.T) {

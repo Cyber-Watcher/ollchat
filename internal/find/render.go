@@ -52,11 +52,13 @@ func Render(r Result, full bool, src graph.Chunks) string {
 
 	// Цепочка между двумя понятиями вопроса — сразу за связями: на вопрос
 	// «как связаны X и Y» она и есть ответ, а выдержки ниже её поясняют
-	// (этап 101, D1). Печатает тот же RenderPath, что и `/graph path`.
+	// (этап 101, D1). Печатает тот же RenderPaths, что и `graph_path`: при
+	// graph.path_count = 1 других путей нет, и это ровно прежний RenderPath.
 	if len(r.Chain) > 0 {
 		b.WriteByte('\n')
-		b.WriteString(graph.RenderPath(src, r.Chain[0].From, r.Chain[len(r.Chain)-1].To,
-			r.Chain, true, graph.RenderOpts{Collection: r.Collection}))
+		paths := append([][]graph.PathStep{r.Chain}, r.ChainMore...)
+		b.WriteString(graph.RenderPaths(src, r.Chain[0].From, r.Chain[len(r.Chain)-1].To,
+			paths, true, graph.RenderOpts{Collection: r.Collection}))
 	}
 
 	if len(r.Excerpts) > 0 {

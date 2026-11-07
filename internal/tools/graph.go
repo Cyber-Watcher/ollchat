@@ -349,8 +349,10 @@ func (t *graphPathTool) Plan(args map[string]any) (*Plan, error) {
 			}
 			defer release()
 
-			steps, ok := g.Path(from, to, hops)
-			out := graph.RenderPath(coll, from, to, steps, ok, graph.RenderOpts{Collection: name, RelationRunes: t.opts.GraphRelationSnippet})
+			// Сколько цепочек — правило графа (graph.path_count, этап 126, Я2):
+			// при 1 Paths отдаёт ровно ответ Path, и выдача та же, что была.
+			paths, _, ok := g.Paths(from, to, hops, g.Rules().PathCount)
+			out := graph.RenderPaths(coll, from, to, paths, ok, graph.RenderOpts{Collection: name, RelationRunes: t.opts.GraphRelationSnippet})
 			return out + graphNote(g, coll), nil
 		},
 	}, nil

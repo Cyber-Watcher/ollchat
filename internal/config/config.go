@@ -1089,6 +1089,12 @@ type Graph struct {
 	// 0 — умолчание (500), отрицательное — не запрещать.
 	ChainHubLimit int `toml:"chain_hub_limit"`
 
+	// PathCount — сколько цепочек показывать на «как связаны X и Y»
+	// (graph_path, /search, инструмент search; этап 126, Я2): первая — та же,
+	// что всегда, следующие — другие пути той же длины или на шаг длиннее.
+	// 0 и отрицательное — 1, как было.
+	PathCount int `toml:"path_count"`
+
 	// HierarchyMajority — правило перевеса (этап 126, Я1, вариант б): у
 	// встречной пары «является» или «часть» слабая сторона не отдаётся при
 	// чтении, если у сильной записей не меньше чем в K раз больше. Граф на
@@ -2479,6 +2485,7 @@ func (g Graph) Rules() graph.Rules {
 		TripleMinOrigins:  g.TripleMinOrigins,
 		TripleQuota:       g.TripleQuota,
 		ChainHubLimit:     g.ChainHubLimit,
+		PathCount:         g.PathCount,
 		HierarchyMajority: g.HierarchyMajority,
 		WeightsByOrigins:  g.WeightsByOrigins,
 		RelatedWeight:     g.RelatedWeight,
