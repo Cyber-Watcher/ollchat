@@ -312,6 +312,43 @@ func TestModelChangeRefused(t *testing.T) {
 		BuildOpts{Workers: 2, AllowModelChange: true}, nil); err != nil {
 		t.Fatalf("с явным разрешением сборка должна идти: %v", err)
 	}
+	// Разрешённая смена пишет в паспорт и новое имя (хвост (б) этапа 125): веса
+	// в паспорте уже новые, и прежнее имя при них описывало бы другую модель.
+	if got := g.Meta().Model; got != "другаяМодель" {
+		t.Fatalf("после разрешённой смены в паспорте модель %q, ждали «другаяМодель»", got)
+	}
+	if _, err := Build(context.Background(), chunksFor(12, "/AI/книга.pdf"), g, other,
+		BuildOpts{Workers: 2}, nil); err != nil {
+		t.Fatalf("следующий заход той же новой моделью без разрешения: %v", err)
+	}
+}
+
+// Узлы сборки пишутся в паспорт после сверок модели и весов (хвост (а) этапа
+// 125): до 09.11.2026 обвязка писала их до Build, и отказ по имени модели
+// оставлял паспорт уже изменённым.
+func TestNodesWrittenOnlyAfterChecks(t *testing.T) {
+	g, _ := graph(t)
+	good := func(int) (string, error) { return goodAnswer, nil }
+	first := &modelWith{model: model{answer: good}, name: "перваяМодель"}
+	if _, err := Build(context.Background(), chunksFor(4, "/AI/книга.pdf"), g, first,
+		BuildOpts{Workers: 2}, nil); err != nil {
+		t.Fatalf("первая сборка: %v", err)
+	}
+	other := &modelWith{model: model{answer: good}, name: "другаяМодель"}
+	if _, err := Build(context.Background(), chunksFor(8, "/AI/книга.pdf"), g, other,
+		BuildOpts{Workers: 2, Nodes: []string{"узел-б"}}, nil); err == nil {
+		t.Fatal("сборка чужой моделью должна была отказать")
+	}
+	if n := g.Meta().Nodes; len(n) != 0 {
+		t.Fatalf("отказ по модели оставил в паспорте узлы %v", n)
+	}
+	if _, err := Build(context.Background(), chunksFor(8, "/AI/книга.pdf"), g, first,
+		BuildOpts{Workers: 2, Nodes: []string{"узел-б", "узел-а"}}, nil); err != nil {
+		t.Fatalf("сборка прежней моделью: %v", err)
+	}
+	if n := g.Meta().Nodes; strings.Join(n, ",") != "узел-а,узел-б" {
+		t.Fatalf("после сборки в паспорте узлы %v, ждали узел-а и узел-б", n)
+	}
 }
 
 // Отпечаток весов (решение владельца 05.11.2026): имя то же, а файлы весов на

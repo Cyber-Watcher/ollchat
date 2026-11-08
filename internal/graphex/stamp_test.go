@@ -189,6 +189,42 @@ func TestPoolStopsWhenAllNodesBanned(t *testing.T) {
 	}
 }
 
+// Пул из ОДНОГО узла — это одиночный сервер с node_wait (узел «основной»): он
+// тоже получает эталон при Check, и вернувшийся с другими весами сервер
+// останавливает заход сразу, а не через node_wait (хвост (в) этапа 125:
+// поведение новое, живьём не виденное; тест прежде был только на два узла).
+func TestPoolSingleNodeStopsWhenItReturnsWithOtherWeights(t *testing.T) {
+	ctx := context.Background()
+	a := newFakeNode(t, 0)
+	p := pool(t, Node{Name: "основной", URL: a.srv.URL, Workers: 1})
+	if err := p.Check(ctx); err != nil {
+		t.Fatalf("исходная сверка: %v", err)
+	}
+	atomic.StoreInt32(&a.fail, 1)
+	for i := 0; i < 10; i++ {
+		_, _ = p.Extract(ctx, "с", "в")
+	}
+	if !statOf(t, p, "основной").Off {
+		t.Fatal("узел не выключился")
+	}
+
+	a.weights = "sha256-0000111122223333"
+	atomic.StoreInt32(&a.fail, 0)
+	p.nodeWait, p.deadEvery = time.Minute, 10*time.Millisecond
+	started := time.Now()
+	_, err := p.Extract(ctx, "с", "в")
+	if err == nil || !strings.Contains(err.Error(), "до конца захода") ||
+		!strings.Contains(err.Error(), "основной") {
+		t.Fatalf("ожидался отказ «основной … выключен до конца захода», получено %v", err)
+	}
+	if spent := time.Since(started); spent > 10*time.Second {
+		t.Errorf("пул ждал %s возвращения узла, которого revive не вернёт", spent)
+	}
+	if b := statOf(t, p, "основной").Banned; b == "" {
+		t.Error("причина выключения не записана в NodeStat.Banned")
+	}
+}
+
 // Имя без тега — это «:latest», а не первый тег с тем же началом. Квантование
 // и digest Stamp прежде брал у первого «проба:*» в /api/tags, а файлы —
 // из /api/show «проба»: при двух тегах одна и та же модель на двух серверах

@@ -87,6 +87,10 @@ type BuildOpts struct {
 	// расходится — отказ, обход тот же AllowModelChange. Пусто — отпечаток не
 	// известен: сверка пропускается, паспорт не трогается.
 	Weights Weights
+	// Nodes — имена узлов сборки для паспорта (Meta.Nodes). Пишутся вместе с
+	// моделью и весами, после их сверок: отказ по имени модели или по весам не
+	// оставляет паспорт изменённым (до 09.11.2026 обвязка писала их до Build).
+	Nodes []string
 	// AllowPromptChange — то же для версии промпта (graph.PromptID): без него
 	// сборка промптом, отличным от записанного в паспорте, отказывается идти.
 	AllowPromptChange bool
@@ -222,6 +226,12 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 				"Либо верните %s в graph.model, либо соберите граф заново — "+
 				"отложите каталог %s и запустите сборку сначала",
 			have, ex.Model(), have, g.Dir())
+	case have != ex.Model():
+		// Разрешённая смена модели пишет в паспорт и новое имя: веса checkWeights
+		// перезаписывает новыми, и прежнее имя при новых весах описывало бы две
+		// разные модели (до 09.11.2026 так и было). Прежнее имя остаётся у прежних
+		// заходов (RunStamp.Model), прежние веса — у этого (RunStamp.Replaced).
+		setModel = true
 	}
 	// Тот же довод — для весов под тем же именем (решение владельца
 	// 05.11.2026): перетег `ollama pull` на единственном узле имя не меняет,
@@ -240,6 +250,9 @@ func Build(ctx context.Context, coll Source, g *Graph, ex Extractor,
 		if err := g.SetWeights(opt.Weights); err != nil {
 			return res, err
 		}
+	}
+	if err := g.AddNodes(opt.Nodes); err != nil {
+		return res, err
 	}
 	// Промпт — по формату графа: у формата 2 свой текст и свой PromptID,
 	// чтобы его ужесточение не трогало рабочий граф формата 1.

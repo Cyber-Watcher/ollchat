@@ -196,15 +196,22 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 			fmt.Fprintf(stdout, "внимание: %s\n", n)
 		}
 	}
+	// Паспорт помнит все узлы, которыми граф когда-либо собирался. Неявный
+	// «основной» туда не пишется: он означает «сервер из настроек» и через
+	// месяц не скажет ничего. Пишет их graph.Build после сверок модели и весов.
+	var nodeNames []string
 	if named && pool != nil {
 		fmt.Fprintf(stdout, "узлов сборки: %d (%s), слотов всего %d\n",
 			len(nodes), strings.Join(pool.Names(), ", "), pool.Slots())
-		// Паспорт помнит все узлы, которыми граф когда-либо собирался.
-		// Неявный «основной» туда не пишется: он означает «сервер из настроек»
-		// и через месяц не скажет ничего.
-		if err := g.AddNodes(pool.Names()); err != nil {
-			return err
-		}
+		nodeNames = pool.Names()
+	}
+	// Сверить веса с паспортом нечем (файлы назвала одна сторона) — graph.Build
+	// пропускает сверку молча; здесь об этом строка, как у --role-check.
+	// Пустой отпечаток в паспорте — не «не сверены»: его сборка запишет (checkWeights).
+	if m := g.Meta(); m.Weights != nil && !m.Weights.IsZero() && !weights.IsZero() &&
+		graph.MatchWeights(*m.Weights, weights) == graph.WeightsUnchecked {
+		fmt.Fprintf(stdout, "внимание: веса модели с паспортом графа не сверены — в паспорте %s, "+
+			"на узлах %s\n", *m.Weights, weights)
 	}
 	if w := cfg.Graph.NodeWaitDuration(); w > 0 && pool != nil {
 		fmt.Fprintf(stdout, "обрыв связи: ждать возвращения узла до %s, потом остановка\n", w)
@@ -307,6 +314,7 @@ func Build(stdout io.Writer, cfg *config.Config, name string, run BuildRun) erro
 		AllowPromptChange: allowPromptChange,
 		RedoEmpty:         redoEmpty,
 		Weights:           weights,
+		Nodes:             nodeNames,
 	}, graphProgress(logPath, poolLine(pool, named)))
 	fmt.Fprintln(os.Stderr)
 	// Карта книг графа — в конце каждого захода, даже прерванного: по ней граф
