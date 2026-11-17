@@ -191,7 +191,29 @@ type Input struct {
 	// так что «true» ничего не прячет насовсем.
 	CollapsePaste bool `toml:"collapse_paste"`
 
+	// PasteImageTimeout — сколько ждать картинку из буфера обмена (Ctrl+V,
+	// /paste). По ssh -X она идёт через проброс X11: замер владельца — снимок
+	// 4621343 байта за 23.596 с, и прежний жёсткий срок 5 с обрывал xclip
+	// («signal: killed»). Умолчание 120 с покрывает предел вложения 20 МиБ на
+	// той же скорости. Пусто — умолчание; не длительность или не больше нуля —
+	// отказ загрузки.
+	PasteImageTimeout string `toml:"paste_image_timeout"`
+	pasteImageTimeout time.Duration
+
 	Cursor Cursor `toml:"cursor"`
+}
+
+// DefaultPasteImageTimeout — срок ожидания картинки из буфера обмена,
+// когда input.paste_image_timeout не задан.
+const DefaultPasteImageTimeout = 120 * time.Second
+
+// PasteImageTimeoutDuration — разобранный input.paste_image_timeout; у конфига,
+// собранного без загрузки (тесты), — умолчание.
+func (i Input) PasteImageTimeoutDuration() time.Duration {
+	if i.pasteImageTimeout > 0 {
+		return i.pasteImageTimeout
+	}
+	return DefaultPasteImageTimeout
 }
 
 // Cursor — вид курсора в поле ввода. Курсор рисует сам терминал, поэтому
@@ -2751,6 +2773,18 @@ func (c *Config) finalize() error {
 		return fmt.Errorf("agent.bash_timeout: %w", err)
 	}
 	c.Agent.bashTimeout = d
+
+	if strings.TrimSpace(c.Input.PasteImageTimeout) == "" {
+		c.Input.PasteImageTimeout = DefaultPasteImageTimeout.String()
+	}
+	pd, err := time.ParseDuration(strings.TrimSpace(c.Input.PasteImageTimeout))
+	if err != nil {
+		return fmt.Errorf("input.paste_image_timeout: %w", err)
+	}
+	if pd <= 0 {
+		return fmt.Errorf("input.paste_image_timeout = %q: срок должен быть больше нуля", c.Input.PasteImageTimeout)
+	}
+	c.Input.pasteImageTimeout = pd
 
 	// Просмотрщики: строка должна быть командой, а не голой подстановкой.
 	//

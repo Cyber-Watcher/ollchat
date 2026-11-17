@@ -255,8 +255,7 @@ func commandHandlers() []cmdHandler {
 		{names: []string{"calc"}, run: (*Model).calcArgCmd},
 		{names: []string{"mouse"}, run: (*Model).mouseCmd},
 		{names: []string{"paste", "image"}, run: func(m *Model, _ string) tea.Cmd {
-			m.statusMsg = "читаю буфер обмена…"
-			return pasteImageCmd()
+			return m.startImagePaste()
 		}},
 		{names: []string{"system"}, run: (*Model).systemCmd},
 		{names: []string{"search", "найти"}, run: (*Model).searchCmd},

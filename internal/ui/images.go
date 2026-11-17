@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -60,14 +62,23 @@ type imagePastedMsg struct {
 var clipboardRead = clipboard.ReadImage
 
 // pasteImageCmd читает буфер обмена в отдельной горутине: обращение к внешней
-// утилите нельзя делать прямо в цикле событий.
-func pasteImageCmd() tea.Cmd {
+// утилите нельзя делать прямо в цикле событий. timeout — на всю картинку
+// (input.paste_image_timeout): по ssh -X снимок экрана идёт десятки секунд.
+func pasteImageCmd(timeout time.Duration) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := contextWithTimeout(5)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		img, err := clipboardRead(ctx, maxImageBytes)
 		return imagePastedMsg{img: img, err: err}
 	}
+}
+
+// startImagePaste — общий вход Ctrl+V и /paste: строка состояния со сроком,
+// чтобы долгое ожидание по ssh -X не выглядело зависанием, и само чтение.
+func (m *Model) startImagePaste() tea.Cmd {
+	d := m.cfg.Input.PasteImageTimeoutDuration()
+	m.statusMsg = fmt.Sprintf("читаю буфер обмена (картинку жду до %d с)…", int(d.Seconds()))
+	return pasteImageCmd(d)
 }
 
 // sshPasteHint объясняет, что делать, когда графической сессии нет.
@@ -100,6 +111,16 @@ func (m *Model) handleImagePasted(msg imagePastedMsg) {
 			} else {
 				m.statusMsg = "буфер обмена недоступен: графической сессии нет"
 			}
+			return
+		}
+
+		// Срок вышел посреди картинки: это медленный канал, а не сбой утилиты.
+		if errors.Is(msg.err, clipboard.ErrImageTimeout) {
+			m.addBlock(block{kind: blockError, text: fmt.Sprintf(
+				"вставка изображения: картинка не пришла из буфера обмена за %d с. "+
+					"Так бывает по ssh -X: картинка идёт через проброс X11, большой снимок — десятки секунд. "+
+					"Срок задаёт input.paste_image_timeout в конфиге; снимок области, а не всего экрана, идёт быстрее.",
+				int(m.cfg.Input.PasteImageTimeoutDuration().Seconds()))})
 			return
 		}
 

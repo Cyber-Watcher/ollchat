@@ -673,8 +673,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// может — её забирает внешняя утилита, поэтому это отдельная команда,
 	// а не обычная вставка текста.
 	case key.Matches(msg, keys.paste):
-		m.statusMsg = "читаю буфер обмена…"
-		return m, pasteImageCmd()
+		return m, m.startImagePaste()
 
 	case key.Matches(msg, keys.servers):
 		return m, m.openServerPicker()

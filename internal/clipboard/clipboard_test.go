@@ -1,8 +1,13 @@
 package clipboard
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // Буфер обмена предлагает список типов, и выбрать надо тот, который Ollama
@@ -64,5 +69,70 @@ func TestDetectWriterSessionIsRecognisable(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoSession) {
 		t.Errorf("ожидался и ErrNoSession, получено: %v", err)
+	}
+}
+
+// fakeXclip ставит в PATH подменный xclip: на TARGETS он отвечает image/png
+// (или молчит 30 с, если slowTargets), на чтение картинки — ждёт readSleep.
+// Так медленный канал ssh -X воспроизводится без графической сессии. Ждёт
+// только exec sleep: дочерний sleep держал бы вывод, и обрыв по сроку ждал бы его.
+func fakeXclip(t *testing.T, slowTargets bool, readSleep string) {
+	t.Helper()
+	dir := t.TempDir()
+	targets := "echo image/png"
+	if slowTargets {
+		targets = "exec sleep 30"
+	}
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *TARGETS*) " + targets + " ;;\n" +
+		"  *) exec sleep " + readSleep + " ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "xclip"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestReadImageSlowImageIsTimeout: картинка не уложилась в срок вызывающего —
+// ошибка ErrImageTimeout, а не «signal: killed» без объяснения (замер владельца:
+// снимок по ssh -X шёл дольше прежних 5 с).
+func TestReadImageSlowImageIsTimeout(t *testing.T) {
+	fakeXclip(t, false, "30")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := ReadImage(ctx, 0)
+	if !errors.Is(err, ErrImageTimeout) {
+		t.Fatalf("ожидался ErrImageTimeout, получено: %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("обрыв по сроку занял %v — утилита не снята вовремя", took)
+	}
+}
+
+// TestReadImageTargetsKeepShortLimit: длинный срок картинки не растягивает
+// ожидание списка форматов — молчащий буфер виден через typesTimeout, и это не
+// «картинки нет» и не «картинка не пришла».
+func TestReadImageTargetsKeepShortLimit(t *testing.T) {
+	fakeXclip(t, true, "0")
+	prev := typesTimeout
+	typesTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { typesTimeout = prev })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	start := time.Now()
+	_, err := ReadImage(ctx, 0)
+	if err == nil || errors.Is(err, ErrNoImage) || errors.Is(err, ErrImageTimeout) {
+		t.Fatalf("ожидалась ошибка срока списка форматов, получено: %v", err)
+	}
+	if !strings.Contains(err.Error(), "список форматов") {
+		t.Errorf("в ошибке нет слов «список форматов»: %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("список форматов ждали %v при сроке 300ms", took)
 	}
 }

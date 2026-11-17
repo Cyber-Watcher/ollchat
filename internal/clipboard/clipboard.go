@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	// Регистрируем разборщики форматов, которые понимает Ollama. Импорт нужен
 	// ради побочного эффекта: без него image.DecodeConfig не узнает формат.
@@ -37,6 +38,17 @@ var ErrNoSession = errors.New("графическая сессия не обна
 // к буферу обмена нет — её достаточно установить.
 var ErrNoHelper = errors.New("утилита работы с буфером обмена не найдена")
 
+// ErrImageTimeout означает, что картинка не пришла за срок вызывающего. Так
+// бывает по ssh -X: снимок экрана идёт через проброс X11 десятки секунд, и
+// утилиту приходится обрывать. Отдельный вид ошибки — чтобы интерфейс сказал
+// про медленный канал и настройку срока, а не показал «signal: killed».
+var ErrImageTimeout = errors.New("картинка не пришла из буфера обмена в срок")
+
+// typesTimeout — свой короткий срок на список форматов. Он мал при любом
+// канале, и долгое молчание здесь значит, что буфер не отвечает вовсе, —
+// ждать весь срок картинки ради этого незачем. Переменная — ради тестов.
+var typesTimeout = 5 * time.Second
+
 // Image — изображение, полученное из буфера обмена.
 type Image struct {
 	Data          []byte
@@ -51,13 +63,16 @@ var wantTypes = []string{"image/png", "image/jpeg", "image/jpg"}
 //
 // maxBytes ограничивает размер: картинка едет к модели в base64 внутри JSON,
 // и мегабайтные вложения незаметно съедают и трафик, и контекстное окно.
+// Срок ctx — на всю картинку; список форматов ждётся не дольше typesTimeout.
 func ReadImage(ctx context.Context, maxBytes int) (*Image, error) {
 	tool, err := detect()
 	if err != nil {
 		return nil, err
 	}
 
-	offered, err := tool.types(ctx)
+	tctx, cancel := context.WithTimeout(ctx, typesTimeout)
+	offered, err := tool.types(tctx)
+	cancel()
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +135,10 @@ type helper struct {
 func (h helper) types(ctx context.Context) ([]string, error) {
 	out, err := run(ctx, h.name, h.typesArgs...)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%s не отдал список форматов буфера обмена за %s: %w",
+				h.name, typesTimeout, err)
+		}
 		// Пустой буфер обмена утилиты считают ошибкой — для нас это не сбой,
 		// а обычное «картинки нет».
 		return nil, ErrNoImage
@@ -136,6 +155,9 @@ func (h helper) types(ctx context.Context) ([]string, error) {
 func (h helper) read(ctx context.Context, mime string) ([]byte, error) {
 	out, err := run(ctx, h.name, h.readArgs(mime)...)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w: %s читал %s дольше срока", ErrImageTimeout, h.name, mime)
+		}
 		return nil, fmt.Errorf("%s не смог прочитать %s из буфера обмена: %w", h.name, mime, err)
 	}
 	return out, nil
@@ -208,6 +230,11 @@ func run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Оборванная по сроку утилита отвечает «signal: killed»; причина —
+		// срок, и её видно по виду ошибки, а не по тексту.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w (%s)", ctx.Err(), err)
+		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return nil, fmt.Errorf("%s: %s", err, msg)
 		}
