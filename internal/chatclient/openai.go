@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/mcpclient"
@@ -13,19 +15,25 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
-// openAICaps — что объявлять о модели OpenAI-совместимого сервера. /v1/models
-// возможностей не сообщает; инструменты и мышление у тех, кого мы подключаем
-// (vLLM и SGLang с разборщиками qwen3_coder и qwen3, llama-server с шаблоном
-// jinja, LiteLLM поверх них), проверены записями Ш1 этапа 127. Картинки
-// объявлены тоже: не умеющий их сервер отвечает понятной ошибкой 400 или 500
-// (записи Ш1: vLLM с --language-model-only, llama-server без mmproj), а не
-// молчанием, — это лучше, чем запрещать картинки тому, кто их понимает (SGLang).
+// openAICaps — что объявлять о модели, пока проба не ответила (список моделей)
+// или когда пробы выключены (probe_caps = false). /v1/models возможностей не
+// сообщает. Так было до этапа 129 всегда — и шапка показывала vision у vLLM с
+// --language-model-only (замечание владельца 17.11.2026).
 var openAICaps = []string{"completion", "tools", "thinking", "vision"}
+
+// probeTimeout — срок трёх проб возможностей разом. Пробы по 0.2–0.44 с на
+// свободном движке (записи этапа 129); под нагрузкой ждут очереди, и тогда
+// лучше «?» в шапке, чем задержка сведений о модели.
+const probeTimeout = 20 * time.Second
 
 // openAI — сервер с OpenAI-совместимым API в форме Client.
 type openAI struct {
 	c      *oai.Client
-	ctxLen int // [[servers]].context_length: перекрывает окно из /v1/models
+	ctxLen int  // [[servers]].context_length: перекрывает окно из /v1/models
+	probe  bool // [[servers]].probe_caps: узнавать возможности пробами
+
+	mu   sync.Mutex
+	caps map[string]oai.Caps // итоги проб по моделям: пробы — раз на модель за жизнь клиента
 }
 
 func newOpenAI(srv *config.Server) Client {
@@ -44,7 +52,7 @@ func newOpenAI(srv *config.Server) Client {
 	if srv.PriorityLongTokens > 0 {
 		c.WithPriority(srv.PriorityLongTokens, srv.PriorityLong)
 	}
-	return &openAI{c: c, ctxLen: srv.ContextLength}
+	return &openAI{c: c, ctxLen: srv.ContextLength, probe: srv.ProbesCaps()}
 }
 
 // osUser — имя учётной записи ОС, под которой запущен ollchat: на рабочей
@@ -100,6 +108,8 @@ func (o *openAI) PS(context.Context) ([]ollama.RunningModel, error) { return nil
 
 // Show — описание модели в форме /api/show: возможности и окно. Шаблона и
 // Modelfile нет, поэтому ShowResponse.RealTools верит объявленному «tools».
+// Возможности — по пробам движка (этап 129): что он выключил, уходит в
+// CapabilitiesOff, на что проба не ответила — в CapabilitiesUnknown.
 func (o *openAI) Show(ctx context.Context, model string) (*ollama.ShowResponse, error) {
 	ms, err := o.c.Models(ctx)
 	if err != nil {
@@ -116,9 +126,51 @@ func (o *openAI) Show(ctx context.Context, model string) (*ollama.ShowResponse, 
 			// Ключ с суффиксом .context_length — его ищет ollama.ContextLengthFromShow.
 			info["openai.context_length"] = float64(n)
 		}
-		return &ollama.ShowResponse{Capabilities: openAICaps, ModelInfo: info}, nil
+		show := &ollama.ShowResponse{ModelInfo: info}
+		show.Capabilities, show.CapabilitiesOff, show.CapabilitiesUnknown = o.capsOf(ctx, model)
+		return show, nil
 	}
 	return nil, fmt.Errorf("модели %q нет на сервере %s (есть: %s)", model, o.c.BaseURL(), strings.Join(ids, ", "))
+}
+
+// capsOf — возможности модели по пробам: включённые (с ними и непроверенные —
+// запрещать из-за незнания хуже), выключенные движком и непроверенные. Пробы —
+// раз на модель; probe_caps = false — всё объявлено и всё непроверено.
+func (o *openAI) capsOf(ctx context.Context, model string) (on, off, unknown []string) {
+	caps := oai.Caps{}
+	if o.probe {
+		o.mu.Lock()
+		got, ok := o.caps[model]
+		o.mu.Unlock()
+		if !ok {
+			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+			got = o.c.ProbeCaps(pctx, model)
+			cancel()
+			o.mu.Lock()
+			if o.caps == nil {
+				o.caps = map[string]oai.Caps{}
+			}
+			o.caps[model] = got
+			o.mu.Unlock()
+		}
+		caps = got
+	}
+	on = []string{"completion"}
+	for _, c := range []struct {
+		name  string
+		state oai.CapState
+	}{{"tools", caps.Tools}, {"thinking", caps.Thinking}, {"vision", caps.Vision}} {
+		switch c.state {
+		case oai.CapOn:
+			on = append(on, c.name)
+		case oai.CapOff:
+			off = append(off, c.name)
+		case oai.CapUnknown:
+			on = append(on, c.name)
+			unknown = append(unknown, c.name)
+		}
+	}
+	return on, off, unknown
 }
 
 // Resident — «не знаю»: у API нет пути, отвечающего, где лежит модель, и

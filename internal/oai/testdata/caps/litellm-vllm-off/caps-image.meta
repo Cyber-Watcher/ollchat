@@ -1,0 +1,32 @@
+{
+ "case": "caps-image",
+ "status": 400,
+ "first_byte_s": 0.077,
+ "total_s": 0.077,
+ "bytes": 356,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:35:38 GMT",
+  "llm_provider-date": "Tue, 17 Nov 2026 19:35:37 GMT",
+  "llm_provider-server": "uvicorn",
+  "llm_provider-content-type": "application/json",
+  "llm_provider-vary": "Origin",
+  "llm_provider-content-length": "143",
+  "x-litellm-call-id": "ef46dd29-396f-4dbf-b2aa-9f82d263f39e",
+  "x-litellm-response-cost": "0",
+  "x-litellm-key-spend": "0.0",
+  "x-litellm-timeout": "6000.0",
+  "content-length": "356",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "Connection": "close"
+ },
+ "request": {
+  "model": "qwen3.8",
+  "max_tokens": 1,
+  "chat_template_kwargs": {
+   "enable_thinking": false
+  }
+ }
+}

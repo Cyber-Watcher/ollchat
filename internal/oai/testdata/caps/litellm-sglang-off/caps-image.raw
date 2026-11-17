@@ -1,0 +1,1 @@
+{"error":{"message":"litellm.BadRequestError: Hosted_vllmException - {\"object\":\"error\",\"message\":\"Image count 1 exceeds limit 0 per request.\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}. Received Model Group=qwen3.8\nAvailable Model Group Fallbacks=None","type":"invalid_request_error","param":null,"code":"400"}}

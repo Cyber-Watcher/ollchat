@@ -1,0 +1,54 @@
+{
+ "case": "caps-tools",
+ "status": 400,
+ "first_byte_s": 0.076,
+ "total_s": 0.076,
+ "bytes": 376,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:35:38 GMT",
+  "llm_provider-date": "Tue, 17 Nov 2026 19:35:37 GMT",
+  "llm_provider-server": "uvicorn",
+  "llm_provider-content-type": "application/json",
+  "llm_provider-vary": "Origin",
+  "llm_provider-content-length": "161",
+  "x-litellm-call-id": "097b1808-0ead-4556-95e6-9464905f7abe",
+  "x-litellm-response-cost": "0",
+  "x-litellm-key-spend": "0.0",
+  "x-litellm-timeout": "6000.0",
+  "content-length": "376",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "Connection": "close"
+ },
+ "request": {
+  "model": "qwen3.8",
+  "max_tokens": 64,
+  "chat_template_kwargs": {
+   "enable_thinking": false
+  },
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "погода в городе сейчас",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string",
+        "description": "город"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ],
+  "tool_choice": "auto"
+ }
+}

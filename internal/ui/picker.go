@@ -317,7 +317,7 @@ func (m *Model) switchServer(name string) tea.Cmd {
 	m.server = srv
 	m.client = newClient(srv)
 	m.modelName = srv.Model
-	m.modelCaps = nil
+	m.modelCaps, m.modelCapsOff, m.modelCapsUnknown = nil, nil, nil
 	m.modelMaxCtx = 0
 	m.foreignCtx = 0
 	m.models = nil
@@ -345,7 +345,7 @@ func (m *Model) switchModel(name string) tea.Cmd {
 		m.stopStreaming()
 	}
 	m.modelName = name
-	m.modelCaps = nil
+	m.modelCaps, m.modelCapsOff, m.modelCapsUnknown = nil, nil, nil
 	m.modelMaxCtx = 0
 	m.foreignCtx = 0
 	m.meter.Reset()

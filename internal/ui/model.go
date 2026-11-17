@@ -146,6 +146,10 @@ type Model struct {
 	saidLoad  bool
 	modelName string
 	modelCaps []string
+	// modelCapsOff — у модели есть, движок выключил; modelCapsUnknown — проба
+	// не ответила (только сервер с API OpenAI, этап 129). Шапка рисует первые
+	// тусклыми, вторые с «?».
+	modelCapsOff, modelCapsUnknown []string
 	// modelRealTools — умеет ли модель вызывать инструменты на самом деле.
 	modelRealTools bool
 	// modelMaxCtx — окно, на которое модель обучена (из /api/show). Это не то же
@@ -684,6 +688,8 @@ type modelInfoMsg struct {
 	gen   int
 	model string
 	caps  []string
+	// capsOff и capsUnknown — ShowResponse.CapabilitiesOff и CapabilitiesUnknown.
+	capsOff, capsUnknown []string
 	// realTools — модель действительно умеет вызывать инструменты, а не просто
 	// объявляет это в списке возможностей. Разбор — в ollama.ShowResponse.RealTools.
 	realTools bool
@@ -751,6 +757,7 @@ func (m *Model) loadModelInfoCmd() tea.Cmd {
 			out.err = err
 		} else {
 			out.caps = show.Capabilities
+			out.capsOff, out.capsUnknown = show.CapabilitiesOff, show.CapabilitiesUnknown
 			// Строка «tools» в описании бывает ложной: у сборки нет ни
 			// RENDERER, ни PARSER, и вызвать инструмент модель не сможет
 			// (DeepSeekFakeTools.md). Проверяем по описанию сборки,
@@ -954,9 +961,7 @@ func (m *Model) send(text string) tea.Cmd {
 	// отказ должен возвращать пользователю его вопрос целиком, а не половину.
 	images := m.imagesFor(text)
 	if len(images) > 0 && m.visionUnsupported() {
-		m.addBlock(block{kind: blockError, text: fmt.Sprintf(
-			"модель %s не умеет смотреть изображения — выберите модель с возможностью vision (Ctrl+R)",
-			m.modelName)})
+		m.addBlock(block{kind: blockError, text: m.visionRefusal()})
 		m.ta.SetValue(text)
 		return nil
 	}

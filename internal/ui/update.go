@@ -1302,6 +1302,7 @@ func (m *Model) onModelInfo(msg modelInfoMsg) (tea.Model, tea.Cmd) {
 	// не затираем ни то, ни другое.
 	if msg.caps != nil {
 		m.modelCaps = msg.caps
+		m.modelCapsOff, m.modelCapsUnknown = msg.capsOff, msg.capsUnknown
 		m.modelRealTools = msg.realTools
 	}
 	if msg.maxCtx > 0 {
@@ -1310,7 +1311,12 @@ func (m *Model) onModelInfo(msg modelInfoMsg) (tea.Model, tea.Cmd) {
 	m.takeCapacity(msg.capacity, msg.source)
 	if m.cfg.Agent.Enabled && len(m.modelCaps) > 0 && !m.toolsUsable() {
 		why := "не поддерживает инструменты"
-		if hasCap(m.modelCaps, "tools") {
+		switch {
+		case hasCap(m.modelCapsOff, "tools"):
+			// Проба движка (этап 129): модель вызывает, движок не разбирает.
+			why = "умеет вызывать инструменты, но движок сервера запущен без разборщика вызовов " +
+				"(у vLLM — без --enable-auto-tool-choice и --tool-call-parser)"
+		case hasCap(m.modelCaps, "tools"):
 			// Возможность объявлена, а разбирать вызовы нечем — это ровно
 			// случай deepseek-r1, разобранный в DeepSeekFakeTools.md.
 			why = "объявляет инструменты, но её сборка не умеет их разбирать (нет RENDERER и PARSER)"

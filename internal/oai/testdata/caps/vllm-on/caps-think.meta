@@ -1,0 +1,19 @@
+{
+ "case": "caps-think",
+ "status": 200,
+ "first_byte_s": 0.497,
+ "total_s": 0.497,
+ "bytes": 854,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:37:13 GMT",
+  "server": "uvicorn",
+  "content-length": "854",
+  "content-type": "application/json",
+  "vary": "Origin",
+  "connection": "close"
+ },
+ "request": {
+  "model": "qwen38",
+  "max_tokens": 64
+ }
+}

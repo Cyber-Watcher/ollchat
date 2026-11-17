@@ -64,7 +64,9 @@ func TestServerAPIRefusals(t *testing.T) {
 		{"оба источника ключа", "api = \"openai\"\napi_key_env = \"K\"\napi_key_file = \"/k\"", "оставьте одно"},
 		{"отрицательное окно", "api = \"openai\"\ncontext_length = -1", "context_length"},
 		{"приоритет у сервера Ollama", "priority_long_tokens = 16000", "у API Ollama поля priority нет"},
-		{"отрицательный порог приоритета", "api = \"openai\"\npriority_long_tokens = -1", "priority_long_tokens"},	}
+		{"отрицательный порог приоритета", "api = \"openai\"\npriority_long_tokens = -1", "priority_long_tokens"},
+		{"пробы возможностей у сервера Ollama", "probe_caps = false", "probe_caps — только для api"},
+	}
 	for _, c := range cases {
 		_, err := writeConfig(t, "\n[[servers]]\nname = \"x\"\nurl = \"http://x.example:8000\"\n"+c.body+"\n")
 		if err == nil || !strings.Contains(err.Error(), c.want) {

@@ -327,6 +327,15 @@ type ShowResponse struct {
 	ModelInfo    map[string]any `json:"model_info"`
 	Capabilities []string       `json:"capabilities"`
 	ModifiedAt   string         `json:"modified_at"`
+
+	// CapabilitiesOff и CapabilitiesUnknown заполняет только сервер с API
+	// OpenAI (chatclient, этап 129): у Ollama возможности приходят готовыми.
+	// Off — у модели есть, движок выключил (vLLM --language-model-only, нет
+	// разборщика); в Capabilities их нет, и интерфейс не шлёт то, что движок
+	// отвергнет. Unknown — проба не ответила внятно; они есть и в Capabilities
+	// (запрещать из-за незнания хуже, чем дать серверу ответить самому).
+	CapabilitiesOff     []string `json:"-"`
+	CapabilitiesUnknown []string `json:"-"`
 }
 
 // HasCapability сообщает, поддерживает ли модель указанную возможность.

@@ -1,0 +1,47 @@
+{
+ "case": "caps-image",
+ "status": 200,
+ "first_byte_s": 0.178,
+ "total_s": 0.178,
+ "bytes": 610,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:37:13 GMT",
+  "content-length": "610",
+  "content-type": "application/json",
+  "x-litellm-call-id": "2f0a092b-83b6-463b-b89b-e764f1058617",
+  "x-litellm-model-id": "d60babe1b733e77cc1f86d84f66fe8ef24e4982418d019721eb21ecb325f5dba",
+  "x-litellm-model-name": "hosted_vllm/qwen38",
+  "x-litellm-model-api-base": "http://vllm:8000/v1",
+  "x-litellm-version": "1.103.2",
+  "x-litellm-response-cost-original": "0.0",
+  "x-litellm-response-cost-discount-amount": "0.0",
+  "x-litellm-response-cost-margin-amount": "0.0",
+  "x-litellm-response-cost-margin-percent": "0.0",
+  "x-litellm-response-cost-input": "0.0",
+  "x-litellm-response-cost-output": "0",
+  "x-litellm-response-cost-tool-usage": "0.0",
+  "x-litellm-key-spend": "0.0",
+  "x-litellm-response-duration-ms": "168.10202598571777",
+  "x-litellm-overhead-duration-ms": "21.924",
+  "x-litellm-callback-duration-ms": "0.0",
+  "llm_provider-date": "Tue, 17 Nov 2026 19:37:13 GMT",
+  "llm_provider-server": "uvicorn",
+  "llm_provider-content-length": "773",
+  "llm_provider-content-type": "application/json",
+  "llm_provider-vary": "Origin",
+  "x-litellm-model-group": "qwen3.8",
+  "x-litellm-attempted-retries": "0",
+  "x-litellm-attempted-fallbacks": "0",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "Connection": "close"
+ },
+ "request": {
+  "model": "qwen3.8",
+  "max_tokens": 1,
+  "chat_template_kwargs": {
+   "enable_thinking": false
+  }
+ }
+}

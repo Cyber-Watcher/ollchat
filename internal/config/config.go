@@ -1674,6 +1674,13 @@ type Server struct {
 	// владельца 17.11.2026 — учёт пилота по людям). Не задано — да; false — для
 	// сервера вне компании, которому имя знать незачем.
 	SendUser *bool `toml:"send_user"`
+	// ProbeCaps — узнавать ли возможности модели сервера "openai" пробами (этап
+	// 129, слово владельца 17.11.2026 «затемнять то что у модели есть, но
+	// выключено в движке»): /v1/models их не сообщает, ключей запуска vLLM не
+	// отдаёт. Три крошечных запроса на модель за сеанс; в журнале шлюза они от
+	// имени пользователя. Не задано — да; false — все возможности объявлены и
+	// помечены «?» (так было до этапа 129 без пометки).
+	ProbeCaps *bool `toml:"probe_caps"`
 	// PriorityLongTokens и PriorityLong — приоритет больших входов у сервера
 	// "openai" (решение владельца 17.11.2026 по итогам серии Z, «утренний залп»):
 	// запрос, чей новый вход хода (сообщения пользователя и инструментов после
@@ -1723,6 +1730,10 @@ func (s Server) IsOpenAI() bool { return s.API == APIOpenAI }
 // send_user не задан — да).
 func (s Server) SendsUser() bool { return s.IsOpenAI() && (s.SendUser == nil || *s.SendUser) }
 
+// ProbesCaps — узнавать ли возможности модели пробами (только сервер "openai";
+// probe_caps не задан — да).
+func (s Server) ProbesCaps() bool { return s.IsOpenAI() && (s.ProbeCaps == nil || *s.ProbeCaps) }
+
 // checkAPI проверяет поля этапа 127 и раскрывает ~ в api_key_file. Ключ здесь
 // не читается: он нужен только клиенту чата, и отказ из-за пустой переменной
 // окружения не должен ломать загрузку конфига тем, кто этот сервер не выбрал.
@@ -1745,6 +1756,10 @@ func (s *Server) checkAPI() error {
 	}
 	if s.PriorityLongTokens > 0 && s.PriorityLong == 0 {
 		s.PriorityLong = 10
+	}
+	if s.ProbeCaps != nil && !s.IsOpenAI() {
+		return fmt.Errorf("сервер %q: probe_caps — только для api = %q "+
+			"(у Ollama возможности приходят из /api/show без проб)", s.Name, APIOpenAI)
 	}
 	if s.APIKeyEnv != "" || s.APIKeyFile != "" {
 		if !s.IsOpenAI() {

@@ -156,19 +156,34 @@ func (m *Model) handleImagePasted(msg imagePastedMsg) {
 	// Предупреждаем сразу, а не при отправке: модель можно сменить, не потеряв
 	// ни вставленную картинку, ни набранный текст.
 	if m.visionUnsupported() {
-		m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
-			"модель %s не умеет смотреть изображения — выберите модель с возможностью vision (Ctrl+R)",
-			m.modelName)})
+		m.addBlock(block{kind: blockNotice, text: m.visionRefusal()})
 	}
 }
 
-// visionUnsupported сообщает, что модель **точно** не умеет смотреть картинки.
+// visionUnsupported сообщает, что модель **точно** не умеет смотреть картинки
+// у этого сервера: её нет в списке возможностей — у модели нет зрения или его
+// выключил движок (ShowResponse.CapabilitiesOff, этап 129).
 //
 // Пока список возможностей не получен от сервера, мы этого не знаем — и молчим:
 // отказать из-за незнания хуже, чем дать серверу ответить самому. Так бывает
 // в первые секунды после запуска и сразу после смены модели.
 func (m *Model) visionUnsupported() bool {
 	return len(m.modelCaps) > 0 && !hasCap(m.modelCaps, "vision")
+}
+
+// visionRefusal — почему картинка не уйдёт. Выключенное в движке зрение —
+// отдельные слова: другая модель на том же сервере тут не поможет, а сменить
+// движку ключ или сервер — да (этап 129: прежде картинка уходила, и в ответ
+// приходило 400 «At most 0 image(s)»).
+func (m *Model) visionRefusal() string {
+	if hasCap(m.modelCapsOff, "vision") {
+		return fmt.Sprintf("у модели %s зрение есть, но движок сервера %s запущен без него "+
+			"(у vLLM — с --language-model-only): картинку он отвергнет, поэтому она не отправляется. "+
+			"Нужно зрение — включить его в движке или выбрать другой сервер",
+			m.modelName, m.server.Name)
+	}
+	return fmt.Sprintf("модель %s не умеет смотреть изображения — выберите модель с возможностью vision (Ctrl+R)",
+		m.modelName)
 }
 
 // nextImageNum выдаёт номер для очередной картинки текущего вопроса.

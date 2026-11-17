@@ -1,0 +1,69 @@
+{
+ "case": "caps-tools",
+ "status": 200,
+ "first_byte_s": 0.491,
+ "total_s": 0.491,
+ "bytes": 528,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:34:04 GMT",
+  "content-length": "528",
+  "content-type": "application/json",
+  "x-litellm-call-id": "6c97d623-7a95-4552-a922-785018d309a9",
+  "x-litellm-model-id": "d60babe1b733e77cc1f86d84f66fe8ef24e4982418d019721eb21ecb325f5dba",
+  "x-litellm-model-name": "hosted_vllm/qwen38",
+  "x-litellm-model-api-base": "http://vllm:8000/v1",
+  "x-litellm-version": "1.103.2",
+  "x-litellm-response-cost-original": "0.0",
+  "x-litellm-response-cost-discount-amount": "0.0",
+  "x-litellm-response-cost-margin-amount": "0.0",
+  "x-litellm-response-cost-margin-percent": "0.0",
+  "x-litellm-response-cost-input": "0.0",
+  "x-litellm-response-cost-output": "0",
+  "x-litellm-response-cost-tool-usage": "0.0",
+  "x-litellm-key-spend": "0.0",
+  "x-litellm-response-duration-ms": "478.4839153289795",
+  "x-litellm-overhead-duration-ms": "14.3559",
+  "x-litellm-callback-duration-ms": "0.0",
+  "llm_provider-date": "Tue, 17 Nov 2026 19:34:04 GMT",
+  "llm_provider-server": "uvicorn",
+  "llm_provider-content-length": "589",
+  "llm_provider-content-type": "application/json",
+  "llm_provider-vary": "Origin",
+  "x-litellm-model-group": "qwen3.8",
+  "x-litellm-attempted-retries": "0",
+  "x-litellm-attempted-fallbacks": "0",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "Connection": "close"
+ },
+ "request": {
+  "model": "qwen3.8",
+  "max_tokens": 64,
+  "chat_template_kwargs": {
+   "enable_thinking": false
+  },
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "погода в городе сейчас",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string",
+        "description": "город"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ],
+  "tool_choice": "auto"
+ }
+}

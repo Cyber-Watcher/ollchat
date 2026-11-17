@@ -1,0 +1,22 @@
+{
+ "case": "caps-image",
+ "status": 200,
+ "first_byte_s": 0.162,
+ "total_s": 0.162,
+ "bytes": 515,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:06:31 GMT",
+  "server": "uvicorn",
+  "content-length": "515",
+  "content-type": "application/json",
+  "vary": "Origin",
+  "Connection": "close"
+ },
+ "request": {
+  "model": "qwen38",
+  "max_tokens": 1,
+  "chat_template_kwargs": {
+   "enable_thinking": false
+  }
+ }
+}

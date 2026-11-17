@@ -1,0 +1,44 @@
+{
+ "case": "caps-tools",
+ "status": 400,
+ "first_byte_s": 0.004,
+ "total_s": 0.004,
+ "bytes": 161,
+ "headers": {
+  "date": "Tue, 17 Nov 2026 19:35:37 GMT",
+  "server": "uvicorn",
+  "content-length": "161",
+  "content-type": "application/json",
+  "vary": "Origin",
+  "connection": "close"
+ },
+ "request": {
+  "model": "qwen38",
+  "max_tokens": 64,
+  "chat_template_kwargs": {
+   "enable_thinking": false
+  },
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "погода в городе сейчас",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string",
+        "description": "город"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ],
+  "tool_choice": "auto"
+ }
+}

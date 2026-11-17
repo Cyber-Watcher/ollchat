@@ -251,24 +251,11 @@ func (m *Model) headerView() string {
 	if model == "" {
 		model = "не выбрана"
 	}
-	// В шапке показываем только отличительные возможности: completion есть у всех.
-	marks := make([]string, 0, 3)
-	for _, c := range m.modelCaps {
-		switch c {
-		case "tools", "thinking", "vision":
-			marks = append(marks, c)
-		}
-	}
-	caps := ""
-	if len(marks) > 0 {
-		caps = " [" + strings.Join(marks, ",") + "]"
-	}
-
 	parts := []string{
 		styHeader.Render("ollchat"),
 		styHeaderDim.Render("сервер: ") + styHeader.Render(m.server.Name),
 		styHeaderDim.Render(trimScheme(m.server.URL)),
-		styHeaderDim.Render("модель: ") + lipgloss.NewStyle().Foreground(colModel).Render(model+caps),
+		styHeaderDim.Render("модель: ") + lipgloss.NewStyle().Foreground(colModel).Render(model) + m.capsMarks(),
 	}
 	line := strings.Join(parts, styBorder.Render(" · "))
 
@@ -285,6 +272,29 @@ func (m *Model) headerView() string {
 	}
 
 	return joinEnds(line, right, m.width)
+}
+
+// capsMarks — отличительные возможности модели для шапки: « [tools,thinking,vision]»;
+// completion есть у всех и не показывается. Включённое — цветом модели; у модели
+// есть, а движок выключил — тускло (этап 129, слово владельца «затемнять то что у
+// модели есть, но выключено в движке»); проба не ответила — с «?».
+func (m *Model) capsMarks() string {
+	on := lipgloss.NewStyle().Foreground(colModel)
+	var marks []string
+	for _, c := range []string{"tools", "thinking", "vision"} {
+		switch {
+		case hasCap(m.modelCapsOff, c):
+			marks = append(marks, styHeaderDim.Render(c))
+		case hasCap(m.modelCapsUnknown, c):
+			marks = append(marks, on.Render(c+"?"))
+		case hasCap(m.modelCaps, c):
+			marks = append(marks, on.Render(c))
+		}
+	}
+	if len(marks) == 0 {
+		return ""
+	}
+	return on.Render(" [") + strings.Join(marks, on.Render(",")) + on.Render("]")
 }
 
 // joinEnds разносит две части строки по краям заданной ширины.
