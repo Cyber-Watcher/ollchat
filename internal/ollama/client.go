@@ -81,6 +81,11 @@ func NewWithStall(baseURL string, timeout, chatTimeout, stall time.Duration,
 	}
 }
 
+// NewTransport — тот же транспорт для клиента OpenAI-совместимого API
+// (internal/oai, этап 127): прокси из окружения, сроки соединения и TLS, свой
+// предел ожидания заголовков — одно правило на оба клиента.
+func NewTransport(header time.Duration) *http.Transport { return newTransport(header) }
+
 // newTransport — транспорт с пределом ожидания заголовков header.
 //
 // Собирается из http.DefaultTransport, а не из пустого http.Transport{}, как

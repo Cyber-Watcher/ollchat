@@ -1635,6 +1635,38 @@ type Server struct {
 	Probe      string `toml:"probe"`
 	ProbeToken string `toml:"probe_token"`
 
+	// API — на каком API говорить с сервером (этап 127): "ollama" (пусто — то
+	// же) или "openai" — OpenAI-совместимый /v1/chat/completions у vLLM, SGLang,
+	// LiteLLM, llama-server. Сервер "openai" годится только для чата: сборка
+	// графа и векторы держат паспорт весов по digest из /api/tags и /api/show,
+	// а у /v1/models его нет (решение владельца 17.11.2026).
+	API string `toml:"api"`
+	// APIKeyEnv и APIKeyFile — откуда взять ключ API сервера "openai" (нужен
+	// шлюзу LiteLLM; vLLM и SGLang без ключа): имя переменной окружения или файл
+	// с правами 600. Самого ключа в файле настроек нет, как у token_* серверов
+	// MCP и Confluence; задаётся одно из двух.
+	APIKeyEnv  string `toml:"api_key_env"`
+	APIKeyFile string `toml:"api_key_file"`
+	// SendUser — слать ли серверу "openai" имя учётной записи ОС полем user
+	// запроса: по нему шлюз LiteLLM ведёт учёт конечных пользователей (решение
+	// владельца 17.11.2026 — учёт пилота по людям). Не задано — да; false — для
+	// сервера вне компании, которому имя знать незачем.
+	SendUser *bool `toml:"send_user"`
+	// PriorityLongTokens и PriorityLong — приоритет больших входов у сервера
+	// "openai" (решение владельца 17.11.2026 по итогам серии Z, «утренний залп»):
+	// запрос, чей новый вход хода (сообщения пользователя и инструментов после
+	// последнего ответа модели) не меньше PriorityLongTokens токенов, уходит с
+	// полем priority = PriorityLong (0 — умолчание 10), остальные — без поля.
+	// Движок нужен с политикой приоритета: vLLM --scheduling-policy priority,
+	// SGLang --enable-priority-scheduling --schedule-low-priority-values-first;
+	// без неё запрос с полем отвергается. 0 PriorityLongTokens — выключено.
+	PriorityLongTokens int `toml:"priority_long_tokens"`
+	PriorityLong       int `toml:"priority_long"`
+	// ContextLength — окно модели сервера "openai", если сервер его не сообщает
+	// в /v1/models (vLLM и SGLang сообщают max_model_len, llama-server —
+	// meta.n_ctx, LiteLLM — max_input_tokens псевдонима). 0 — брать у сервера.
+	ContextLength int `toml:"context_length"`
+
 	timeout      time.Duration
 	chatTimeout  time.Duration
 	stallTimeout time.Duration
@@ -1655,6 +1687,55 @@ func (s Server) ChatTimeoutDuration() time.Duration { return s.chatTimeout }
 
 // StallTimeoutDuration — сколько поток ответа может молчать. Ноль — без предела.
 func (s Server) StallTimeoutDuration() time.Duration { return s.stallTimeout }
+
+// Значения [[servers]].api (этап 127).
+const (
+	APIOllama = "ollama"
+	APIOpenAI = "openai"
+)
+
+// IsOpenAI — сервер говорит на OpenAI-совместимом API, а не на API Ollama.
+func (s Server) IsOpenAI() bool { return s.API == APIOpenAI }
+
+// SendsUser — слать ли имя учётной записи полем user (только сервер "openai";
+// send_user не задан — да).
+func (s Server) SendsUser() bool { return s.IsOpenAI() && (s.SendUser == nil || *s.SendUser) }
+
+// checkAPI проверяет поля этапа 127 и раскрывает ~ в api_key_file. Ключ здесь
+// не читается: он нужен только клиенту чата, и отказ из-за пустой переменной
+// окружения не должен ломать загрузку конфига тем, кто этот сервер не выбрал.
+func (s *Server) checkAPI() error {
+	switch s.API {
+	case "", APIOllama, APIOpenAI:
+	default:
+		return fmt.Errorf("сервер %q: api = %q — допустимо %q (умолчание) или %q "+
+			"(OpenAI-совместимый API: vLLM, SGLang, LiteLLM, llama-server)", s.Name, s.API, APIOllama, APIOpenAI)
+	}
+	if s.ContextLength < 0 {
+		return fmt.Errorf("сервер %q: context_length не может быть отрицательным", s.Name)
+	}
+	if s.PriorityLongTokens < 0 {
+		return fmt.Errorf("сервер %q: priority_long_tokens не может быть отрицательным", s.Name)
+	}
+	if (s.PriorityLongTokens > 0 || s.PriorityLong != 0) && !s.IsOpenAI() {
+		return fmt.Errorf("сервер %q: priority_long_tokens и priority_long — только для api = %q "+
+			"(у API Ollama поля priority нет)", s.Name, APIOpenAI)
+	}
+	if s.PriorityLongTokens > 0 && s.PriorityLong == 0 {
+		s.PriorityLong = 10
+	}
+	if s.APIKeyEnv != "" || s.APIKeyFile != "" {
+		if !s.IsOpenAI() {
+			return fmt.Errorf("сервер %q: api_key_env и api_key_file — только для api = %q; "+
+				"Ollama за прокси с авторизацией — заголовком в [servers.headers]", s.Name, APIOpenAI)
+		}
+		if s.APIKeyEnv != "" && s.APIKeyFile != "" {
+			return fmt.Errorf("сервер %q: заданы и api_key_env, и api_key_file — оставьте одно", s.Name)
+		}
+	}
+	s.APIKeyFile = ExpandPath(s.APIKeyFile)
+	return nil
+}
 
 // NumCtx возвращает num_ctx из options, если он задан явно.
 func (s Server) NumCtx() (int, bool) {
@@ -2968,6 +3049,9 @@ func (c *Config) finalize() error {
 				return fmt.Errorf("сервер %q: keep_alive: %w", s.Name, err)
 			}
 		}
+		if err := s.checkAPI(); err != nil {
+			return err
+		}
 	}
 
 	if c.General.DefaultServer == "" {
@@ -3022,6 +3106,11 @@ func (c *Config) resolveRoles() error {
 			c.warnOnce(fmt.Sprintf("kb.embed_server = %q перекрывает kb.embed_url — векторы считает %s",
 				s.Name, s.Name))
 		}
+		if s.IsOpenAI() {
+			return fmt.Errorf("kb.embed_server = %q: сервер говорит на API OpenAI (api = \"openai\") — "+
+				"векторы считает только Ollama: паспорт векторов сверяется по digest модели, "+
+				"которого у /v1/models нет", s.Name)
+		}
 		c.KB.EmbedURL = s.URL
 	}
 	return nil
@@ -3038,6 +3127,11 @@ func (c *Config) resolveGraphServer(g *Graph, section string, warn bool) error {
 	if !ok {
 		return fmt.Errorf("%s.server = %q: такого сервера нет в [[servers]] (есть: %s)",
 			section, g.Server, strings.Join(c.ServerNames(), ", "))
+	}
+	if s.IsOpenAI() {
+		return fmt.Errorf("%s.server = %q: сервер говорит на API OpenAI (api = \"openai\") — граф "+
+			"собирает только Ollama: паспорт графа сверяет веса по digest, которого у /v1/models нет",
+			section, g.Server)
 	}
 	// Ловушка my-mistakes #140: узел перекрывает адрес. Здесь ссылка на сервер
 	// перекрывает и то и другое, и забытый [[graph.nodes]] не должен молча

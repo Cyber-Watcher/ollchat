@@ -1,0 +1,1 @@
+{"error":{"message":"litellm.BadRequestError: Hosted_vllmException - {\"error\":{\"message\":\"At most 0 image(s) may be provided in one prompt. (parameter=image)\",\"type\":\"BadRequestError\",\"param\":\"image\",\"code\":400}}. Received Model Group=qwen38-raw\nAvailable Model Group Fallbacks=None","type":"invalid_request_error","param":null,"code":"400"}}

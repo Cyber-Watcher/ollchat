@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/chatclient"
 	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/graph"
@@ -168,8 +169,8 @@ func runAsk(cfg *config.Config, srv *config.Server, model string, o askOpts) err
 		o.library = nil
 	}
 
-	client := ollama.NewWithStall(srv.URL, srv.TimeoutDuration(), srv.ChatTimeoutDuration(),
-		srv.StallTimeoutDuration(), srv.Headers)
+	// Сервер чата — Ollama или OpenAI-совместимый API по [[servers]].api (этап 127).
+	client := chatclient.New(srv)
 
 	// Числа отбора: конфиг, поверх — ключи.
 	set := askSettings(cfg, o)
@@ -255,7 +256,7 @@ func askRunSuffix(i, repeat int) string {
 }
 
 // askOne — один вопрос: подмес, запрос, сбор ответа.
-func askOne(client *ollama.Client, cfg *config.Config, srv *config.Server, model, question string,
+func askOne(client chatclient.Client, cfg *config.Config, srv *config.Server, model, question string,
 	o askOpts, set mixer.Settings, coll *kb.Collection, g *graph.Graph) askAnswer {
 
 	ans := askAnswer{

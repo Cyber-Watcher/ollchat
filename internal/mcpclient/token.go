@@ -23,39 +23,46 @@ import (
 // без ключа, и человек получил бы «нужен ключ доступа», глядя на настроенный
 // файл. Ни одно сообщение не содержит самого ключа.
 func Token(ctx context.Context, file, env, cmd string) (string, error) {
+	return TokenAs(ctx, file, env, cmd, "token_file", "token_env", "token_cmd")
+}
+
+// TokenAs — то же под другими именами полей: ключ API сервера чата
+// ([[servers]].api_key_file и api_key_env, этап 127) читается тем же путём,
+// и отказ должен называть поле, которое человек правит.
+func TokenAs(ctx context.Context, file, env, cmd, fileKey, envKey, cmdKey string) (string, error) {
 	if p := strings.TrimSpace(file); p != "" {
 		t, err := confluence.TokenFromFile(p)
 		if err != nil {
-			return "", fmt.Errorf("token_file: %w", err)
+			return "", fmt.Errorf("%s: %w", fileKey, err)
 		}
 		if t == "" {
-			return "", fmt.Errorf("token_file: файл %s пуст", p)
+			return "", fmt.Errorf("%s: файл %s пуст", fileKey, p)
 		}
 		if err := checkToken(t); err != nil {
-			return "", fmt.Errorf("token_file: файл %s: %w", p, err)
+			return "", fmt.Errorf("%s: файл %s: %w", fileKey, p, err)
 		}
 		return t, nil
 	}
 	if name := strings.TrimSpace(env); name != "" {
 		t := strings.TrimSpace(os.Getenv(name))
 		if t == "" {
-			return "", fmt.Errorf("token_env: переменная %s пуста", name)
+			return "", fmt.Errorf("%s: переменная %s пуста", envKey, name)
 		}
 		if err := checkToken(t); err != nil {
-			return "", fmt.Errorf("token_env: переменная %s: %w", name, err)
+			return "", fmt.Errorf("%s: переменная %s: %w", envKey, name, err)
 		}
 		return t, nil
 	}
 	if line := strings.TrimSpace(cmd); line != "" {
 		t, err := confluence.TokenFromCmd(ctx, line)
 		if err != nil {
-			return "", fmt.Errorf("token_cmd: %w", err)
+			return "", fmt.Errorf("%s: %w", cmdKey, err)
 		}
 		if t == "" {
-			return "", fmt.Errorf("token_cmd: команда ничего не напечатала")
+			return "", fmt.Errorf("%s: команда ничего не напечатала", cmdKey)
 		}
 		if err := checkToken(t); err != nil {
-			return "", fmt.Errorf("token_cmd: вывод команды: %w", err)
+			return "", fmt.Errorf("%s: вывод команды: %w", cmdKey, err)
 		}
 		return t, nil
 	}

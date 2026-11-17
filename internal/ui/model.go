@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Cyber-Watcher/ollchat/internal/agent"
+	"github.com/Cyber-Watcher/ollchat/internal/chatclient"
 	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/confluence"
@@ -128,7 +129,9 @@ type Model struct {
 
 	// Текущий сервер и модель.
 	server *config.Server
-	client *ollama.Client
+	// client — сервер чата: Ollama или OpenAI-совместимый API по [[servers]].api
+	// (этап 127). Сборка графа и векторы ходят в Ollama своими клиентами.
+	client chatclient.Client
 
 	// Загрузка модели в память карты: пока её там нет, ответа не будет вовсе,
 	// и это надо отличать от зависания. Подробности — в modelload.go.
@@ -427,8 +430,7 @@ func New(cfg *config.Config, guard *permissions.Guard, registry *tools.Registry,
 		thinkIdx:     -1,
 	}
 	m.conv.SetToday(cfg.General.Today)
-	m.client = ollama.NewWithStall(srv.URL, srv.TimeoutDuration(), srv.ChatTimeoutDuration(),
-		srv.StallTimeoutDuration(), srv.Headers)
+	m.client = newClient(srv)
 	m.vramProfile = loadVRAMProfile(cfg)
 	// База знаний открывается всегда: сама по себе она ничего не стоит,
 	// а коллекции читаются по требованию.

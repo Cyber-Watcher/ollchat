@@ -275,7 +275,13 @@ func (m *Model) headerView() string {
 	root := m.guard.Sandbox().Root()
 	right := styHeaderDim.Render("📁 " + shortenPath(root, 30))
 	if m.srvVersion != "" {
-		right = styHeaderDim.Render("ollama "+m.srvVersion) + styBorder.Render(" · ") + right
+		label := "ollama " + m.srvVersion
+		// У сервера с API OpenAI номера версии нет: Version отдаёт само
+		// название API (chatclient, этап 127), и «ollama» перед ним было бы ложью.
+		if m.server != nil && m.server.IsOpenAI() {
+			label = m.srvVersion
+		}
+		right = styHeaderDim.Render(label) + styBorder.Render(" · ") + right
 	}
 
 	return joinEnds(line, right, m.width)

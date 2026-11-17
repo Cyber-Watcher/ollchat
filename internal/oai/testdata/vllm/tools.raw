@@ -1,0 +1,32 @@
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":null,"prompt_text":null}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"id":"chatcmpl-tool-a638fa9abbfc926a","type":"function","index":0,"function":{"name":"get_weather"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\": \""}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"П"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ари"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ж"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"id":"chatcmpl-tool-97d388d8f1b8695a","type":"function","index":1,"function":{"name":"get_time"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"city\": \""}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"П"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"ари"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"ж"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"}"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls","stop_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-a0a6c42aced0a9c2","object":"chat.completion.chunk","created":1794902832,"model":"qwen38","choices":[],"usage":{"prompt_tokens":356,"total_tokens":412,"completion_tokens":56,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}},"system_fingerprint":"vllm-0.32.0-2db19895"}
+
+data: [DONE]
+

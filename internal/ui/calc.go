@@ -287,6 +287,14 @@ func formatTokens(n int) string {
 
 // calcArgCmd разбирает аргумент /calc: без него считаем на одного.
 func (m *Model) calcArgCmd(arg string) tea.Cmd {
+	// Расчёт окна на пользователя строится на /api/ps и num_ctx Ollama; у
+	// сервера с API OpenAI нет ни того, ни другого (этап 127).
+	if m.server != nil && m.server.IsOpenAI() {
+		m.addBlock(block{kind: blockError, text: "/calc: у сервера " + m.server.Name + " API OpenAI — " +
+			"расчёт идёт по памяти и окну Ollama (/api/ps, num_ctx), здесь их нет; " +
+			"ёмкость движка — по его журналу запуска (размер пула KV)"})
+		return nil
+	}
 	users := 1
 	if s := strings.TrimSpace(arg); s != "" {
 		n, err := strconv.Atoi(s)

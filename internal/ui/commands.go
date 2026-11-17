@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Cyber-Watcher/ollchat/internal/chatclient"
 	"github.com/Cyber-Watcher/ollchat/internal/chatlog"
 	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
@@ -434,6 +435,15 @@ func (m *Model) retryCmd(_ string) tea.Cmd {
 }
 
 func (m *Model) psCmd() tea.Cmd {
+	// У OpenAI-совместимого API нет /api/ps: модель движка загружена всё время
+	// его работы, и «нет загруженных моделей» было бы неправдой (этап 127).
+	if m.server != nil && m.server.IsOpenAI() {
+		name := m.server.Name
+		return func() tea.Msg {
+			return noticeMsg{text: "у сервера " + name + " API OpenAI: списка загруженных моделей нет — " +
+				"модель движка загружена, пока он работает; список моделей — /models"}
+		}
+	}
 	client := m.client
 	return func() tea.Msg {
 		ctx, cancel := contextWithTimeout(20)
@@ -797,6 +807,15 @@ func (m *Model) contextCmd(arg string) tea.Cmd {
 	sub := strings.ToLower(fields[0])
 	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), fields[0]))
 
+	// Окно OpenAI-совместимого сервера задаёт запуск движка (--max-model-len,
+	// --context-length, -c), а не запрос: num_ctx он не принимает (этап 127).
+	if (sub == "set" || sub == "max") && m.server != nil && m.server.IsOpenAI() {
+		m.addBlock(block{kind: blockError, text: "/context " + sub + ": у сервера " + m.server.Name +
+			" API OpenAI — окно задаёт запуск движка, а не запрос; ollchat берёт его из /v1/models " +
+			"или из context_length сервера в конфиге"})
+		return nil
+	}
+
 	switch sub {
 	case "max":
 		if m.modelMaxCtx <= 0 {
@@ -1080,9 +1099,8 @@ func (m *Model) idCmd() tea.Cmd {
 }
 
 // newClient создаёт клиента по описанию сервера.
-func newClient(srv *config.Server) *ollama.Client {
-	return ollama.NewWithStall(srv.URL, srv.TimeoutDuration(), srv.ChatTimeoutDuration(),
-		srv.StallTimeoutDuration(), srv.Headers)
+func newClient(srv *config.Server) chatclient.Client {
+	return chatclient.New(srv)
 }
 
 // shortTime приводит метку времени Ollama к виду ЧЧ:ММ.

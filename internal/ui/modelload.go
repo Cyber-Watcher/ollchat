@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Cyber-Watcher/ollchat/internal/chatclient"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
@@ -49,7 +50,7 @@ type residencyMsg struct {
 // задержать сам вопрос на время сетевого запроса — ради подсказки, без которой
 // можно обойтись. Ответ приходит через доли секунды и застаёт обмен в самом
 // начале, когда он и нужен.
-func checkResidency(gen int, client *ollama.Client, model string) tea.Cmd {
+func checkResidency(gen int, client chatclient.Client, model string) tea.Cmd {
 	if client == nil || model == "" {
 		return nil
 	}

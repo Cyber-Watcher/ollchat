@@ -1,0 +1,1 @@
+{"object":"error","message":"The input (40052 tokens) is longer than the model's context length (32768 tokens).","type":"BadRequestError","param":null,"code":400}

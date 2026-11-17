@@ -1250,6 +1250,36 @@ url        = "http://127.0.0.1:11434"
 model      = "gemma3:4b"
 timeout    = "300s"
 keep_alive = "5m"
+
+# Сервер с OpenAI-совместимым API: vLLM, SGLang, шлюз LiteLLM, llama-server.
+# Только для чата — граф и векторы считает Ollama (их паспорт сверяет веса по
+# digest, которого у /v1/models нет; сервер "openai" в [graph].server или
+# kb.embed_server — отказ загрузки). Выбирается так же: /server, Ctrl+S,
+# general.default_server, --use-chat-server.
+#
+# [[servers]]
+# name  = "vllm"
+# url   = "http://vllm.example:8000"   # корень сервера; /v1 клиент добавит сам
+# model = "qwen38"                      # имя из /v1/models (--served-model-name)
+# api   = "openai"                      # "ollama" (умолчание) или "openai"
+# api_key_env  = "LITELLM_KEY"          # ключ API — только у шлюза; имя переменной
+# api_key_file = "~/.config/ollchat/litellm.key"  # или файл с правами 600 (одно из двух)
+# context_length = 0                    # окно модели, если сервер его не сообщает
+#                                       # (vLLM, SGLang, llama-server и LiteLLM сообщают)
+# send_user = true                      # слать имя учётной записи ОС полем user запроса:
+#                                       # по нему LiteLLM ведёт учёт по людям; false — не слать
+# priority_long_tokens = 0              # приоритет больших входов: новый вход хода не меньше
+#                                       # стольких токенов (вставленный документ, большой вывод
+#                                       # инструмента) уходит с priority = priority_long, остальные
+#                                       # без поля — короткие диалоги не ждут, пока движок читает
+#                                       # чужие документы. 0 — выключено. Движку нужна политика
+#                                       # приоритета (vLLM --scheduling-policy priority), без неё
+#                                       # запрос с полем priority он отвергает
+# priority_long = 10                    # приоритет больших; у vLLM меньшее число — раньше
+# Чего у такого сервера нет: num_ctx (окно задаёт запуск движка), keep_alive,
+# доли модели в памяти карты (/ps), /context set. Из [servers.options] уходят
+# temperature, top_p, seed, stop, presence_penalty, frequency_penalty и
+# num_predict (как max_tokens); think — как chat_template_kwargs.enable_thinking.
 `
 
 // WriteTemplate создаёт файл конфига с комментариями. Существующий файл не затирается.

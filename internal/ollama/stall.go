@@ -47,6 +47,14 @@ type stallReader struct {
 	once   sync.Once // done закрывается ровно один раз, сколько бы ни было Close
 }
 
+// NewStallReader — тот же сторож молчания для чужого потока: клиент
+// OpenAI-совместимого API (internal/oai, этап 127) читает свой поток SSE и
+// рвёт его по тому же правилу, а не по своей копии. Нулевой предел выключает
+// сторожа.
+func NewStallReader(rc io.ReadCloser, limit time.Duration, cancel context.CancelFunc) io.ReadCloser {
+	return newStallReader(rc, limit, cancel)
+}
+
 // newStallReader оборачивает тело ответа. Нулевой предел выключает сторожа.
 func newStallReader(rc io.ReadCloser, limit time.Duration, cancel context.CancelFunc) io.ReadCloser {
 	if limit <= 0 {

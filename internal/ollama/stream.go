@@ -64,7 +64,13 @@ func (s *Stats) addLogprobs(chunk ChatResponse) {
 	if chunk.Message.Thinking != "" {
 		return
 	}
-	for _, t := range chunk.Logprobs {
+	s.AddLogprobs(chunk.Logprobs)
+}
+
+// AddLogprobs учитывает токены ответа в сводке; клиент OpenAI-совместимого
+// API (internal/oai) зовёт её сам — токены мышления он отсеивает до вызова.
+func (s *Stats) AddLogprobs(toks []TokenLogprob) {
+	for _, t := range toks {
 		if s.LogprobN == 0 || t.Logprob < s.LogprobMin {
 			s.LogprobMin = t.Logprob
 		}

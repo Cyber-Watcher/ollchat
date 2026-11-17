@@ -1,0 +1,26 @@
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"reasoning_content":null,"role":"assistant","content":""},"logprobs":null,"finish_reason":null,"matched_stop":null}]}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":"call_b78e5f36c5cf41f0ae07a88d","index":0,"type":"function","function":{"name":"get_weather","arguments":""}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":null,"index":0,"type":"function","function":{"name":null,"arguments":"{"}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":null,"index":0,"type":"function","function":{"name":null,"arguments":"\"city\": \"Париж\""}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":null,"index":0,"type":"function","function":{"name":null,"arguments":"}"}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":"\n","reasoning_content":null},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":"call_7442454e31e148f0a4727d0c","index":1,"type":"function","function":{"name":"get_time","arguments":""}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":null,"index":1,"type":"function","function":{"name":null,"arguments":"{"}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":null,"index":1,"type":"function","function":{"name":null,"arguments":"\"city\": \"Париж\""}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"id":null,"index":1,"type":"function","function":{"name":null,"arguments":"}"}}]},"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[{"index":0,"delta":{"reasoning_content":null},"logprobs":null,"finish_reason":"tool_calls","matched_stop":248046}]}
+
+data: {"id":"6036ea8dc6f244cb8ec4e6b900f5259e","object":"chat.completion.chunk","created":1794903275,"model":"qwen38","choices":[],"usage":{"prompt_tokens":378,"total_tokens":434,"completion_tokens":56,"prompt_tokens_details":null,"reasoning_tokens":0}}
+
+data: [DONE]
+
