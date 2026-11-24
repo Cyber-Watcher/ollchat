@@ -1049,7 +1049,7 @@ func (m *Model) startExchange(text string, images []pendingImage, mix mixResult)
 
 	// Пока сервер не сообщил точные счётчики, показываем оценку по объёму истории.
 	if !m.meter.Exact || m.meter.Used == 0 {
-		m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+		m.meter.Used = m.estimatedUsed()
 		m.meter.Exact = false
 	}
 
@@ -1073,7 +1073,7 @@ func (m *Model) startExchange(text string, images []pendingImage, mix mixResult)
 		UntrustedGate:      m.cfg.Agent.UntrustedGate,
 		PrivateEgressCheck: m.cfg.Agent.PrivateEgressCheck,
 		MaxWritesNoask:     m.cfg.Agent.MaxWritesNoask,
-		MaxTurnTokens:      m.cfg.Agent.MaxTurnTokens,
+		MaxTurnTokens:      agent.TurnTokenCap(m.cfg.Agent.MaxTurnTokens, m.meter.Capacity),
 		OutHead:            m.cfg.Log.StepsOutHead,
 	}
 
@@ -1369,6 +1369,13 @@ func needsCompaction(at float64, keep int, meter ctxmeter.Meter, history int) bo
 	return float64(meter.Used) >= at*float64(meter.Capacity)
 }
 
+// estimatedUsed — оценка заполнения окна по истории, пока сервер не сообщил
+// точного числа. Мышление в счёт не идёт у сервера с API OpenAI: туда оно не
+// отправляется (этап 133).
+func (m *Model) estimatedUsed() int {
+	return ctxmeter.EstimateChars(m.conv.EstimatedRequestChars(m.server == nil || !m.server.IsOpenAI()))
+}
+
 // compactBeforeSend решает, отправлять ли вопрос сейчас. true во втором
 // значении — ждать: либо идёт сжатие (команда вернётся compactDoneMsg
 // и отправит вопрос сама), либо ход отклонён и вопрос возвращён в поле.
@@ -1377,15 +1384,28 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 	if !needsCompaction(m.cfg.Agent.CompactAt, keep, m.meter, m.conv.Len()) {
 		return nil, false
 	}
-	if m.toolsSupported() {
-		// Сводка теряет точность истории вызовов: модель потом ссылается на
-		// файлы, которых в сводке нет. Решение владельца 04.09.2026.
-		m.addBlock(block{kind: blockError, text: fmt.Sprintf(
-			"окно заполнено на %d%% (порог agent.compact_at = %.2f): в агентном режиме история "+
-				"не сжимается сводкой. Освободите место сами: /compact [N] или /clear, "+
-				"либо расширьте окно: /context add 32k", 100*m.meter.Used/m.meter.Capacity, m.cfg.Agent.CompactAt)})
-		m.ta.SetValue(text)
-		return nil, true
+	if m.toolsSupported() && m.cfg.Agent.PruneKeepTurns > 0 {
+		// Агентный режим: сперва без модели убрать старые выводы инструментов —
+		// вызовы и аргументы остаются, пересказа и выдуманных путей нет (этап 133;
+		// до него ход здесь не начинался, а вопрос возвращался в поле, и человек
+		// стирал его, чтобы набрать /compact). Хватило — вопрос уходит сразу.
+		pct := 100 * m.meter.Used / m.meter.Capacity
+		if n, freed := m.conv.PruneToolOutputs(m.cfg.Agent.PruneKeepTurns); n > 0 {
+			used := max(m.meter.Used-ctxmeter.EstimateChars(freed), 0)
+			m.addBlock(block{kind: blockHint, text: fmt.Sprintf(
+				"окно заполнено на %d%% — убраны выводы %d вызовов инструментов старше %d последних ходов "+
+					"(≈%s токенов), сами вызовы остались",
+				pct, n, m.cfg.Agent.PruneKeepTurns, ctxmeter.FormatTokens(ctxmeter.EstimateChars(freed)))})
+			_ = m.logger.Write(chatlog.KindSystem, fmt.Sprintf(
+				"История сжата без модели: убраны выводы %d вызовов инструментов, ≈%d токенов.", n, ctxmeter.EstimateChars(freed)))
+			m.steps.Write(steplog.Step{Turn: m.turnID, Kind: steplog.KindCompact, Outcome: steplog.OutcomeOK,
+				Extra: map[string]any{"pruned": n, "freed_bytes": freed, "keep_turns": m.cfg.Agent.PruneKeepTurns}})
+			// До следующего ответа сервера заполнение — оценка, как после сводки.
+			m.meter.Used, m.meter.Exact = used, false
+			if float64(used) < m.cfg.Agent.CompactAt*float64(m.meter.Capacity) {
+				return nil, false
+			}
+		}
 	}
 	model := m.cfg.Agent.CompactModel
 	if model == "" {
@@ -1479,7 +1499,7 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 		Extra: map[string]any{"dropped": dropped, "keep": keep}})
 	// До следующего ответа сервера заполнение — оценка: точное число теперь
 	// врёт, и повторного сжатия на нём не будет.
-	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+	m.meter.Used = m.estimatedUsed()
 	m.meter.Exact = false
 	// Файлы /add, дочитанные во время сжатия, — до вопроса: их прикладывали
 	// к нему.

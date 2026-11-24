@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,15 +91,28 @@ func newConv() *session.Conversation {
 	return c
 }
 
-// Т7, О15: после чужого текста (прочитанный файл) web_search в noask — с вопросом.
+// Т7, О15: после чужого текста (прочитанный файл) web_search — с вопросом, даже
+// когда правила его разрешают (auto-edit, allow Fetch(*)). В noask — без вопроса:
+// слово владельца 24.11.2026 «noask это значит noask не спрашивать» (до него
+// этот тест требовал вопрос именно в noask).
 func TestGateUntrustedAsksAfterForeign(t *testing.T) {
+	f := &fakeChat{turns: [][]ollama.Event{
+		callWith(tools.NameReadFile, map[string]any{"path": "a.txt"}, 10),
+		callWith(tools.NameWebSearch, map[string]any{"query": "go 1.26"}, 10),
+		answer("готово"),
+	}}
+	r, ran := gateRunner(t, f, permissions.ModeNoAsk)
+	r.UntrustedGate = true
+	if asked, _, err := drive(r, newConv(), AnswerNo); err != nil || len(asked) != 0 || *ran != 2 {
+		t.Fatalf("noask: вопросы %q, исполнено %d, ошибка %v — ждали 0 вопросов и 2 исполнения", asked, *ran, err)
+	}
 	for _, on := range []bool{true, false} {
 		f := &fakeChat{turns: [][]ollama.Event{
 			callWith(tools.NameReadFile, map[string]any{"path": "a.txt"}, 10),
 			callWith(tools.NameWebSearch, map[string]any{"query": "go 1.26"}, 10),
 			answer("готово"),
 		}}
-		r, ran := gateRunner(t, f, permissions.ModeNoAsk)
+		r, ran := gateRunner(t, f, permissions.ModeAutoEdit)
 		r.UntrustedGate = on
 		asked, _, err := drive(r, newConv(), AnswerNo)
 		if err != nil {
@@ -113,8 +128,8 @@ func TestGateUntrustedAsksAfterForeign(t *testing.T) {
 	// Чужой текст из прошлых ходов тоже в силе: он остался в разговоре.
 	conv := newConv()
 	conv.Append(ollama.Message{Role: ollama.RoleTool, ToolName: tools.NameHTTPFetch, Content: "страница"})
-	r, _ := gateRunner(t, &fakeChat{turns: [][]ollama.Event{
-		callWith(tools.NameWebSearch, map[string]any{"query": "x"}, 10), answer("ок")}}, permissions.ModeNoAsk)
+	r, _ = gateRunner(t, &fakeChat{turns: [][]ollama.Event{
+		callWith(tools.NameWebSearch, map[string]any{"query": "x"}, 10), answer("ок")}}, permissions.ModeAutoEdit)
 	r.UntrustedGate = true
 	if asked, _, _ := drive(r, conv, AnswerNo); len(asked) != 1 {
 		t.Fatalf("чужой текст прошлого хода не учтён: вопросы %q", asked)
@@ -131,7 +146,7 @@ func TestGateUntrustedSurvivesCompact(t *testing.T) {
 	ask := func(conv *session.Conversation) []string {
 		t.Helper()
 		r, _ := gateRunner(t, &fakeChat{turns: [][]ollama.Event{
-			callWith(tools.NameWebSearch, map[string]any{"query": "x"}, 10), answer("ок")}}, permissions.ModeNoAsk)
+			callWith(tools.NameWebSearch, map[string]any{"query": "x"}, 10), answer("ок")}}, permissions.ModeAutoEdit)
 		r.UntrustedGate = true
 		asked, _, err := drive(r, conv, AnswerNo)
 		if err != nil {
@@ -288,6 +303,115 @@ func TestTurnTokenCap(t *testing.T) {
 	}
 	if *ran != 1 {
 		t.Fatalf("исполнено %d, ждали 1: второй вызов после потолка не исполняется", *ran)
+	}
+}
+
+// Потолок хода от окна модели: ноль в настройках — 60 окон. На рабочей машине
+// ход из 35 обменов по 103–134 тыс. токенов (окно 262144, заполнено до 51 %)
+// упёрся в прежнее умолчание 4 000 000, хотя окно ни разу не переполнилось.
+func TestTurnTokenCapFromWindow(t *testing.T) {
+	for _, tc := range []struct{ setting, window, want int }{
+		{0, 262144, 15728640},
+		{0, 0, 4000000},
+		{-1, 262144, 0},
+		{5000, 262144, 5000},
+	} {
+		if got := TurnTokenCap(tc.setting, tc.window); got != tc.want {
+			t.Errorf("TurnTokenCap(%d, %d) = %d, ждали %d", tc.setting, tc.window, got, tc.want)
+		}
+	}
+
+	var turns [][]ollama.Event
+	for i := 0; i < 35; i++ {
+		turns = append(turns, callWith("bash", map[string]any{"command": "echo"}, 116763))
+	}
+	turns = append(turns, answer("ок"))
+	r, ran := gateRunner(t, &fakeChat{turns: turns}, permissions.ModeNoAsk)
+	r.MaxIterations = 40
+	r.MaxTurnTokens = TurnTokenCap(0, 262144)
+	if _, _, err := drive(r, newConv(), AnswerYes); err != nil {
+		t.Fatalf("ход того же вида при окне 262144 остановлен: %v", err)
+	}
+	if *ran != 35 {
+		t.Fatalf("исполнено %d, ждали 35", *ran)
+	}
+}
+
+// Вопрос, который разрешение на сеанс не снимет, помечен EachTime — окно не
+// предлагает [a]/[t]: проверка хода (чужой текст) и необратимое. Обычный вопрос
+// правил — без пометки. Причина вопроса пишется в журнал шагов.
+func TestConfirmEachTime(t *testing.T) {
+	run := func(r *Runner, turns ...[]ollama.Event) (each []bool, extra []map[string]any) {
+		t.Helper()
+		f := r.Client.(*fakeChat)
+		f.turns = append(turns, answer("ок"))
+		pat, err := chatlog.ParsePattern("steps.jsonl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Steps = steplog.New(t.TempDir(), pat, time.Now(), "test", true)
+		for ev := range r.Run(context.Background(), newConv()) {
+			if ev.Kind == EventToolConfirm {
+				each = append(each, ev.Confirm.EachTime)
+				ev.Confirm.Reply <- AnswerYes
+			}
+		}
+		path := r.Steps.Path()
+		r.Steps.Close()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			var s steplog.Step
+			if json.Unmarshal([]byte(line), &s) == nil && s.Kind == steplog.KindTool {
+				extra = append(extra, s.Extra)
+			}
+		}
+		return each, extra
+	}
+
+	// Чужой текст: web_search после прочитанного файла (auto-edit: в noask вопроса нет).
+	r, _ := gateRunner(t, &fakeChat{}, permissions.ModeAutoEdit)
+	r.UntrustedGate = true
+	each, extra := run(r, callWith(tools.NameReadFile, map[string]any{"path": "a.txt"}, 10),
+		callWith(tools.NameWebSearch, map[string]any{"query": "x"}, 10))
+	if len(each) != 1 || !each[0] {
+		t.Fatalf("чужой текст: пометки вопросов %v, ждали [true]", each)
+	}
+	if len(extra) != 2 || !strings.Contains(fmt.Sprint(extra[1]["reason"]), "untrusted_gate") || extra[0]["reason"] != nil {
+		t.Fatalf("причина вопроса в журнале: %+v", extra)
+	}
+
+	// Необратимое: правка файла, копию которого сделать нельзя. Цель — от
+	// модели, а не из настроек (Fixed): иначе правила не спрашивают вовсе.
+	r, _ = gateRunner(t, &fakeChat{}, permissions.ModeNoAsk)
+	fixed := planTool
+	planTool = func(reg *tools.Registry, name string, args map[string]any) (*tools.Plan, error) {
+		p, err := fixed(reg, name, args)
+		if p != nil {
+			p.Req.Fixed = false
+		}
+		return p, err
+	}
+	r.Guard.WriteIrreversible = func(string) string { return "копии не сделать" }
+	if each, _ = run(r, callWith(tools.NameWriteFile, map[string]any{"path": "a.txt"}, 10)); len(each) != 1 || !each[0] {
+		t.Fatalf("необратимое: пометки вопросов %v, ждали [true]", each)
+	}
+
+	// Обычный вопрос правил в safe: разрешение на сеанс его снимает.
+	r, _ = gateRunner(t, &fakeChat{}, permissions.ModeSafe)
+	sb, err := permissions.NewSandbox(t.TempDir(), false, false, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := permissions.Compile(nil, []string{"Bash(*)"}, nil, sb.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Guard = permissions.NewGuard(set, sb, permissions.ModeSafe)
+	if each, _ = run(r, callWith("bash", map[string]any{"command": "echo"}, 10)); len(each) != 1 || each[0] {
+		t.Fatalf("обычный вопрос: пометки %v, ждали [false]", each)
 	}
 }
 

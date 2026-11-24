@@ -305,45 +305,54 @@ func (s *Set) Irreversible() []Rule { return s.irreversible }
 // IrreversibleBy объясняет, чем действие необратимо; пусто — обратимо.
 // root — корень песочницы: от него считаются относительные цели.
 func (s *Set) IrreversibleBy(kind Kind, target, root string) string {
-	return s.irreversibleBy(kind, target, root, nil)
+	why, _ := s.irreversibleBy(kind, target, root, nil)
+	return why
 }
 
 // irreversibleBy — IrreversibleBy с готовым разбором строки bash из checkBash
 // (ревью, замечание 7: строка лексилась заново). scan == nil — разобрать здесь;
-// для действий, кроме bash, scan не читается.
-func (s *Set) irreversibleBy(kind Kind, target, root string, scan *commandScan) string {
+// для действий, кроме bash, scan не читается. inline — единственная причина —
+// код в строке интерпретатора (inlineCode): его не разобрать, но действием из
+// списка он не назван, и в noask о нём не спрашивают. Поэтому он самый слабый:
+// берётся, только если ни одна часть строки не необратима сама — иначе
+// `python3 -c … && git push` проходил бы в noask по первой части.
+func (s *Set) irreversibleBy(kind Kind, target, root string, scan *commandScan) (why string, inline bool) {
 	if kind != KindBash {
 		for i := range s.irreversible {
 			if s.irreversible[i].Match(kind, target) {
-				return fmt.Sprintf("необратимо по правилу %s", s.irreversible[i].Source)
+				return fmt.Sprintf("необратимо по правилу %s", s.irreversible[i].Source), false
 			}
 		}
-		return ""
+		return "", false
 	}
 	if scan == nil {
 		scan = scanCommands(target)
 	}
+	soft := ""
 	for _, c := range scan.found {
 		for i := range s.irreversible {
 			if s.irreversible[i].Kind == KindBash && s.irreversible[i].matchCommand(c.text) {
-				return fmt.Sprintf("необратимо по правилу %s (часть команды: %s)", s.irreversible[i].Source, c.text)
+				return fmt.Sprintf("необратимо по правилу %s (часть команды: %s)", s.irreversible[i].Source, c.text), false
 			}
 		}
 		if why := builtinIrreversible(c.text, root); why != "" {
-			return why
+			return why, false
+		}
+		if soft == "" {
+			soft = inlineCode(c.text)
 		}
 	}
 	for _, t := range scan.truncates {
 		if why := truncatesExisting(t, root); why != "" {
-			return why
+			return why, false
 		}
 	}
-	return ""
+	return soft, soft != ""
 }
 
 // builtinIrreversible — класс, которого префиксом правила не записать: ключ
-// стоит в любом месте строки, цель существует на диске, код в строке не
-// разобрать. root — корень песочницы для относительных целей.
+// стоит в любом месте строки, цель существует на диске. root — корень
+// песочницы для относительных целей. Код в строке — отдельно, inlineCode.
 func builtinIrreversible(text, root string) string {
 	words, err := SplitWords(text)
 	if err != nil || len(words) == 0 {
@@ -386,13 +395,22 @@ func builtinIrreversible(text, root string) string {
 			return why
 		}
 	}
-	over, _, opaque := writeTargets(text)
+	over, _, _ := writeTargets(text)
 	for _, t := range over {
 		if existingFile(t, root) {
 			return fmt.Sprintf("необратимо: «%s» перепишет существующий файл %s", prog, t)
 		}
 	}
-	if opaque != "" {
+	return ""
+}
+
+// inlineCode — код в строке интерпретатора (`python3 -c`, `perl -e`, `node -e`):
+// что он пишет и удаляет, по строке не понять. В safe и auto-edit — вопрос
+// каждый раз, в noask — без вопроса (слово владельца 24.11.2026: «noask это
+// значит noask не спрашивать»; на рабочей машине 4 вопроса из 8 за ход были
+// такими — модель качала программы через `python3 -c "import requests…"`).
+func inlineCode(text string) string {
+	if _, _, opaque := writeTargets(text); opaque != "" {
 		return "необратимо: код в строке (" + opaque + ") не разобрать — что он пишет и удаляет, неизвестно"
 	}
 	return ""

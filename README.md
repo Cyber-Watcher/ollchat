@@ -4055,7 +4055,9 @@ ollchat: по коллекции books собран граф понятий (gra
 | `--graph-merge-drop` | с `--graph-merge`: снять все склейки, вернув граф в прежний вид. Журнал уходит в копию `merges.jsonl.bak-<время>`, нужен ответ `ДА` (в скрипте — `--kb-yes`), под идущей сборкой отказывает; с `--graph-merge-dry` или `--kb-dry-run` — только показать |
 | `--graph-resolve-normkey` | с `--graph-resolve`: добавить пары с совпавшим ключом отбора — имя с точностью до регистра, разделителей, основы слова и порядка слов |
 | `--graph-queue-doubts` | положить спорные вердикты разбора двойников в очередь человеку: `--graph-queue-doubts books --graph-verdicts verdicts.tsv` |
-| `--graph-verdicts` | с `--graph-queue-doubts`: файл вердиктов арбитра (TSV) |
+| `--graph-verdicts` | с `--graph-queue-doubts` и `--graph-review-apply`: файл вердиктов (TSV) |
+| `--graph-review-export` | выгрузить очередь разбора пар (`/graph review`) в TSV с типами, весом и выдержками по обеим сторонам; только читает: `--graph-review-export books > queue.tsv` |
+| `--graph-review-apply` | записать решения по парам очереди разбора из TSV (колонки `id_a`, `id_b`, `вердикт` — ДА, НЕТ или ?, по желанию `причина`); автор решений в журнале — `claude`, не «человек»; понимает `--kb-dry-run`: `--graph-review-apply books --graph-verdicts verdicts.tsv` |
 | `--graph-groups-build` | собрать группы понятий: `--graph-groups-build books --from merges\|resolve\|both` |
 | `--from` | с `--graph-groups-build`: источник — `merges` (склейки), `resolve` (вычислить), `both`; по умолчанию `both` |
 | `--graph-groups-min-cos` | с `--graph-groups-build --from resolve`: порог близости пар; 0 — 0.90 |

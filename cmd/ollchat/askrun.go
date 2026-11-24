@@ -329,7 +329,7 @@ func askOne(client chatclient.Client, cfg *config.Config, srv *config.Server, mo
 		UntrustedGate:      cfg.Agent.UntrustedGate,
 		PrivateEgressCheck: cfg.Agent.PrivateEgressCheck,
 		MaxWritesNoask:     cfg.Agent.MaxWritesNoask,
-		MaxTurnTokens:      cfg.Agent.MaxTurnTokens,
+		MaxTurnTokens:      agent.TurnTokenCap(cfg.Agent.MaxTurnTokens, askWindow(srv, opts)),
 		OutHead:            cfg.Log.StepsOutHead,
 	}
 	if o.Tools && o.registry != nil {
@@ -398,6 +398,22 @@ func askOptions(srv *config.Server, o askOpts) map[string]any {
 		opts["num_ctx"] = o.NumCtx
 	}
 	return opts
+}
+
+// askWindow — окно модели для потолка хода (agent.TurnTokenCap): num_ctx
+// запроса, иначе context_length сервера из конфига; 0 — неизвестно. Окно,
+// которое сообщает сам движок OpenAI, здесь не спрашивается: --ask не ходит
+// за /v1/models, и потолок тогда прежний.
+func askWindow(srv *config.Server, opts map[string]any) int {
+	switch n := opts["num_ctx"].(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	}
+	return srv.ContextLength
 }
 
 func askThink(srv *config.Server, o askOpts) *bool {

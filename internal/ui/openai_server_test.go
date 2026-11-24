@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/Cyber-Watcher/ollchat/internal/config"
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
+	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 )
 
 // newOpenAIModel — модель интерфейса, чей сервер чата говорит на API OpenAI (этап 127).
@@ -13,12 +15,30 @@ func newOpenAIModel(t *testing.T) *Model {
 	return newTestModelWith(t, func(c *config.Config) { c.Servers[0].API = config.APIOpenAI })
 }
 
-// Окно OpenAI-сервера задаёт запуск движка: /context set и /context max
+// Мышление серверу OpenAI в истории не уходит (oai.convertMessages) — и в
+// оценке заполнения окна его нет; у Ollama оно уходит и считается (этап 133).
+func TestEstimateSkipsThinkingOnOpenAI(t *testing.T) {
+	think := ollama.Message{Role: ollama.RoleAssistant, Content: "ответ", Thinking: strings.Repeat("x", 3000)}
+	oai := newOpenAIModel(t)
+	oai.conv.Append(think)
+	oll := newTestModel(t)
+	oll.conv.Append(think)
+	if got, with := oai.estimatedUsed(), ctxmeter.EstimateChars(oai.conv.EstimatedChars()); got >= with {
+		t.Errorf("OpenAI: оценка %d, с мышлением %d — мышление не должно считаться", got, with)
+	}
+	if got, with := oll.estimatedUsed(), ctxmeter.EstimateChars(oll.conv.EstimatedChars()); got != with {
+		t.Errorf("Ollama: оценка %d, ждали с мышлением %d", got, with)
+	}
+}
+
+// Окно OpenAI-сервера задаёт запуск движка: /context set, max и add
 // отказывают с объяснением и окна не меняют, у сервера Ollama — как прежде.
+// add добавлен на этапе 133: подсказка при заполнении окна звала «/context add
+// 32k» на vLLM, где окно уже максимальное.
 func TestContextSetRefusedOnOpenAIServer(t *testing.T) {
 	m := newOpenAIModel(t)
 	before := m.meter.Capacity
-	for _, arg := range []string{"set 8192", "max"} {
+	for _, arg := range []string{"set 8192", "max", "add 32k"} {
 		if cmd := m.contextCmd(arg); cmd != nil {
 			t.Errorf("/context %s: ждали отказ без команды", arg)
 		}

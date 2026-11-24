@@ -134,6 +134,66 @@ type commandScan struct {
 	// разборах и с целями перенаправлений любого направления; без
 	// разделителей встроенных документов. По ним envBash ищет имя .env.
 	words []shellWord
+	// loopVars — переменные заголовков `for имя in слова` с буквальными
+	// значениями: команда `$имя …` разбирается как каждое значение, а не как
+	// неизвестное имя. На рабочей машине `for t in jq rg fd; do $t --version`
+	// давало вопрос и в noask (2 из 8 за ход), хотя каждое имя видно в строке и
+	// сверяется с запретами. Переприсваивание (`t=…`, read, declare…) снимает
+	// переменную — тогда имя снова неизвестно.
+	loopVars map[string][]string
+}
+
+// rebinders — команды, которые могут переприсвоить переменную оболочки.
+var rebinders = map[string]bool{
+	"read": true, "mapfile": true, "readarray": true, "declare": true, "typeset": true,
+	"local": true, "export": true, "let": true, "getopts": true,
+	"unset": true, "eval": true, "source": true, ".": true,
+}
+
+// loopHeader запоминает переменную заголовка `for имя in слова` (args — слова
+// после `for`). Значения с подстановкой или шаблоном не запоминаются: их
+// узнать нельзя, и `$имя` останется неизвестным.
+func (s *commandScan) loopHeader(args []shellWord) {
+	if len(args) < 2 || args[1].text != "in" || args[1].quoted || !isShellName(args[0].text) {
+		return
+	}
+	vals := make([]string, 0, len(args)-2)
+	for _, w := range args[2:] {
+		if w.dynamic || w.text == "" {
+			delete(s.loopVars, args[0].text)
+			return
+		}
+		vals = append(vals, w.text)
+	}
+	if s.loopVars == nil {
+		s.loopVars = map[string][]string{}
+	}
+	s.loopVars[args[0].text] = vals
+}
+
+// loopValues — значения переменной цикла, если слово — ровно `$имя` или `${имя}`.
+func (s *commandScan) loopValues(w shellWord) ([]string, bool) {
+	name := strings.TrimPrefix(w.text, "$")
+	if name == w.text {
+		return nil, false
+	}
+	if strings.HasPrefix(name, "{") && strings.HasSuffix(name, "}") {
+		name = name[1 : len(name)-1]
+	}
+	vals, ok := s.loopVars[name]
+	return vals, ok && len(vals) > 0
+}
+
+func isShellName(t string) bool {
+	if t == "" || t[0] >= '0' && t[0] <= '9' {
+		return false
+	}
+	for _, c := range t {
+		if !isNameRune(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // scanCommands находит все команды, которые запустит строка cmd.
@@ -251,6 +311,8 @@ func (s *commandScan) command(words []shellWord, depth int) {
 		w := words[0]
 		switch {
 		case isAssignment(w.text):
+			name, _, _ := strings.Cut(w.text, "=")
+			delete(s.loopVars, name)
 			s.assignment(w.text, depth)
 			words = words[1:]
 			continue
@@ -258,6 +320,9 @@ func (s *commandScan) command(words []shellWord, depth int) {
 			words = words[1:]
 			continue
 		case !w.quoted && notCommands[w.text]:
+			if w.text == "for" || w.text == "select" {
+				s.loopHeader(words[1:])
+			}
 			return
 		}
 		break
@@ -266,10 +331,19 @@ func (s *commandScan) command(words []shellWord, depth int) {
 		return
 	}
 	if words[0].dynamic {
+		if vals, ok := s.loopValues(words[0]); ok {
+			for _, v := range vals {
+				s.command(append([]shellWord{{text: v}}, words[1:]...), depth)
+			}
+			return
+		}
 		s.markUnknown(joinWords(words))
 		return
 	}
 	name := programName(words[0].text)
+	if rebinders[name] || name == "printf" && len(words) > 1 && strings.HasPrefix(words[1].text, "-v") {
+		s.loopVars = nil
+	}
 	args := words[1:]
 	s.found = append(s.found, foundCommand{name: name,
 		text: normalizeCommand(name + " " + joinWords(args))})

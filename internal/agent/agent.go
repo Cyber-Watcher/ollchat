@@ -156,7 +156,12 @@ type ConfirmRequest struct {
 	Reason  string
 	Kind    permissions.Kind
 	Target  string
-	Reply   chan Answer
+	// EachTime — разрешение «на сеанс» этот вопрос не снимет: правила
+	// (permissions.Result.EachTime) или проверка хода (gate: чужой текст,
+	// предел правок) спрашивают поверх него. Окно не предлагает [a]/[t] — на
+	// рабочей машине человек 41 раз за час жал [t], а вопрос возвращался.
+	EachTime bool
+	Reply    chan Answer
 }
 
 // Chatter — то, что умеет вести один обмен с моделью: единственный метод
@@ -202,7 +207,8 @@ type Runner struct {
 	// отказ при частном адресе или имени хоста в исходящем вызове (Н16).
 	// MaxWritesNoask — после стольких правок за ход в noask следующая
 	// спрашивается (Ч3; 0 и меньше — без предела). MaxTurnTokens — потолок
-	// входных токенов за ход (Т11; 0 и меньше — без предела).
+	// входных токенов за ход (Т11; 0 и меньше — без предела); из ключа
+	// настроек и окна модели его считает TurnTokenCap.
 	JournalFailClosed  bool
 	UntrustedGate      bool
 	PrivateEgressCheck bool
@@ -421,10 +427,10 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 		if r.MaxTurnTokens > 0 && tokensIn > r.MaxTurnTokens && len(toolCalls) > 0 {
 			reason = steplog.TurnLimit
 			emit(ctx, out, Event{Kind: EventError,
-				Err: fmt.Errorf("превышен потолок входных токенов за ход (agent.max_turn_tokens = %d, набрано %d): "+
-					"модель продолжает запрашивать инструменты.\n%s"+
-					"Поднять или снять (-1): agent.max_turn_tokens в файле настроек",
-					r.MaxTurnTokens, tokensIn, limitReport(stats, byTool, lastTool, lastResult))})
+				Err: fmt.Errorf("превышен потолок входных токенов за ход (%d, набрано %d — сумма по обменам, "+
+					"а не заполнение окна): модель продолжает запрашивать инструменты.\n%s"+
+					"Поднять или снять (-1): agent.max_turn_tokens в файле настроек; 0 — %d окон модели",
+					r.MaxTurnTokens, tokensIn, limitReport(stats, byTool, lastTool, lastResult), turnTokenWindows)})
 			return
 		}
 
@@ -507,6 +513,9 @@ func (r *Runner) run(ctx context.Context, conv *session.Conversation, out chan<-
 			}
 			if info.decision != "" {
 				extra["kind"], extra["target"], extra["decision"] = info.kind, info.target, info.decision
+			}
+			if info.reason != "" {
+				extra["reason"] = info.reason
 			}
 			// Инструмент стороннего сервера MCP — сервер отдельным полем (этап 121,
 			// Б6): сводки по журналу шагов группируют вызовы по нему, не разбирая имя.
@@ -772,10 +781,38 @@ type callInfo struct {
 	// kind, target, decision — вид и цель действия и решение правил до человека
 	// («allow», «ask», «deny»; этап 112, И6): по ним в журнале видно, разрешён
 	// вызов правилом или одобрен человеком; пусто — до проверки прав не дошло.
-	kind, target, decision string
+	// reason — почему спросили или запретили: без него по журналу рабочей
+	// машины причину 46 вопросов за час пришлось выводить из исходников.
+	kind, target, decision, reason string
 	// foreign — вывод вызова пришёл из внешнего источника: картинки из него
 	// идут модели с пометкой чужого (imageNote).
 	foreign bool
+}
+
+// turnTokenWindows — сколько полных окон модели может переслать ход, когда
+// agent.max_turn_tokens не задан. Каждый обмен шлёт историю целиком, и сумма
+// растёт с окном: прежнее умолчание 4 000 000 при окне 262144 — всего 15 окон,
+// и на рабочей машине ход из 35 обменов при заполнении окна 51 % упёрся в него.
+const turnTokenWindows = 60
+
+// turnTokensNoWindow — потолок хода, когда окно модели неизвестно (прежнее
+// умолчание Т11).
+const turnTokensNoWindow = 4000000
+
+// TurnTokenCap — потолок входных токенов за ход (Runner.MaxTurnTokens) по ключу
+// agent.max_turn_tokens и окну модели window: положительный ключ — как есть,
+// отрицательный — без предела (0), ноль — turnTokenWindows окон, а при
+// неизвестном окне (window <= 0) — turnTokensNoWindow.
+func TurnTokenCap(setting, window int) int {
+	switch {
+	case setting > 0:
+		return setting
+	case setting < 0:
+		return 0
+	case window > 0:
+		return window * turnTokenWindows
+	}
+	return turnTokensNoWindow
 }
 
 // decisionName — решение правил словом для журнала шагов.
@@ -886,14 +923,14 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 	argsJSON := call.Function.ArgumentsJSON()
 	var confirm string
 	var asked time.Time
-	var audit [3]string // вид, цель, решение правил (И6)
+	var audit [4]string // вид, цель, решение правил (И6) и его причина
 	defer func() {
 		info.args = argsJSON
 		info.hidden = argsJSON != call.Function.ArgumentsJSON()
 		if !asked.IsZero() {
 			info.confirm, info.confirmMs = confirm, time.Since(asked).Milliseconds()
 		}
-		info.kind, info.target, info.decision = audit[0], audit[1], audit[2]
+		info.kind, info.target, info.decision, info.reason = audit[0], audit[1], audit[2], audit[3]
 	}()
 
 	if r.Tools == nil {
@@ -952,8 +989,16 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 		}
 	}
 	// Защита и пределы хода (этап 112) — только ужесточают решение правил.
+	before := decision.Decision
 	decision = r.gate(name, plan, call.Function.ArgumentsJSON(), decision)
-	audit = [3]string{string(plan.Req.Kind), textx.Shorten(plan.Req.Target, 200), decisionName(decision.Decision)}
+	audit = [4]string{string(plan.Req.Kind), textx.Shorten(plan.Req.Target, 200), decisionName(decision.Decision), ""}
+	if decision.Decision != permissions.DecisionAllow {
+		audit[3] = textx.Shorten(decision.Reason, 200)
+	}
+	// Вопрос, который разрешение на сеанс не снимет: правила помечают такие сами
+	// (необратимое, вычисляемое имя программы), а gate превращает «разрешить»
+	// в «спросить» поверх сеансовых разрешений.
+	eachTime := decision.Decision == permissions.DecisionAsk && (decision.EachTime || before != permissions.DecisionAsk)
 	switch decision.Decision {
 	case permissions.DecisionDeny:
 		msg := fmt.Sprintf("Действие запрещено настройками: %s", decision.Reason)
@@ -969,13 +1014,14 @@ func (r *Runner) executeCall(ctx context.Context, call ollama.ToolCall, out chan
 		reply := make(chan Answer, 1)
 		asked, confirm = time.Now(), "cancel"
 		if !emit(ctx, out, Event{Kind: EventToolConfirm, Confirm: &ConfirmRequest{
-			Tool:    name,
-			Title:   plan.Title,
-			Preview: plan.Preview,
-			Reason:  decision.Reason,
-			Kind:    plan.Req.Kind,
-			Target:  plan.Req.Target,
-			Reply:   reply,
+			Tool:     name,
+			Title:    plan.Title,
+			Preview:  plan.Preview,
+			Reason:   decision.Reason,
+			Kind:     plan.Req.Kind,
+			Target:   plan.Req.Target,
+			EachTime: eachTime,
+			Reply:    reply,
 		}}) {
 			return "Пользователь прервал выполнение.", nil, rejected(steplog.OutcomeCancelled, "")
 		}

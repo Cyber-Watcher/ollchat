@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
+	"github.com/Cyber-Watcher/ollchat/internal/session"
 )
 
 func TestNeedsCompaction(t *testing.T) {
@@ -43,26 +45,67 @@ func fillHistory(m *Model, n int) {
 	}
 }
 
-// В агентном режиме при полном окне вопрос не уходит: подсказка про /compact,
-// вопрос возвращён в поле, история не тронута.
-func TestCompactRefusedInAgentMode(t *testing.T) {
+// agentTurns — история агентного режима: ходов n, в каждом вызов bash и его
+// вывод размером out байт.
+func agentTurns(m *Model, n, out int) {
+	for i := 0; i < n; i++ {
+		m.conv.Append(ollama.Message{Role: ollama.RoleUser, Content: fmt.Sprintf("вопрос %d", i)})
+		m.conv.Append(ollama.Message{Role: ollama.RoleAssistant, ToolCalls: []ollama.ToolCall{{ID: fmt.Sprint("c", i),
+			Function: ollama.ToolCallFunc{Name: "bash", Arguments: map[string]any{"command": "ls"}}}}})
+		m.conv.Append(ollama.Message{Role: ollama.RoleTool, ToolName: "bash", Content: strings.Repeat("x", out)})
+		m.conv.Append(ollama.Message{Role: ollama.RoleAssistant, Content: "готово"})
+	}
+}
+
+// В агентном режиме при полном окне сперва без модели убираются старые выводы
+// инструментов, и хватило — вопрос уходит сразу. До этапа 133 здесь был отказ:
+// вопрос возвращался в поле с подсказкой «/compact или /context add 32k», и на
+// рабочей машине человек стирал вопрос, чтобы набрать /compact (решение
+// 04.09.2026 «в агентном режиме не сжимать» отменено владельцем).
+func TestAgentCompactionPrunesToolOutputsFirst(t *testing.T) {
 	m := newTestModel(t)
-	m.cfg.Agent.CompactAt, m.cfg.Agent.CompactKeep = 0.75, 6
+	m.cfg.Agent.CompactAt, m.cfg.Agent.CompactKeep, m.cfg.Agent.PruneKeepTurns = 0.75, 6, 2
+	m.modelCaps, m.modelRealTools = []string{"tools"}, true
+	m.meter = ctxmeter.Meter{Capacity: 10000, Used: 9000, Exact: true}
+	agentTurns(m, 3, 30000)
+	t.Cleanup(m.stopStreaming)
+
+	if cmd := m.send("ещё вопрос"); cmd == nil || m.compacting {
+		t.Fatalf("вопрос должен уйти сразу, без сводки (сжатие идёт: %v)", m.compacting)
+	}
+	msgs := m.conv.Messages()
+	if msgs[2].Content != session.PrunedToolOutput {
+		t.Fatalf("вывод первого хода не убран: %.40q", msgs[2].Content)
+	}
+	if len(msgs[2+4].Content) != 30000 || len(msgs[2+8].Content) != 30000 {
+		t.Fatal("выводы двух последних ходов должны остаться целиком")
+	}
+	if len(msgs[1].ToolCalls) != 1 {
+		t.Fatal("вызов с аргументами должен остаться")
+	}
+	found := false
+	for _, b := range m.blocks {
+		found = found || b.kind == blockHint && strings.Contains(b.text, "убраны выводы 1 вызовов")
+	}
+	if !found {
+		t.Fatal("человеку не сказано, что выводы убраны")
+	}
+}
+
+// Убрать нечего (выводов инструментов нет) — в агентном режиме, как в чате,
+// сводка, а вопрос ждёт её и уйдёт следом; в поле он не возвращается.
+func TestAgentCompactionFallsBackToSummary(t *testing.T) {
+	m := newTestModel(t)
+	m.cfg.Agent.CompactAt, m.cfg.Agent.CompactKeep, m.cfg.Agent.PruneKeepTurns = 0.75, 6, 2
 	m.modelCaps, m.modelRealTools = []string{"tools"}, true
 	m.meter = ctxmeter.Meter{Capacity: 1000, Used: 900, Exact: true}
 	fillHistory(m, 10)
 
-	if cmd := m.send("ещё вопрос"); cmd != nil {
-		t.Fatal("в агентном режиме отказ — без команды")
+	if cmd := m.send("ещё вопрос"); cmd == nil || !m.compacting || m.compactText != "ещё вопрос" {
+		t.Fatalf("ждали сжатие сводкой с отложенным вопросом: сжатие %v, вопрос %q", m.compacting, m.compactText)
 	}
-	if got := lastBlock(m); got.kind != blockError || !strings.Contains(got.text, "/compact") {
-		t.Fatalf("ожидалась подсказка про /compact: %+v", got)
-	}
-	if m.ta.Value() != "ещё вопрос" {
-		t.Fatalf("вопрос должен вернуться в поле: %q", m.ta.Value())
-	}
-	if m.conv.Len() != 10 {
-		t.Fatalf("история не должна меняться: %d", m.conv.Len())
+	if m.ta.Value() != "" {
+		t.Fatalf("вопрос не должен возвращаться в поле: %q", m.ta.Value())
 	}
 }
 

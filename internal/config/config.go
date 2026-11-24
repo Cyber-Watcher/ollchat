@@ -466,15 +466,20 @@ type Agent struct {
 	BashTimeout   string   `toml:"bash_timeout"`
 	MaxOutputKB   int      `toml:"max_output_kb"`
 
-	// CompactAt — доля окна, при которой история чата сжимается сводкой
-	// перед следующим вопросом: 0.75 — при трёх четвертях. Проверяется по
-	// точному числу из последнего ответа сервера. 0 — выключено.
-	// В агентном режиме сжатия нет: сводка теряет точность истории вызовов,
-	// и при превышении порога ход не начинается, а подсказывается /compact.
+	// CompactAt — доля окна, при которой история сжимается перед следующим
+	// вопросом: 0.75 — при трёх четвертях. Проверяется по точному числу из
+	// последнего ответа сервера. 0 — выключено. В агентном режиме сперва
+	// обрезаются старые выводы инструментов (PruneKeepTurns) без модели, и
+	// только если места всё ещё мало — сводка; вопрос уходит следом. До этапа
+	// 133 агентный ход при пороге не начинался вовсе (решение 04.09.2026).
 	CompactAt float64 `toml:"compact_at"`
 	// CompactKeep — сколько последних сообщений оставить дословно; остальное
 	// уходит в сводку. То же умолчание, что у ручной /compact.
 	CompactKeep int `toml:"compact_keep"`
+	// PruneKeepTurns — при сжатии в агентном режиме выводы инструментов старше
+	// стольких последних ходов заменяются пометкой (вызовы и аргументы
+	// остаются). 0 — умолчание 2, отрицательное — не обрезать, сразу сводка.
+	PruneKeepTurns int `toml:"prune_keep_turns"`
 	// CompactModel — какой моделью писать сводку; пусто — той же, что отвечает.
 	// Лёгкая модель быстрее, но на одной карте может вытеснить основную.
 	CompactModel string `toml:"compact_model"`
@@ -501,13 +506,15 @@ type Agent struct {
 	// частный адрес (10.*, 192.168.*, 172.16–31.*) или имя хоста из ~/.ssh/config.
 	PrivateEgressCheck bool `toml:"private_egress_check"`
 	// MaxWritesNoask (Ч3) — после стольких правок файлов за ход в режиме noask
-	// следующая спрашивается у человека. 0 — умолчание 25, отрицательное — без предела.
+	// следующая спрашивается у человека. 0 и отрицательное — без предела: умолчание
+	// с тех пор, как владелец сказал «noask это значит noask не спрашивать» (было 25).
 	MaxWritesNoask int `toml:"max_writes_noask"`
 	// TurnSummary (Ц8) — строка итога хода в ленте: вызовов, отклонено, с ошибкой.
 	TurnSummary bool `toml:"turn_summary"`
 	// MaxTurnTokens (Т11) — потолок входных токенов за ход (сумма по обменам с
-	// моделью); превысил — ход останавливается с отчётом. 0 — умолчание 4 000 000,
-	// отрицательное — без предела.
+	// моделью); превысил — ход останавливается с отчётом. 0 — 60 окон модели
+	// (при неизвестном окне 4 000 000, agent.TurnTokenCap), отрицательное — без
+	// предела.
 	MaxTurnTokens int `toml:"max_turn_tokens"`
 
 	bashTimeout time.Duration
@@ -1832,14 +1839,19 @@ func Default() *Config {
 			MaxRetries:    2,
 			CompactAt:     0.75,
 			CompactKeep:   6,
-			Autosave:      true,
+			// Замер этапа 133: выводы старше двух ходов — 45,1 % истории
+			// агентного сеанса из 11 ходов.
+			PruneKeepTurns: 2,
+			Autosave:       true,
 			// Этап 112, решения владельца 15.10.2026: защита и пределы хода включены.
 			JournalFailClosed:  true,
 			UntrustedGate:      true,
 			PrivateEgressCheck: true,
-			MaxWritesNoask:     25,
+			MaxWritesNoask:     0, // без предела: noask не спрашивает (было 25)
 			TurnSummary:        true,
-			MaxTurnTokens:      4000000,
+			// 0 — потолок от окна модели (agent.TurnTokenCap); прежнее
+			// число 4 000 000 при окне 262144 — всего 15 окон на ход.
+			MaxTurnTokens: 0,
 			// Тот же список, что в образце конфига (template.go): поиск слит
 			// в один search по замеру 25.09.2026, а умолчание оставалось
 			// с kb_search, и конфиг без tools получал не тот набор, что
@@ -2762,14 +2774,14 @@ func (c *Config) finalize() error {
 	if c.Agent.MaxIterations == 0 {
 		c.Agent.MaxIterations = 25
 	}
-	if c.Agent.MaxWritesNoask == 0 {
-		c.Agent.MaxWritesNoask = 25
-	}
-	if c.Agent.MaxTurnTokens == 0 {
-		c.Agent.MaxTurnTokens = 4000000
-	}
+	// MaxWritesNoask ноль — без предела, как и отрицательное: заменять нечем.
+	// MaxTurnTokens ноль не заменяется числом: умолчание зависит от окна модели,
+	// которое известно только при запуске хода (agent.TurnTokenCap).
 	if c.Agent.CompactAt < 0 || c.Agent.CompactAt >= 1 {
 		return fmt.Errorf("agent.compact_at = %v: доля окна от 0 до 1 (0 — не сжимать)", c.Agent.CompactAt)
+	}
+	if c.Agent.PruneKeepTurns == 0 {
+		c.Agent.PruneKeepTurns = 2
 	}
 	if c.Agent.CompactKeep < 0 {
 		return fmt.Errorf("agent.compact_keep = %d: число сообщений не бывает отрицательным", c.Agent.CompactKeep)

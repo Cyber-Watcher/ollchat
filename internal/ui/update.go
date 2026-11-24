@@ -805,10 +805,18 @@ func (m *Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y", "Y", "н", "Н", "д", "Д", "enter":
 		answer = agent.AnswerYes
-	case "a", "A", "ф", "Ф":
+	case "a", "A", "ф", "Ф", "t", "T", "е", "Е":
+		if m.confirm.EachTime {
+			// Окно этих клавиш не предлагало: разрешение на сеанс вопрос не
+			// снимет, а выданное на весь инструмент сняло бы вопросы о других
+			// его вызовах — нажатие ничего не решает.
+			m.statusMsg = confirmEachTimeHint
+			return m, nil
+		}
 		answer = agent.AnswerAlways
-	case "t", "T", "е", "Е":
-		answer = agent.AnswerAlwaysTool
+		if strings.ContainsAny(key, "tTеЕ") {
+			answer = agent.AnswerAlwaysTool
+		}
 	case "n", "N", "т", "Т", "esc":
 		answer = agent.AnswerNo
 	case "up", "k":

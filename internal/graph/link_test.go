@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -203,6 +204,118 @@ func TestLinkQueueAndHumanDecisions(t *testing.T) {
 	}
 	if got := LinkQueueSize(g2.Dir()); got != 0 {
 		t.Fatalf("LinkQueueSize = %d", got)
+	}
+}
+
+// Решения из файла (--graph-review-apply): «ДА» склеивает и пишет автора
+// claude, «НЕТ» снимает пару с очереди, «?» оставляет человеку; пары вне
+// очереди и пары с поглощённой стороной не трогаются; сухой прогон не пишет;
+// решения claude не попадают в судейский список и не выдают себя за человека.
+func TestApplyReviewTSV(t *testing.T) {
+	g := linkGraph(t, nameEmbedder{})
+	ids := map[string]uint32{}
+	for _, n := range []string{"goroutine", "горутины", "mutex", "channel", "lexeme", "lexme", "heap", "stack", "third"} {
+		id, fresh, err := g.Entities().Add(n, "понятие")
+		if err != nil || !fresh {
+			t.Fatalf("узел %q не заведён: новый %v, ошибка %v", n, fresh, err)
+		}
+		ids[n] = id
+	}
+	doubt := func(a, b string) {
+		t.Helper()
+		if err := g.Links().Add(LinkRec{Norm: Normalize(a), Name: a, From: ids[a], Cand: ids[b], CandName: b,
+			Cos: 0.9, Verdict: LinkDoubt, By: LinkByJudge, Source: LinkFromDoubles}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	doubt("горутины", "goroutine") // ДА
+	doubt("mutex", "channel")      // НЕТ
+	doubt("lexme", "lexeme")       // ? — остаётся
+	doubt("heap", "stack")         // сторона поглощена третьим узлом
+	doubt("lexeme", "mutex")       // ДА при тяжёлой левой стороне: выживает она
+	for i := 0; i < 3; i++ {
+		g.Entities().Touch(ids["lexeme"], false)
+	}
+	if _, err := g.Merges().Add([]MergeRec{{From: ids["heap"], To: ids["third"]}}); err != nil {
+		t.Fatal(err)
+	}
+	row := func(a, b, v, why string) string {
+		return fmt.Sprintf("%d\t%d\t%s\t%s\n", ids[a], ids[b], v, why)
+	}
+	tsv := "id_a\tid_b\tвердикт\tпричина\n" +
+		row("горутины", "goroutine", "ДА", "перевод") +
+		row("mutex", "channel", "НЕТ", "разные примитивы") +
+		row("lexme", "lexeme", "?", "") +
+		row("heap", "stack", "ДА", "") +
+		row("lexeme", "mutex", "ДА", "ради проверки направления") +
+		row("goroutine", "mutex", "ДА", "такой пары в очереди нет")
+
+	dry, err := g.ApplyReviewTSV(strings.NewReader(tsv), LinkByClaude, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ReviewApplied{Yes: 2, No: 1, Left: 1, NotInQueue: 1, Stale: 1}
+	if dry != want {
+		t.Fatalf("сухой прогон: %+v, ожидалось %+v", dry, want)
+	}
+	if g.Links().Queued() != 5 || g.Merges().Resolve(ids["горутины"]) != ids["горутины"] {
+		t.Fatal("сухой прогон что-то записал")
+	}
+
+	res, err := g.ApplyReviewTSV(strings.NewReader(tsv), LinkByClaude, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != want {
+		t.Fatalf("запись: %+v, ожидалось %+v", res, want)
+	}
+	if got := g.Merges().Resolve(ids["горутины"]); got != ids["goroutine"] {
+		t.Fatalf("«ДА» не склеило: горутины → %d", got)
+	}
+	// «НЕТ» по паре mutex ~ channel не склеило её; а «ДА» по lexeme ~ mutex
+	// оставило выжившим lexeme — у него упоминаний больше, хотя в паре он слева.
+	if got := g.Merges().Resolve(ids["channel"]); got != ids["channel"] {
+		t.Fatalf("«НЕТ» склеило: channel → %d", got)
+	}
+	if got := g.Merges().Resolve(ids["mutex"]); got != ids["lexeme"] {
+		t.Fatalf("выжил не тяжёлый узел: mutex → %d, ожидался lexeme %d", got, ids["lexeme"])
+	}
+	if got := g.Merges().Resolve(ids["stack"]); got != ids["stack"] {
+		t.Fatalf("пара с поглощённой стороной тронута: stack → %d", got)
+	}
+	q := g.Links().Queue()
+	if len(q) != 2 {
+		t.Fatalf("в очереди должно остаться две пары («?» и поглощённая), осталось %d: %+v", len(q), q)
+	}
+	if len(g.Links().Judged()) != 0 {
+		t.Fatalf("решение claude попало в судейский список: %+v", g.Links().Judged())
+	}
+	var claude, human int
+	for _, m := range g.Merges().Records() {
+		if m.Level == LinkByClaude && strings.HasPrefix(m.Why, LinkByClaude+", /graph review: ") {
+			claude++
+		}
+		if m.Level == "human" {
+			human++
+		}
+	}
+	if claude != 2 || human != 0 {
+		t.Fatalf("склеек с автором claude %d, с автором человек %d", claude, human)
+	}
+	// Повтор того же файла ничего не добавляет: решённых пар в очереди уже нет.
+	again, err := g.ApplyReviewTSV(strings.NewReader(tsv), LinkByClaude, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Yes != 0 || again.No != 0 || again.NotInQueue != 4 {
+		t.Fatalf("повтор: %+v", again)
+	}
+	// Человеком назваться нельзя, неизвестный вердикт — отказ.
+	if _, err := g.ApplyReviewTSV(strings.NewReader("id_a\tid_b\tвердикт\n1\t2\tМОЖЕТ\n"), LinkByClaude, true); err == nil {
+		t.Fatal("неизвестный вердикт принят")
+	}
+	if err := g.DecideLinkBy(q[0], LinkYes, "кто-то", ""); err == nil {
+		t.Fatal("неизвестный автор принят")
 	}
 }
 

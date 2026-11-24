@@ -55,7 +55,9 @@ func TestIrreversibleClassAsksInNoask(t *testing.T) {
 		"cat новый.txt | tee есть.txt", "tee есть.txt < /dev/null", "echo x | tee есть.txt > /dev/null",
 		"install -m 644 новый.txt есть.txt", "ln -sf новый.txt есть.txt", "ln -f новый.txt есть.txt",
 		"rsync -a --delete src/ dst/", "rsync -a новый.txt есть.txt", "tar -xf a.tar", "tar xf a.tar", "tar --extract -f a.tar",
-		"python3 -c \"open('есть.txt','w')\"", "perl -e 'unlink \"есть.txt\"'", "ruby -e 'File.delete(\"есть.txt\")'", "node -e 'require(\"fs\").rmSync(\"есть.txt\")'",
+		// код в строке интерпретатора в noask больше не спрашивается (слово владельца
+		// 24.11.2026) — см. TestInlineCodeQuietOnlyInNoask; но склейка с необратимым — да
+		"python3 -c 'print(1)' && git push", "node -e '1' ; sed -i s/a/b/ есть.txt",
 		"awk -i inplace '{print}' есть.txt", "gawk --in-place '{print}' есть.txt", "ed -s есть.txt", "sort -o есть.txt есть.txt", "sort --output=есть.txt есть.txt",
 		// обёртки вокруг sed -i
 		"env sed -i s/a/b/ есть.txt", "command sed -i s/a/b/ есть.txt", "nohup sed -i s/a/b/ есть.txt", "timeout 5 sed -i s/a/b/ есть.txt",
@@ -79,6 +81,25 @@ func TestIrreversibleClassAsksInNoask(t *testing.T) {
 	}
 	if len(passed) > 0 {
 		t.Errorf("в noask без вопроса прошло %d из %d:\n  %s", len(passed), len(cases), strings.Join(passed, "\n  "))
+	}
+}
+
+// Код в строке интерпретатора не разобрать: в safe и auto-edit — вопрос каждый
+// раз, в noask — без вопроса (слово владельца 24.11.2026 «noask это значит noask
+// не спрашивать»; на рабочей машине 4 вопроса из 8 за ход были такими). До этого
+// требование было обратным, и строки ниже стояли в TestIrreversibleClassAsksInNoask.
+func TestInlineCodeQuietOnlyInNoask(t *testing.T) {
+	cmds := []string{
+		"python3 -c \"open('есть.txt','w')\"", "perl -e 'unlink \"есть.txt\"'",
+		"ruby -e 'File.delete(\"есть.txt\")'", "node -e 'require(\"fs\").rmSync(\"есть.txt\")'",
+	}
+	for mode, want := range map[string]Decision{ModeSafe: DecisionAsk, ModeAutoEdit: DecisionAsk, ModeNoAsk: DecisionAllow} {
+		g := classGuard(t, mode)
+		for _, cmd := range cmds {
+			if got := decide(g, cmd); got.Decision != want || !got.Irreversible {
+				t.Errorf("%s: %q: %v (необратимо %v, %s), ждали %v", mode, cmd, got.Decision, got.Irreversible, got.Reason, want)
+			}
+		}
 	}
 }
 
@@ -165,6 +186,25 @@ func TestInlineInterpreterCodeIsIrreversible(t *testing.T) {
 		got := decide(g, cmd)
 		if got.Irreversible != want {
 			t.Errorf("%q: необратимо %v, ждали %v (%s)", cmd, got.Irreversible, want, got.Reason)
+		}
+	}
+}
+
+// Вопрос мимо сеансовых разрешений помечен EachTime: окно подтверждения не
+// предлагает ответ «на сеанс». На рабочей машине человек 41 раз за час жал [t]
+// на `python3 -c`, `web_search` и правку сверх предела — вопрос возвращался.
+func TestEachTimeMarksAsksSessionCannotLift(t *testing.T) {
+	g := classGuard(t, ModeSafe)
+	for cmd, want := range map[string]bool{
+		"python3 -c 'print(1)'":       true, // необратимое: код в строке
+		"$X -rf tmp":                  true, // имя программы известно только при запуске
+		"git -c core.pager=less log":  true, // ключ запускает другую программу
+		"echo a; echo b":              true, // составная: разрешения на сеанс её не покрывают
+		"ls -la":                      false,
+		"python3 privatescripts/a.py": false,
+	} {
+		if got := decide(g, cmd); got.EachTime != want {
+			t.Errorf("%q: EachTime %v, ждали %v (%s, %s)", cmd, got.EachTime, want, got.Decision, got.Reason)
 		}
 	}
 }

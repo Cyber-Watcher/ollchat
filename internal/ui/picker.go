@@ -402,6 +402,6 @@ func (m *Model) applyResumed(rec *session.Saved) {
 			}
 		}
 	}
-	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+	m.meter.Used = m.estimatedUsed()
 	m.meter.Exact = false
 }

@@ -263,9 +263,11 @@ func (r *Runner) gate(name string, plan *tools.Plan, rawArgs string, d permissio
 		}
 	}
 	// Т7, О15: после чужого текста исходящий запрос — только с согласия человека.
-	// В yolo не спрашивается ничего (слово владельца 16.10.2026).
+	// В yolo не спрашивается ничего (слово владельца 16.10.2026), в noask тоже:
+	// «noask это значит noask не спрашивать» (24.11.2026; на рабочей машине — 2
+	// вопроса из 8 за ход на http_fetch после прочитанной страницы).
 	if r.UntrustedGate && isEgress(name) && r.tainted && d.Decision == permissions.DecisionAllow &&
-		(r.Guard == nil || r.Guard.Mode() != permissions.ModeYolo) {
+		(r.Guard == nil || (r.Guard.Mode() != permissions.ModeYolo && r.Guard.Mode() != permissions.ModeNoAsk)) {
 		return permissions.Result{Decision: permissions.DecisionAsk,
 			Reason: "в разговоре чужой текст (страница, книга, документ) — исходящий запрос только с вашего согласия (agent.untrusted_gate)"}
 	}

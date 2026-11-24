@@ -158,12 +158,21 @@ func (c *Conversation) HasAnswer() bool {
 
 // EstimatedChars возвращает суммарную длину истории в байтах —
 // основа для оценки заполнения контекста до первого ответа сервера.
-func (c *Conversation) EstimatedChars() int {
+func (c *Conversation) EstimatedChars() int { return c.EstimatedRequestChars(true) }
+
+// EstimatedRequestChars — EstimatedChars, где мышление считается, только если
+// оно уходит серверу (thinking): API OpenAI его в историю не берёт
+// (oai.convertMessages), и у vLLM, SGLang, LiteLLM оно окна не занимает —
+// с ним индикатор после сжатия показывал больше, чем есть (этап 133).
+func (c *Conversation) EstimatedRequestChars(thinking bool) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := len(c.system)
 	for _, m := range c.messages {
-		n += len(m.Content) + len(m.Thinking)
+		n += len(m.Content)
+		if thinking {
+			n += len(m.Thinking)
+		}
 		for _, tc := range m.ToolCalls {
 			n += len(tc.Function.Name) + len(tc.Function.ArgumentsJSON())
 		}

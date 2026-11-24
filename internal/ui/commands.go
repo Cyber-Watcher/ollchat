@@ -399,7 +399,7 @@ func (m *Model) compactCmd(arg string) tea.Cmd {
 	if dropped > 0 {
 		m.lastExchange = -1 // номера сообщений сдвинулись — /retry откатил бы не то
 	}
-	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+	m.meter.Used = m.estimatedUsed()
 	m.meter.Exact = false
 	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
 		"история сокращена: отброшено сообщений %d, осталось %d", dropped, m.conv.Len())})
@@ -425,7 +425,7 @@ func (m *Model) retryCmd(_ string) tea.Cmd {
 	dropped := m.conv.TruncateTo(m.lastExchange)
 	question := m.lastQuestion
 	m.lastExchange, m.lastQuestion = -1, ""
-	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+	m.meter.Used = m.estimatedUsed()
 	m.meter.Exact = false
 	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
 		"/retry: последний обмен убран из истории (сообщений %d), вопрос отправлен заново", dropped)})
@@ -808,10 +808,13 @@ func (m *Model) contextCmd(arg string) tea.Cmd {
 
 	// Окно OpenAI-совместимого сервера задаёт запуск движка (--max-model-len,
 	// --context-length, -c), а не запрос: num_ctx он не принимает (этап 127).
-	if (sub == "set" || sub == "max") && m.server != nil && m.server.IsOpenAI() {
+	// add — тоже: до этапа 133 его здесь не было, и подсказка при заполнении
+	// окна звала «/context add 32k» на vLLM, где окно уже максимальное.
+	if (sub == "set" || sub == "max" || sub == "add") && m.server != nil && m.server.IsOpenAI() {
 		m.addBlock(block{kind: blockError, text: "/context " + sub + ": у сервера " + m.server.Name +
-			" API OpenAI — окно задаёт запуск движка, а не запрос; ollchat берёт его из /v1/models " +
-			"или из context_length сервера в конфиге"})
+			" API OpenAI — окно задаёт запуск движка, а не запрос (" + ctxmeter.FormatTokens(m.meter.Capacity) +
+			"); ollchat берёт его из /v1/models или из context_length сервера в конфиге. " +
+			"Освободить место: /compact [N] или /clear"})
 		return nil
 	}
 
@@ -1024,7 +1027,7 @@ func (m *Model) addFileCmd(arg string) tea.Cmd {
 func (m *Model) attach(rel, body, notice string) tea.Cmd {
 	content := fmt.Sprintf("Содержимое файла %s:\n\n```\n%s\n```", rel, body)
 	m.conv.Append(ollama.Message{Role: ollama.RoleUser, Content: content})
-	m.meter.Used = ctxmeter.EstimateChars(m.conv.EstimatedChars())
+	m.meter.Used = m.estimatedUsed()
 	m.meter.Exact = false
 	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
 		"%s (%d байт, ≈%s токенов)",

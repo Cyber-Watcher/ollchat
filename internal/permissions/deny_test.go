@@ -259,6 +259,29 @@ func TestComputedProgramNameAsks(t *testing.T) {
 
 // Разрешения не расширились: `Bash(ls:*)` по-прежнему разрешает только
 // строку, которая начинается с ls, — путь, кавычки и обёртка спрашивают.
+// Переменная цикла с буквальными значениями — не вычисляемое имя: каждое
+// значение разбирается как команда и сверяется с запретами. На рабочей машине
+// `for t in jq rg …; do $t --version` давало вопрос и в noask (2 из 8 за ход).
+// Неизвестные значения и переприсваивание оставляют имя неизвестным.
+func TestLoopVariableNamesAreChecked(t *testing.T) {
+	g := guardWith(t, []string{"Bash(*)"}, []string{"Bash(rm:*)"}, ModeNoAsk)
+	for cmd, want := range map[string]Decision{
+		"for t in jq rg fd; do $t --version; done":                                                                          DecisionAllow,
+		"for t in jq yq; do echo -n \"$t: \"; ${t} --version 2>&1 | head -1; done":                                          DecisionAllow,
+		"for t in jq rg fd yq duf dust; do echo -n \"$t: \"; command -v $t >/dev/null && $t --version 2>&1 | head -1; done": DecisionAllow,
+		"for t in ls rm; do $t -rf x; done":                                                                                 DecisionDeny,
+		"for t in jq; do t=rm; $t -rf x; done":                                                                              DecisionAsk,
+		"for t in jq; do read t; $t -rf x; done":                                                                            DecisionAsk,
+		"for t in $(cat list); do $t -rf x; done":                                                                           DecisionAsk,
+		"for t in r*; do $t -rf x; done":                                                                                    DecisionAsk,
+		"for t in jq; do $u -rf x; done":                                                                                    DecisionAsk,
+	} {
+		if got := decide(g, cmd); got.Decision != want {
+			t.Errorf("%q: %v (%s), ждали %v", cmd, got.Decision, got.Reason, want)
+		}
+	}
+}
+
 func TestAllowRulesNotLoosened(t *testing.T) {
 	g := guardWith(t, []string{"Bash(ls:*)"}, nil, ModeSafe)
 	if got := decide(g, "ls -la"); got.Decision != DecisionAllow {

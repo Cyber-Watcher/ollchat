@@ -234,6 +234,8 @@ type cliFlags struct {
 	graphEmbedStale       *string
 	graphQueueDoubts      *string
 	graphVerdicts         *string
+	graphReviewExport     *string
+	graphReviewApply      *string
 	graphEmbedNode        *string
 	graphEmbedEvery       *string
 	graphEmbedLimit       *int
@@ -724,7 +726,11 @@ func parseFlagsNoParse() *cliFlags {
 		"посчитать векторы понятий графа — смысловой вход: --graph-embed books")
 	f.graphQueueDoubts = flag.String("graph-queue-doubts", "",
 		"положить спорные вердикты разбора двойников в очередь человеку: --graph-queue-doubts books --graph-verdicts verdicts.tsv")
-	f.graphVerdicts = flag.String("graph-verdicts", "", "с --graph-queue-doubts: файл вердиктов арбитра (TSV)")
+	f.graphVerdicts = flag.String("graph-verdicts", "", "с --graph-queue-doubts и --graph-review-apply: файл вердиктов (TSV)")
+	f.graphReviewExport = flag.String("graph-review-export", "",
+		"выгрузить очередь разбора пар (/graph review) в TSV с типами, весом и выдержками: --graph-review-export books > queue.tsv")
+	f.graphReviewApply = flag.String("graph-review-apply", "",
+		"записать решения по парам очереди разбора из TSV (id_a, id_b, вердикт, причина), автор — claude: --graph-review-apply books --graph-verdicts verdicts.tsv [--kb-dry-run]")
 	f.graphEmbedEdges = flag.String("graph-embed-edges", "",
 		"посчитать индекс троек — вход в граф по связи «X —тип→ Y»: --graph-embed-edges books (с --kb-dry-run — только сказать сколько)")
 	f.graphEmbedStale = flag.String("graph-embed-stale", "",
@@ -879,6 +885,7 @@ func writingFlags(f *cliFlags) map[string]func() bool {
 		"--graph-merge":           notEmpty(f.graphMerge),
 		"--graph-unmerge":         notEmpty(f.graphUnmerge),
 		"--graph-queue-doubts":    notEmpty(f.graphQueueDoubts),
+		"--graph-review-apply":    notEmpty(f.graphReviewApply),
 		"--graph-compact":         notEmpty(f.graphCompact),
 		"--graph-forget-chunks":   notEmpty(f.graphForgetChunks),
 		"--graph-drop-dead-marks": notEmpty(f.graphDropDeadMarks),
@@ -985,6 +992,8 @@ func commands(f *cliFlags) []cliCommand {
 		{name: "--graph-merge", on: str(f.graphMerge), can: cmdDry},
 		{name: "--graph-resolve", on: str(f.graphResolve)},
 		{name: "--graph-queue-doubts", on: str(f.graphQueueDoubts)},
+		{name: "--graph-review-export", on: str(f.graphReviewExport)},
+		{name: "--graph-review-apply", on: str(f.graphReviewApply), can: cmdDry},
 		{name: "--graph-embed-stale", on: str(f.graphEmbedStale), can: cmdDry},
 		{name: "--graph-embed-edges", on: str(f.graphEmbedEdges), can: cmdDry},
 		{name: "--graph-embed", on: str(f.graphEmbed)},
@@ -1462,6 +1471,13 @@ func dispatchCLI(cfg *config.Config, f *cliFlags) (bool, error) {
 			return true, fmt.Errorf("--graph-queue-doubts требует --graph-verdicts <файл.tsv>")
 		}
 		return true, gmaint.QueueDoubts(os.Stdout, cfg, *f.graphQueueDoubts, *f.graphVerdicts)
+	case *f.graphReviewExport != "":
+		return true, gmaint.ReviewExport(os.Stdout, cfg, *f.graphReviewExport)
+	case *f.graphReviewApply != "":
+		if *f.graphVerdicts == "" {
+			return true, fmt.Errorf("--graph-review-apply требует --graph-verdicts <файл.tsv>")
+		}
+		return true, gmaint.ReviewApply(os.Stdout, cfg, *f.graphReviewApply, *f.graphVerdicts, *f.kbDry)
 	case *f.graphEmbedStale != "":
 		return true, gmaint.EmbedStale(os.Stdout, cfg, *f.graphEmbedStale, *f.kbDry)
 	case *f.graphEmbedEdges != "":

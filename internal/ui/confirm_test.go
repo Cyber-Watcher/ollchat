@@ -99,6 +99,42 @@ func TestConfirmKeysAnswer(t *testing.T) {
 	}
 }
 
+// Вопрос, который разрешение на сеанс не снимет (EachTime: необратимое, чужой
+// текст, предел правок), не предлагает [a]/[t], и эти клавиши ничего не решают:
+// на рабочей машине человек 41 раз за час жал [t], а вопрос возвращался.
+func TestConfirmEachTimeOffersNoSessionAnswers(t *testing.T) {
+	for _, key := range []string{"a", "t", "ф", "е"} {
+		m, clk := confirmModel(t)
+		reply := make(chan agent.Answer, 1)
+		m.Update(agentEventMsg{gen: m.gen.run, ev: agent.Event{Kind: agent.EventToolConfirm,
+			Confirm: &agent.ConfirmRequest{Tool: "bash", Title: "bash(python3 -c …)", Kind: permissions.KindBash,
+				EachTime: true, Reply: reply}}})
+		clk.advance(confirmQuiet)
+		view := m.confirmView()
+		if strings.Contains(view, "[t]") || strings.Contains(view, "[a]") || !strings.Contains(view, "спрашивается каждый раз") {
+			t.Fatalf("окно предлагает ответ на сеанс:\n%s", view)
+		}
+		m.Update(keyPress(key))
+		if got, ok := answerOf(reply); ok {
+			t.Errorf("%q: ушёл ответ %v — клавиша, которой окно не предлагало", key, got)
+		}
+		if m.confirm == nil {
+			t.Errorf("%q: окно закрылось без ответа", key)
+		}
+		m.Update(keyPress("y"))
+		if got, ok := answerOf(reply); !ok || got != agent.AnswerYes {
+			t.Errorf("после %q: «да» не принято (%v, %v)", key, got, ok)
+		}
+	}
+	// Обычный вопрос по-прежнему предлагает ответ на сеанс.
+	m, clk := confirmModel(t)
+	askConfirm(m, "bash(make)")
+	clk.advance(confirmQuiet)
+	if view := m.confirmView(); !strings.Contains(view, "[t]") {
+		t.Fatalf("обычный вопрос без [t]:\n%s", view)
+	}
+}
+
 // Стрелки и j/k листают показ команды, а не отвечают.
 func TestConfirmScrollKeysDoNotAnswer(t *testing.T) {
 	m, clk := confirmModel(t)

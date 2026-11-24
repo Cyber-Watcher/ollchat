@@ -78,6 +78,10 @@ type Result struct {
 	// Irreversible — действие из класса «необратимое» (irreversible.go):
 	// окно подтверждения говорит об этом, и сеансовых разрешений оно не даёт.
 	Irreversible bool
+	// EachTime — вопрос задаётся мимо сеансовых разрешений: необратимое,
+	// вычисляемое имя программы, ключ, запускающий другую. Окно подтверждения
+	// не предлагает ответ «на сеанс» — он вопроса не снимет.
+	EachTime bool
 }
 
 // Guard объединяет правила, песочницу, режим и разрешения, выданные на сеанс.
@@ -280,9 +284,11 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 	// Имя программы станет известно только при запуске (`$X -rf ~`,
 	// `$(echo rm) …`, `{rm,-rf,~}`): сверить его с запретами нельзя. Решает
 	// человек — в любом режиме, при любых сеансовых разрешениях и правилах
-	// allow: иначе `X=rm; $X -rf ~` проходил бы в noask молча.
+	// allow: иначе `X=rm; $X -rf ~` проходил бы в noask молча. Переменная цикла
+	// с буквальными значениями (`for t in jq rg; do $t --version`) сюда не
+	// попадает: её значения разобраны как команды (commandScan.loopVars).
 	if verdict.unknown != "" && mode != ModeYolo {
-		return Result{Decision: DecisionAsk, Reason: fmt.Sprintf(
+		return Result{Decision: DecisionAsk, EachTime: true, Reason: fmt.Sprintf(
 			"имя программы в «%s» станет известно только при запуске, "+
 				"и сверить его с запретами нельзя: требуется подтверждение", verdict.unknown)}
 	}
@@ -291,7 +297,7 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 	// с запретами выше, но решает человек — в любом режиме, при любых
 	// сеансовых разрешениях и правилах allow (слово владельца 08.10.2026).
 	if verdict.named != "" && mode != ModeYolo {
-		return Result{Decision: DecisionAsk, Reason: fmt.Sprintf(
+		return Result{Decision: DecisionAsk, EachTime: true, Reason: fmt.Sprintf(
 			"ключ «%s» запускает другую программу: она сверена с запретами, "+
 				"но требуется подтверждение в любом режиме, кроме yolo", verdict.named)}
 	}
@@ -329,7 +335,7 @@ func (g *Guard) checkBash(req Request, mode string, granted []Rule, toolGranted 
 		// Составную команду разрешаем только явным подтверждением
 		// (в режиме noask — по общему правилу режима). Разрешение инструмента
 		// целиком на неё не распространяется: слишком широкий доступ.
-		return Result{Decision: applyMode(DecisionAsk, KindBash, mode),
+		return Result{Decision: applyMode(DecisionAsk, KindBash, mode), EachTime: true,
 			Reason: "составная команда: требуется подтверждение"}
 	}
 
@@ -370,7 +376,7 @@ func (g *Guard) irreversible(req Request, mode string, scan *commandScan) (Resul
 	if g.sandbox != nil {
 		root = g.sandbox.RealRoot()
 	}
-	why := g.set.irreversibleBy(req.Kind, req.Target, root, scan)
+	why, inline := g.set.irreversibleBy(req.Kind, req.Target, root, scan)
 	if why == "" && req.Kind == KindWrite && g.WriteIrreversible != nil {
 		why = g.WriteIrreversible(req.Target)
 	}
@@ -380,7 +386,13 @@ func (g *Guard) irreversible(req Request, mode string, scan *commandScan) (Resul
 	if mode == ModeYolo {
 		return Result{Decision: DecisionAllow, Irreversible: true, Reason: "режим yolo: без вопроса (" + why + ")"}, true
 	}
-	return Result{Decision: DecisionAsk, Irreversible: true,
+	// Код в строке — не действие из списка, а строка, которую не разобрать: в
+	// noask без вопроса (слово владельца 24.11.2026). Необратимое по правилу и
+	// встроенное (sed -i, git push, «>» в файл) спрашивается и в noask.
+	if inline && mode == ModeNoAsk {
+		return Result{Decision: DecisionAllow, Irreversible: true, Reason: "режим noask: без вопроса (" + why + ")"}, true
+	}
+	return Result{Decision: DecisionAsk, Irreversible: true, EachTime: true,
 		Reason: why + " — откат дольше 10 минут или невозможен: спрашивается каждый раз"}, true
 }
 

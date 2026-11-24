@@ -508,8 +508,14 @@ func (m *Model) confirmView() string {
 	} else {
 		b.WriteString(styConfirmKeys.Render("[y] выполнить   [n] отклонить") + "\n")
 	}
-	b.WriteString(styConfirmKeys.Render("[a] это действие до конца сеанса   [t] весь инструмент " +
-		c.Tool + " до конца сеанса"))
+	if c.EachTime {
+		// Разрешение на сеанс такой вопрос не снимет (agent.ConfirmRequest.EachTime):
+		// предлагать [a]/[t] — обещать то, чего не будет.
+		b.WriteString(styConfirmKeys.Render(confirmEachTimeHint))
+	} else {
+		b.WriteString(styConfirmKeys.Render("[a] это действие до конца сеанса   [t] весь инструмент " +
+			c.Tool + " до конца сеанса"))
+	}
 	return styConfirmBox.Width(m.width - 2).Render(b.String())
 }
 

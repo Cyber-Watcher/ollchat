@@ -36,7 +36,7 @@ var (
 		"--kb-flag-toc", "--graph-build", "--graph-embed", "--graph-embed-stale",
 		"--graph-embed-edges", "--graph-embed-follow", "--graph-communities",
 		"--graph-drift", "--graph-summaries", "--graph-recheck", "--graph-findings",
-		"--graph-merge", "--graph-unmerge", "--graph-queue-doubts", "--graph-compact",
+		"--graph-merge", "--graph-unmerge", "--graph-queue-doubts", "--graph-review-apply", "--graph-compact",
 		"--graph-forget-chunks", "--graph-drop-dead-marks", "--graph-deny-aliases",
 		"--graph-rebase-books", "--graph-record-books", "--graph-groups-build",
 		"--graph-drop-book", "--graph-resolve", "--graph-tune", "--graph-bench",
@@ -48,7 +48,7 @@ var (
 	// архивов с ведущей машины; читателю разрешены.
 	flagsReading = []string{
 		"--version", "--init-config", "--kb-list", "--kb-doctor", "--kb-rebase",
-		"--graph-pending", "--nodes", "--role-servers", "--role-check", "--graph-doctor", "--graph-repartition-due",
+		"--graph-pending", "--nodes", "--role-servers", "--role-check", "--graph-doctor", "--graph-review-export", "--graph-repartition-due",
 		// Пишут файл конфига, а не коллекцию и граф: читателю тоже нужен свой
 		// сервер чата и эмбеддера для вопросов (этап 123).
 		"--use-graph-server", "--use-embed-server", "--use-chat-server",

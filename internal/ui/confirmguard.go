@@ -35,6 +35,10 @@ const confirmQuiet = 600 * time.Millisecond
 // confirmQuietHint — строка окна, пока ответы не принимаются.
 const confirmQuietHint = "… ответ примется после полсекунды без нажатий: набранное раньше не засчитывается"
 
+// confirmEachTimeHint — строка окна вместо [a]/[t], когда разрешение на сеанс
+// вопрос не снимет (agent.ConfirmRequest.EachTime).
+const confirmEachTimeHint = "спрашивается каждый раз: разрешение на сеанс этот вопрос не снимет — только [y] или [n]"
+
 // confirmQuietMsg — пора проверить, выдержана ли тишина. seq отличает
 // последний взвод защиты от прежних: устаревшие сообщения отбрасываются.
 type confirmQuietMsg struct{ seq int }

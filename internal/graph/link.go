@@ -77,6 +77,10 @@ const (
 
 	LinkByJudge = "арбитр"
 	LinkByHuman = "человек"
+	// LinkByClaude — решения, записанные за человека ключом --graph-review-apply.
+	// Отдельный автор, а не «человек»: размеченный человеком набор остаётся
+	// чистым для замеров арбитров, а эти решения видны в журнале и снимаются.
+	LinkByClaude = "claude"
 
 	LinkFromBuild   = "сборка"
 	LinkFromDoubles = "двойники"
@@ -181,7 +185,9 @@ func (l *Links) Judged() []LinkRec {
 	defer l.mu.RUnlock()
 	var out []LinkRec
 	for _, i := range l.last {
-		if r := l.recs[i]; r.Verdict == LinkYes && r.By != LinkByHuman {
+		// Решение за человека (LinkByClaude) сюда не идёт: его «ДА» — склейка
+		// в merges.jsonl, а «n» судейского режима склеек не снимает.
+		if r := l.recs[i]; r.Verdict == LinkYes && r.By != LinkByHuman && r.By != LinkByClaude {
 			out = append(out, r)
 		}
 	}
@@ -527,15 +533,30 @@ func askLinkJudge(ctx context.Context, judge Extractor, name, typ string, ent En
 // отмена решения арбитра, дальнейшие встречи имени заведут свой узел; упоминания,
 // уже отданные чужому узлу, назад не переносятся — об этом говорит вызывающий.
 func (g *Graph) DecideLink(r LinkRec, verdict, why string) error {
+	return g.DecideLinkBy(r, verdict, LinkByHuman, why)
+}
+
+// DecideLinkBy — то же решение с названным автором: LinkByHuman из окна
+// разбора, LinkByClaude из ключа --graph-review-apply. Автор пишется в журнал
+// связываний и в причину и уровень склейки, чтобы решения одного автора можно
+// было найти и снять.
+func (g *Graph) DecideLinkBy(r LinkRec, verdict, by, why string) error {
 	if g.links == nil {
 		return fmt.Errorf("у графа нет журнала связываний")
+	}
+	if by != LinkByHuman && by != LinkByClaude {
+		return fmt.Errorf("автор решения должен быть %q или %q, получено %q", LinkByHuman, LinkByClaude, by)
+	}
+	level := "human"
+	if by == LinkByClaude {
+		level = LinkByClaude
 	}
 	other := r.To
 	if other == 0 {
 		other = r.Cand
 	}
 	dec := LinkRec{Norm: r.Norm, Name: r.Name, From: r.From, Cand: other, CandName: r.CandName,
-		Cos: r.Cos, Verdict: verdict, By: LinkByHuman, Source: r.Source, Why: why, Chunk: r.Chunk}
+		Cos: r.Cos, Verdict: verdict, By: by, Source: r.Source, Why: why, Chunk: r.Chunk}
 	if dec.CandName == "" {
 		dec.CandName = r.ToName
 	}
@@ -548,8 +569,22 @@ func (g *Graph) DecideLink(r LinkRec, verdict, why string) error {
 			}
 		}
 		if from != 0 && other != 0 && from != other {
-			if _, err := g.merges.Add([]MergeRec{{From: from, To: other, Cos: r.Cos, Verdict: LinkYes,
-				Why: "человек, /graph review: " + why, Level: "human"}}); err != nil {
+			// Кто выживет. В окне человек видит обе стороны с весом и склеивает
+			// «новое имя → понятие»; решение из файла идёт без глаз, и по этому
+			// правилу узел с сотней упоминаний ушёл бы в узел с одним, отдав ему
+			// имя. Поэтому у LinkByClaude выживает тот, у кого упоминаний больше;
+			// при равенстве — как в окне. Запись журнала связываний от этого
+			// не зависит: пара в ней та же, иначе она не снялась бы с очереди.
+			src, dst := from, other
+			if by == LinkByClaude {
+				a, okA := g.ents.Get(from)
+				b, okB := g.ents.Get(other)
+				if okA && okB && a.Count > b.Count {
+					src, dst = other, from
+				}
+			}
+			if _, err := g.merges.Add([]MergeRec{{From: src, To: dst, Cos: r.Cos, Verdict: LinkYes,
+				Why: by + ", /graph review: " + why, Level: level}}); err != nil {
 				return err
 			}
 		}
@@ -559,4 +594,122 @@ func (g *Graph) DecideLink(r LinkRec, verdict, why string) error {
 		return fmt.Errorf("решение должно быть ДА или НЕТ, получено %q", verdict)
 	}
 	return g.links.add(dec)
+}
+
+// ReviewApplied — итог записи решений из файла (ApplyReviewTSV).
+type ReviewApplied struct {
+	Yes, No    int // записано решений
+	OneNode    int // из «ДА»: обе стороны уже один узел, записан только журнал
+	Left       int // «?» в файле: пара остаётся человеку
+	NotInQueue int // пары нет в очереди: уже решена или номера не те
+	Stale      int // сторона уже поглощена другим узлом — пара оставлена человеку
+}
+
+// ApplyReviewTSV пишет решения по парам очереди разбора из TSV: заголовок
+// и колонки «id_a», «id_b», «вердикт» (ДА, НЕТ или ?), по желанию «причина»;
+// разделитель — табуляция. Это окно /graph review без человека: каждое решение
+// идёт через DecideLinkBy с автором by.
+//
+// Решается только то, что сейчас стоит в очереди (последняя запись по паре —
+// «?»): решение человека, принятое после выгрузки очереди, файл не перекроет.
+// Пара, у которой сторона уже поглощена третьим узлом, не трогается: судили
+// два имени, а узел теперь несёт третье, и Merges.Add такую склейку молча
+// отбросил бы, оставив в журнале «ДА» без склейки. «НЕТ» по паре, чьи стороны
+// уже один узел, тоже не пишется — оно противоречит графу. При dry ничего
+// не пишется, счёт тот же.
+func (g *Graph) ApplyReviewTSV(r io.Reader, by string, dry bool) (ReviewApplied, error) {
+	var res ReviewApplied
+	if g.links == nil {
+		return res, fmt.Errorf("у графа нет журнала связываний")
+	}
+	type pair struct{ from, other uint32 }
+	queue := map[pair]LinkRec{}
+	for _, q := range g.links.Queue() {
+		if q.From != 0 && q.Cand != 0 {
+			queue[pair{q.From, q.Cand}] = q
+		}
+	}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return res, fmt.Errorf("заголовок TSV: %w", err)
+		}
+		return res, fmt.Errorf("заголовок TSV: файл пуст")
+	}
+	head := strings.Split(strings.TrimRight(sc.Text(), "\r"), "\t")
+	col := map[string]int{}
+	for i, h := range head {
+		col[strings.TrimSpace(h)] = i
+	}
+	for _, need := range []string{"id_a", "id_b", "вердикт"} {
+		if _, ok := col[need]; !ok {
+			return res, fmt.Errorf("в TSV нет колонки %q (есть: %s)", need, strings.Join(head, ", "))
+		}
+	}
+	field := func(row []string, name string) string {
+		i, ok := col[name]
+		if !ok || i >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(row[i])
+	}
+	for line := 2; sc.Scan(); line++ {
+		text := strings.TrimRight(sc.Text(), "\r")
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		row := strings.Split(text, "\t")
+		verdict := field(row, "вердикт")
+		if verdict != LinkYes && verdict != LinkNo && verdict != LinkDoubt {
+			return res, fmt.Errorf("строка %d: вердикт должен быть ДА, НЕТ или ?, получено %q", line, verdict)
+		}
+		from, err := strconv.ParseUint(field(row, "id_a"), 10, 32)
+		if err != nil {
+			return res, fmt.Errorf("строка %d: id_a: %w", line, err)
+		}
+		other, err := strconv.ParseUint(field(row, "id_b"), 10, 32)
+		if err != nil {
+			return res, fmt.Errorf("строка %d: id_b: %w", line, err)
+		}
+		if verdict == LinkDoubt {
+			res.Left++
+			continue
+		}
+		key := pair{uint32(from), uint32(other)}
+		rec, ok := queue[key]
+		if !ok {
+			res.NotInQueue++
+			continue
+		}
+		liveFrom, liveOther := g.merges.Resolve(key.from), g.merges.Resolve(key.other)
+		same := liveFrom == liveOther
+		if (!same && (liveFrom != key.from || liveOther != key.other)) || (same && verdict == LinkNo) {
+			res.Stale++
+			continue
+		}
+		if !dry {
+			why := cutRunes(field(row, "причина"), 120)
+			if why == "" {
+				why = "разбор очереди"
+			}
+			if err := g.DecideLinkBy(rec, verdict, by, why); err != nil {
+				return res, fmt.Errorf("строка %d: %w", line, err)
+			}
+		}
+		delete(queue, key) // вторая строка о той же паре — уже не в очереди
+		switch {
+		case verdict == LinkNo:
+			res.No++
+		case same:
+			res.Yes++
+			res.OneNode++
+		default:
+			res.Yes++
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return res, fmt.Errorf("чтение TSV: %w", err)
+	}
+	return res, nil
 }

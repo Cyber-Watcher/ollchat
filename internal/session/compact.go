@@ -160,6 +160,49 @@ func (c *Conversation) CompactWith(keep int, summary string) int {
 	return cut
 }
 
+// PrunedToolOutput — что остаётся на месте вывода инструмента, убранного
+// PruneToolOutputs.
+const PrunedToolOutput = "[вывод убран при сжатии истории, чтобы освободить окно; если он нужен — повтори вызов]"
+
+// PruneToolOutputs заменяет пометкой выводы инструментов старше последних
+// keepTurns ходов (ход начинается сообщением человека); вызовы с аргументами
+// и ответы модели остаются, картинки из выводов уходят. Пересказа моделью нет,
+// поэтому нет и выдуманных путей, из-за которых агентный режим не сжимали
+// сводкой (решение 04.09.2026). Книга: «apply selective pruning first … then
+// summarization» (этап 112, Ш1). Замер на рабочей машине: выводы инструментов
+// — 52,4 % истории сеанса из 11 ходов, старше двух последних ходов — 45,1 %.
+// Возвращает, сколько выводов убрано и сколько байт освобождено (мера та же,
+// что у EstimatedChars).
+func (c *Conversation) PruneToolOutputs(keepTurns int) (n, freed int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if keepTurns < 1 {
+		return 0, 0
+	}
+	cut, seen := 0, 0
+	for i := len(c.messages) - 1; i >= 0; i-- {
+		if c.messages[i].Role == ollama.RoleUser {
+			if seen++; seen == keepTurns {
+				cut = i
+				break
+			}
+		}
+	}
+	for i := 0; i < cut; i++ {
+		m := &c.messages[i]
+		if m.Role != ollama.RoleTool || len(m.Content) <= len(PrunedToolOutput) && len(m.Images) == 0 {
+			continue
+		}
+		if len(m.Content) > len(PrunedToolOutput) {
+			freed += len(m.Content) - len(PrunedToolOutput)
+			m.Content = PrunedToolOutput
+		}
+		m.Images = nil
+		n++
+	}
+	return n, freed
+}
+
 // cutIndex — с какого сообщения начинается сохраняемый хвост при keep
 // последних. Хвост не начинается с ответа инструмента без его запроса.
 func (c *Conversation) cutIndex(keep int) int {
