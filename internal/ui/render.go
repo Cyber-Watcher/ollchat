@@ -28,6 +28,11 @@ const (
 	// строка о том, во что обошлось открытие графа, красится по порогам,
 	// и общий стиль заметки затёр бы этот сигнал.
 	blockRaw
+
+	// blockCompact — строка о сжатии истории: что сжимается и «было → стало».
+	// Раньше это была бледная подсказка, и в агентном ходе она уезжала вверх
+	// под выводом инструментов незамеченной (этап 134).
+	blockCompact
 )
 
 // block — одна запись ленты диалога.
@@ -176,6 +181,9 @@ func (r *renderer) Render(b block, showThinking bool) string {
 
 	case blockHint:
 		return styHint.Render("△ " + indentRest(wrap(b.text, r.width-2), 2))
+
+	case blockCompact:
+		return styCompactMark.Render("⇣") + " " + styCompactText.Render(indentRest(wrap(b.text, r.width-2), 2))
 
 	case blockError:
 		return styError.Render("✗ " + wrap(b.text, r.width-2))

@@ -80,6 +80,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case archiveTickMsg:
 		return m, m.onArchiveTick()
 
+	case ctxAnimMsg:
+		return m, m.onCtxAnim()
+
 	case archiveDoneMsg:
 		m.onArchiveDone(msg)
 		return m, nil

@@ -46,6 +46,14 @@ type Chatter interface {
 // сводку и обратно под диалог (этап 115).
 func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Message,
 	keepAlive string, options map[string]any) (string, ollama.Stats, error) {
+	return SummarizeWith(ctx, cl, model, msgs, keepAlive, options, nil)
+}
+
+// SummarizeWith — Summarize, которая по ходу ответа сообщает written, сколько
+// символов сводки уже написано: индикатор сжатия показывает, что модель пишет,
+// а не висит (этап 134). written зовётся из той же горутины, что и Summarize.
+func SummarizeWith(ctx context.Context, cl Chatter, model string, msgs []ollama.Message,
+	keepAlive string, options map[string]any, written func(chars int)) (string, ollama.Stats, error) {
 	if len(msgs) == 0 {
 		return "", ollama.Stats{}, errors.New("сжимать нечего")
 	}
@@ -69,6 +77,9 @@ func Summarize(ctx context.Context, cl Chatter, model string, msgs []ollama.Mess
 		switch ev.Kind {
 		case ollama.EventContent:
 			b.WriteString(ev.Text)
+			if written != nil {
+				written(b.Len())
+			}
 		case ollama.EventDone:
 			stats = ev.Stats
 			done = true

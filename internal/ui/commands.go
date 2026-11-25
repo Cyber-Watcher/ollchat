@@ -395,6 +395,7 @@ func (m *Model) compactCmd(arg string) tea.Cmd {
 			return nil
 		}
 	}
+	from := m.meter.Used
 	dropped := m.conv.Compact(keep)
 	if dropped > 0 {
 		m.lastExchange = -1 // номера сообщений сдвинулись — /retry откатил бы не то
@@ -403,7 +404,7 @@ func (m *Model) compactCmd(arg string) tea.Cmd {
 	m.meter.Exact = false
 	m.addBlock(block{kind: blockNotice, text: fmt.Sprintf(
 		"история сокращена: отброшено сообщений %d, осталось %d", dropped, m.conv.Len())})
-	return nil
+	return m.dropCtx(from)
 }
 
 // retryCmd — /retry: убрать из истории последний обмен целиком (подмес, вопрос,

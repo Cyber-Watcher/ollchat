@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"github.com/Cyber-Watcher/ollchat/internal/permissions"
 )
 
@@ -325,8 +326,7 @@ func (m *Model) statusView() string {
 	segments := []string{modeStyle(mode).Render(mode)}
 
 	// Индикатор заполнения контекстного окна.
-	ctxText := m.meter.String(10)
-	segments = append(segments, ctxStyle(m.meter.Percent()).Render(ctxText))
+	segments = append(segments, m.ctxIndicator(time.Now()))
 
 	if m.job != nil {
 		segments = append(segments, m.spin.View()+" "+styStatusWarn.Render(m.jobStatus()))
@@ -439,6 +439,57 @@ func (m *Model) statusView() string {
 	}
 
 	return joinEnds(line, right, m.width)
+}
+
+// ctxBarWidth — ширина полосы индикатора контекста в строке состояния.
+const ctxBarWidth = 10
+
+// ctxIndicator рисует индикатор заполнения окна: обычно — цветом по проценту,
+// при сжатии истории — на оранжевой подложке (ctxAnim). Пока модель пишет
+// сводку, по полосе бежит отрезок, рядом время и сколько написано; после
+// сжатия число опускается от прежнего к новому.
+func (m *Model) ctxIndicator(now time.Time) string {
+	if m.compacting && m.meter.Capacity > 0 {
+		s := fmt.Sprintf("ctx %s/%s %s сжатие %s", ctxmeter.FormatTokens(m.meter.Used),
+			ctxmeter.FormatTokens(m.meter.Capacity), runningBar(ctxBarWidth, m.ctxAnim.frame),
+			shortDuration(now.Sub(m.ctxAnim.since)))
+		if w := m.ctxAnim.written; w != nil && w.Load() > 0 {
+			s += " · сводка ≈" + ctxmeter.FormatTokens(ctxmeter.EstimateChars(int(w.Load())))
+		}
+		return styCtxCompact.Render(s)
+	}
+	if m.ctxAnim.left > 0 && m.meter.Capacity > 0 {
+		shown := m.meter
+		shown.Used = m.ctxShown()
+		return styCtxCompact.Render(shown.String(ctxBarWidth))
+	}
+	return ctxStyle(m.meter.Percent()).Render(m.meter.String(ctxBarWidth))
+}
+
+// ctxShown — заполнение, которое показывает индикатор: во время отсчёта —
+// промежуточное между прежним и нынешним, иначе нынешнее.
+func (m *Model) ctxShown() int {
+	if m.ctxAnim.left <= 0 || m.ctxAnim.from <= m.meter.Used {
+		return m.meter.Used
+	}
+	return m.meter.Used + (m.ctxAnim.from-m.meter.Used)*m.ctxAnim.left/ctxDropFrames
+}
+
+// runningBar — полоса без известного конца: отрезок бежит по ней по кругу.
+// Сколько займёт сводка, заранее не знает никто, и заполненная доля была бы
+// выдумкой.
+func runningBar(width, frame int) string {
+	const seg = 3
+	start := frame % width
+	var b strings.Builder
+	for i := range width {
+		if (i-start+width)%width < seg {
+			b.WriteString("█")
+		} else {
+			b.WriteString("░")
+		}
+	}
+	return b.String()
 }
 
 // confirmHeight — сколько строк занимает панель подтверждения.

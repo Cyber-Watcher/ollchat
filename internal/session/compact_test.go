@@ -68,6 +68,25 @@ func TestSummarizeSendsTranscript(t *testing.T) {
 	}
 }
 
+// SummarizeWith по ходу ответа сообщает длину уже написанной сводки — по ней
+// индикатор сжатия показывает, что модель пишет (этап 134).
+func TestSummarizeWithReportsWritten(t *testing.T) {
+	first, second := "- файл настроек: config.toml\n", "- порт 11434"
+	cl := &scriptedChat{events: []ollama.Event{
+		{Kind: ollama.EventContent, Text: first},
+		{Kind: ollama.EventContent, Text: second},
+		{Kind: ollama.EventDone},
+	}}
+	var got []int
+	sum, _, err := SummarizeWith(context.Background(), cl, "m", history(), "", nil, func(n int) { got = append(got, n) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != len(first) || got[1] != len(sum) {
+		t.Fatalf("сообщено %v, ждали [%d %d]", got, len(first), len(sum))
+	}
+}
+
 func TestSummarizeFailures(t *testing.T) {
 	if _, _, err := Summarize(context.Background(), &scriptedChat{}, "m", nil, "", nil); err == nil {
 		t.Fatal("пустая история должна быть ошибкой")

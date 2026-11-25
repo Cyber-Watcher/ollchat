@@ -6,6 +6,7 @@ import (
 	"github.com/Cyber-Watcher/ollchat/internal/steplog"
 	"maps"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -212,6 +213,8 @@ type Model struct {
 	compacting    bool
 	compactText   string
 	compactCancel context.CancelFunc
+	// ctxAnim — индикатор контекста во время сжатия и сразу после него.
+	ctxAnim ctxAnim
 
 	// roleCancel снимает идущую проверку сервера (/graph-server,
 	// /embed-server); не nil, пока она идёт. Вторая такая команда при ней
@@ -973,10 +976,12 @@ func (m *Model) send(text string) tea.Cmd {
 	text = m.expandPastes(text)
 	m.pastes = nil
 
-	// Окно почти полно — сперва сжать историю сводкой, потом спрашивать
-	// (этап 91, R9.1). В агентном режиме — отказ с подсказкой.
-	if cmd, wait := m.compactBeforeSend(text); wait {
-		return cmd
+	// Окно почти полно — сперва сжать историю, потом спрашивать (этап 91, R9.1;
+	// в агентном режиме сперва без модели, этап 133). compact — сводка, которую
+	// вопрос ждёт, или кадры отсчёта индикатора после обрезки (этап 134).
+	compact, wait := m.compactBeforeSend(text)
+	if wait {
+		return compact
 	}
 
 	// Обмен начинается здесь: журнал пометит этим идентификатором всё до
@@ -1009,11 +1014,11 @@ func (m *Model) send(text string) tea.Cmd {
 		m.lendGraph(job.graphOpen)
 		prog := make(chan graph.OpenProgress, 64)
 		m.graphBarStart = time.Now()
-		return tea.Batch(runMixCmd(m.gen.mix, text, job, prog),
+		return tea.Batch(compact, runMixCmd(m.gen.mix, text, job, prog),
 			waitGraphProgress(m.gen.mix, prog), m.spin.Tick)
 	}
 
-	return m.startExchange(text, images, mixResult{})
+	return tea.Batch(compact, m.startExchange(text, images, mixResult{}))
 }
 
 // startExchange отправляет вопрос модели вместе с уже посчитанным подмесом.
@@ -1389,13 +1394,13 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 		// вызовы и аргументы остаются, пересказа и выдуманных путей нет (этап 133;
 		// до него ход здесь не начинался, а вопрос возвращался в поле, и человек
 		// стирал его, чтобы набрать /compact). Хватило — вопрос уходит сразу.
-		pct := 100 * m.meter.Used / m.meter.Capacity
+		from := m.meter.Used
 		if n, freed := m.conv.PruneToolOutputs(m.cfg.Agent.PruneKeepTurns); n > 0 {
 			used := max(m.meter.Used-ctxmeter.EstimateChars(freed), 0)
-			m.addBlock(block{kind: blockHint, text: fmt.Sprintf(
-				"окно заполнено на %d%% — убраны выводы %d вызовов инструментов старше %d последних ходов "+
-					"(≈%s токенов), сами вызовы остались",
-				pct, n, m.cfg.Agent.PruneKeepTurns, ctxmeter.FormatTokens(ctxmeter.EstimateChars(freed)))})
+			m.addBlock(block{kind: blockCompact, text: fmt.Sprintf(
+				"сжатие истории без модели: окно %s — убраны выводы %d вызовов инструментов старше %d последних ходов, "+
+					"сами вызовы остались",
+				ctxChange(from, used, m.meter.Capacity), n, m.cfg.Agent.PruneKeepTurns)})
 			_ = m.logger.Write(chatlog.KindSystem, fmt.Sprintf(
 				"История сжата без модели: убраны выводы %d вызовов инструментов, ≈%d токенов.", n, ctxmeter.EstimateChars(freed)))
 			m.steps.Write(steplog.Step{Turn: m.turnID, Kind: steplog.KindCompact, Outcome: steplog.OutcomeOK,
@@ -1403,7 +1408,7 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 			// До следующего ответа сервера заполнение — оценка, как после сводки.
 			m.meter.Used, m.meter.Exact = used, false
 			if float64(used) < m.cfg.Agent.CompactAt*float64(m.meter.Capacity) {
-				return nil, false
+				return m.dropCtx(from), false
 			}
 		}
 	}
@@ -1425,12 +1430,17 @@ func (m *Model) compactBeforeSend(text string) (tea.Cmd, bool) {
 	ctx, cancel := contextWithTimeout(300)
 	m.compacting, m.compactText, m.compactCancel = true, text, cancel
 	m.statusMsg = "сжимаю историю сводкой… Esc — прервать"
-	m.addBlock(block{kind: blockHint, text: fmt.Sprintf(
-		"окно заполнено на %d%% — сжимаю %d сообщений сводкой моделью %s, вопрос уйдёт следом",
-		100*m.meter.Used/m.meter.Capacity, len(older), model)})
-	return tea.Batch(m.spin.Tick, func() tea.Msg {
+	written := new(atomic.Int64)
+	m.ctxAnim.since, m.ctxAnim.written, m.ctxAnim.left = time.Now(), written, 0
+	m.addBlock(block{kind: blockCompact, text: fmt.Sprintf(
+		"сжатие истории: окно заполнено на %d%% (%s из %s, порог %.0f%%) — сжимаю %d сообщений сводкой "+
+			"моделью %s, вопрос уйдёт следом",
+		100*m.meter.Used/m.meter.Capacity, ctxmeter.FormatTokens(m.meter.Used), ctxmeter.FormatTokens(m.meter.Capacity),
+		100*m.cfg.Agent.CompactAt, len(older), model)})
+	return tea.Batch(m.spin.Tick, m.ctxAnimCmd(), func() tea.Msg {
 		defer cancel()
-		summary, stats, err := session.Summarize(ctx, client, model, older, keepAlive, options)
+		summary, stats, err := session.SummarizeWith(ctx, client, model, older, keepAlive, options,
+			func(n int) { written.Store(int64(n)) })
 		return compactDoneMsg{gen: gen, text: text, summary: summary, stats: stats, err: err}
 	}), true
 }
@@ -1476,6 +1486,11 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.compacting, m.compactText, m.compactCancel = false, "", nil
 	m.statusMsg = ""
+	from, took := m.meter.Used, ""
+	if !m.ctxAnim.since.IsZero() {
+		took = " за " + shortDuration(time.Since(m.ctxAnim.since))
+	}
+	m.ctxAnim.written = nil
 	keep := m.cfg.Agent.CompactKeep
 	var dropped int
 	if msg.err != nil {
@@ -1483,14 +1498,15 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 		// должен уйти, поэтому обрезаем как /compact и говорим об этом.
 		dropped = m.conv.Compact(keep)
 		m.addBlock(block{kind: blockError, text: fmt.Sprintf(
-			"сводка не удалась (%v) — история обрезана до %d сообщений, отброшено %d",
-			msg.err, m.conv.Len(), dropped)})
+			"сводка не удалась (%v) — история обрезана до %d сообщений, отброшено %d; окно %s",
+			msg.err, m.conv.Len(), dropped, ctxChange(from, m.estimatedUsed(), m.meter.Capacity))})
 		_ = m.logger.Write(chatlog.KindSystem, fmt.Sprintf("История обрезана без сводки: отброшено %d сообщений (%v).", dropped, msg.err))
 	} else {
 		dropped = m.conv.CompactWith(keep, msg.summary)
-		m.addBlock(block{kind: blockHint, text: fmt.Sprintf(
-			"история сжата: %d сообщений → сводка (≈%s токенов), оставлено %d последних",
-			dropped, ctxmeter.FormatTokens(ctxmeter.Estimate(msg.summary)), keep)})
+		m.addBlock(block{kind: blockCompact, text: fmt.Sprintf(
+			"история сжата%s: окно %s — %d сообщений → сводка (≈%s токенов), оставлено %d последних",
+			took, ctxChange(from, m.estimatedUsed(), m.meter.Capacity), dropped,
+			ctxmeter.FormatTokens(ctxmeter.Estimate(msg.summary)), keep)})
 		_ = m.logger.Write(chatlog.KindSystem, fmt.Sprintf("История сжата сводкой: %d сообщений.\n%s", dropped, msg.summary))
 	}
 	m.steps.Write(steplog.Step{Turn: m.turnID, Kind: steplog.KindCompact, Model: m.modelName,
@@ -1501,8 +1517,76 @@ func (m *Model) onCompactDone(msg compactDoneMsg) (tea.Model, tea.Cmd) {
 	// врёт, и повторного сжатия на нём не будет.
 	m.meter.Used = m.estimatedUsed()
 	m.meter.Exact = false
+	drop := m.dropCtx(from)
 	// Файлы /add, дочитанные во время сжатия, — до вопроса: их прикладывали
 	// к нему.
 	m.flushHeldAttach()
-	return m, m.send(msg.text)
+	return m, tea.Batch(drop, m.send(msg.text))
+}
+
+// ctxAnimEvery — шаг кадров индикатора при сжатии; ctxDropFrames — сколько
+// кадров идёт отсчёт от прежнего заполнения к новому.
+const (
+	ctxAnimEvery  = 100 * time.Millisecond
+	ctxDropFrames = 10
+)
+
+// ctxAnim — индикатор контекста при сжатии истории (этап 134, слово владельца
+// «индикатор контекста использовать как прогресс бар»). Пока модель пишет
+// сводку, по полосе бежит отрезок, рядом время и сколько написано; когда окно
+// освобождено, число за ctxDropFrames кадров опускается от прежнего значения
+// к новому. Окно освобождается разом, когда сводка готова, поэтому числа
+// отсчёта — переход между двумя настоящими значениями, а не замер.
+type ctxAnim struct {
+	from    int           // заполнение до сжатия — начало отсчёта
+	left    int           // кадров отсчёта осталось; 0 — отсчёта нет
+	frame   int           // кадр бегущего отрезка
+	since   time.Time     // начало сводки
+	written *atomic.Int64 // символов сводки написано: пишет команда сжатия, читает отрисовка
+	ticking bool          // кадр назначен: второй поток кадров ускорил бы анимацию вдвое
+}
+
+// ctxAnimMsg — следующий кадр индикатора при сжатии.
+type ctxAnimMsg struct{}
+
+// ctxAnimCmd назначает следующий кадр, если он ещё не назначен.
+func (m *Model) ctxAnimCmd() tea.Cmd {
+	if m.ctxAnim.ticking {
+		return nil
+	}
+	m.ctxAnim.ticking = true
+	return tea.Tick(ctxAnimEvery, func(time.Time) tea.Msg { return ctxAnimMsg{} })
+}
+
+// onCtxAnim двигает бегущий отрезок и отсчёт. Кадры кончаются, когда сжатия
+// нет и отсчёт дошёл до настоящего числа.
+func (m *Model) onCtxAnim() tea.Cmd {
+	m.ctxAnim.ticking = false
+	m.ctxAnim.frame++
+	if m.ctxAnim.left > 0 {
+		m.ctxAnim.left--
+	}
+	if m.compacting || m.ctxAnim.left > 0 {
+		return m.ctxAnimCmd()
+	}
+	return nil
+}
+
+// dropCtx начинает отсчёт индикатора от заполнения from к нынешнему.
+func (m *Model) dropCtx(from int) tea.Cmd {
+	if m.meter.Capacity <= 0 || from <= m.meter.Used {
+		return nil
+	}
+	m.ctxAnim.from, m.ctxAnim.left = from, ctxDropFrames
+	return m.ctxAnimCmd()
+}
+
+// ctxChange — «162k → ≈41k (62% → 16%)» для строк о сжатии: сколько окна было
+// занято и сколько стало по оценке.
+func ctxChange(from, to, capacity int) string {
+	s := ctxmeter.FormatTokens(from) + " → ≈" + ctxmeter.FormatTokens(to)
+	if capacity > 0 {
+		s += fmt.Sprintf(" (%d%% → %d%%)", 100*from/capacity, 100*to/capacity)
+	}
+	return s
 }

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Cyber-Watcher/ollchat/internal/config"
 	"github.com/Cyber-Watcher/ollchat/internal/ctxmeter"
 	"github.com/Cyber-Watcher/ollchat/internal/ollama"
 	"github.com/Cyber-Watcher/ollchat/internal/session"
@@ -85,10 +87,15 @@ func TestAgentCompactionPrunesToolOutputsFirst(t *testing.T) {
 	}
 	found := false
 	for _, b := range m.blocks {
-		found = found || b.kind == blockHint && strings.Contains(b.text, "убраны выводы 1 вызовов")
+		found = found || b.kind == blockCompact && strings.Contains(b.text, "убраны выводы 1 вызовов") &&
+			strings.Contains(b.text, "→ ≈")
 	}
 	if !found {
-		t.Fatal("человеку не сказано, что выводы убраны")
+		t.Fatal("человеку не сказано, что выводы убраны и сколько окна стало")
+	}
+	// Обрезка мгновенна, но индикатор её показывает: отсчёт от 9000 к новому.
+	if m.ctxAnim.left != ctxDropFrames || m.ctxAnim.from != 9000 {
+		t.Fatalf("отсчёт индикатора не начат: осталось кадров %d, от %d", m.ctxAnim.left, m.ctxAnim.from)
 	}
 }
 
@@ -120,7 +127,7 @@ func TestCompactStartsBeforeQuestion(t *testing.T) {
 	if cmd := m.send("ещё вопрос"); cmd == nil {
 		t.Fatal("ожидалась команда сжатия")
 	}
-	if got := lastBlock(m); got.kind != blockHint || !strings.Contains(got.text, "сжимаю") {
+	if got := lastBlock(m); got.kind != blockCompact || !strings.Contains(got.text, "сжимаю") {
 		t.Fatalf("ожидалась строка о сжатии: %+v", got)
 	}
 	if m.conv.Len() != 10 {
@@ -155,7 +162,7 @@ func TestCompactDoneAppliesSummary(t *testing.T) {
 	}
 	found := false
 	for _, b := range m.blocks {
-		if b.kind == blockHint && strings.Contains(b.text, "история сжата") {
+		if b.kind == blockCompact && strings.Contains(b.text, "история сжата") && strings.Contains(b.text, "900 → ≈") {
 			found = true
 		}
 	}
@@ -231,6 +238,80 @@ func TestCompactionTakesNoSecondQuestion(t *testing.T) {
 	msgs := m.conv.Messages()
 	if last := msgs[len(msgs)-1]; last.Content != "первый вопрос" {
 		t.Fatalf("после сжатия ушёл не первый вопрос: %q", last.Content)
+	}
+}
+
+// Пока модель пишет сводку, индикатор контекста — на оранжевой подложке, по
+// полосе бежит отрезок, рядом сколько сводки написано; когда сводка готова,
+// число опускается от прежнего к новому, по дороге не растёт, и кадры
+// кончаются (этап 134, слово владельца: «индикатор контекста использовать как
+// прогресс бар… показатель заполненности должен уменьшаться»).
+func TestCompactionIndicatorRunsThenCountsDown(t *testing.T) {
+	m := compactingModel(t)
+	if cmd := ask(m, "вопрос"); cmd == nil || !m.compacting {
+		t.Fatal("подготовка: сжатие не началось")
+	}
+	now := time.Now()
+	before := m.ctxIndicator(now)
+	if !strings.Contains(before, "сжатие") || !strings.Contains(before, "900/1.0k") {
+		t.Fatalf("индикатор во время сводки: %q", before)
+	}
+	m.Update(ctxAnimMsg{})
+	if after := m.ctxIndicator(now); after == before {
+		t.Error("отрезок по полосе не сдвинулся")
+	}
+	m.ctxAnim.written.Store(3000)
+	if want := "сводка ≈" + ctxmeter.FormatTokens(ctxmeter.EstimateChars(3000)); !strings.Contains(m.ctxIndicator(now), want) {
+		t.Errorf("не видно, сколько сводки написано (%q): %q", want, m.ctxIndicator(now))
+	}
+
+	m.Update(compactDoneMsg{gen: m.gen.compact, text: "вопрос", summary: "- сводка"})
+	if m.compacting || m.ctxAnim.left != ctxDropFrames {
+		t.Fatalf("после сводки: сжатие %v, кадров отсчёта %d", m.compacting, m.ctxAnim.left)
+	}
+	prev := m.ctxShown()
+	if prev != 900 || m.meter.Used >= 900 {
+		t.Fatalf("отсчёт должен идти от 900 вниз: показано %d, стало %d", prev, m.meter.Used)
+	}
+	var last tea.Cmd
+	for i := range ctxDropFrames {
+		_, last = m.Update(ctxAnimMsg{})
+		cur := m.ctxShown()
+		if cur > prev {
+			t.Fatalf("кадр %d: число выросло %d → %d", i, prev, cur)
+		}
+		prev = cur
+	}
+	if prev != m.meter.Used || last != nil {
+		t.Fatalf("отсчёт не дошёл до нынешнего числа или кадры не кончились: %d из %d, кадр назначен %v",
+			prev, m.meter.Used, last != nil)
+	}
+	if got, want := m.ctxIndicator(now), ctxStyle(m.meter.Percent()).Render(m.meter.String(ctxBarWidth)); got != want {
+		t.Errorf("после отсчёта индикатор не вернулся к обычному виду: %q", got)
+	}
+}
+
+// /compact — тоже сжатие: индикатор опускается от прежнего числа к новому.
+func TestManualCompactCountsDown(t *testing.T) {
+	m := newTestModel(t)
+	m.meter = ctxmeter.Meter{Capacity: 1000, Used: 900, Exact: true}
+	fillHistory(m, 10)
+	if cmd := m.compactCmd("2"); cmd == nil || m.ctxAnim.left != ctxDropFrames || m.ctxShown() != 900 {
+		t.Fatalf("отсчёт после /compact: команда %v, кадров %d, показано %d", cmd != nil, m.ctxAnim.left, m.ctxShown())
+	}
+}
+
+// Строка о сжатии в ленте — свой вид: бледная подсказка уезжала вверх под
+// выводом инструментов незамеченной.
+func TestCompactLineRendersApart(t *testing.T) {
+	r := newRenderer(80, false, config.Theme{Style: "dark"})
+	text := "история сжата: окно 900 → ≈300"
+	got := r.Render(block{kind: blockCompact, text: text}, false)
+	if !strings.Contains(got, "⇣") || !strings.Contains(got, "900 → ≈300") {
+		t.Fatalf("строка о сжатии: %q", got)
+	}
+	if got == r.Render(block{kind: blockHint, text: text}, false) {
+		t.Fatal("строка о сжатии выглядит как подсказка")
 	}
 }
 

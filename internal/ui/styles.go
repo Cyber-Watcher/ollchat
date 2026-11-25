@@ -78,6 +78,15 @@ var (
 	styStatusHot  = lipgloss.NewStyle().Foreground(colError)
 	styStatusMode = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 
+	// styCtxCompact — индикатор контекста, пока история сжимается, и отсчёт
+	// сразу после: тёмные цифры на оранжевой подложке. Оранжевый текст у
+	// индикатора уже значит «окно заполнено на 70–89 %», подложка с ним не
+	// путается (этап 134, выбор владельца). Строки о сжатии в ленте — метка
+	// того же вида и текст тем же оранжевым: глаз связывает их с индикатором.
+	styCtxCompact  = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(colWarn)
+	styCompactMark = styCtxCompact.Bold(true)
+	styCompactText = lipgloss.NewStyle().Foreground(colWarn)
+
 	styConfirmBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colWarn).
